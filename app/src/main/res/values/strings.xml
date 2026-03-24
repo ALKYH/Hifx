@@ -1,0 +1,152 @@
+<resources>
+    <string name="app_name">HiFX</string>
+
+    <string name="page_playback">播放</string>
+    <string name="page_effects">音效</string>
+    <string name="page_settings">设置</string>
+    <string name="page_player_detail">正在播放</string>
+
+    <string name="default_track_title">未选择音频</string>
+    <string name="default_track_subtitle">支持 FLAC / WAV / MP3 / AAC</string>
+    <string name="music_cover_placeholder">专辑封面占位图</string>
+    <string name="audio_session_id_default">Audio Session ID：0</string>
+    <string name="audio_session_id_value">Audio Session ID：%1$d</string>
+
+    <string name="action_play">播放</string>
+    <string name="action_pause">暂停</string>
+    <string name="action_stop">停止</string>
+    <string name="action_select_track">选择本地音频</string>
+    <string name="action_refresh_device_info">刷新设备输出信息</string>
+    <string name="action_grant_audio_permission">授权访问媒体音频</string>
+    <string name="action_select_scan_folder">选择扫描文件夹</string>
+    <string name="action_clear_scan_folder">恢复全媒体库扫描</string>
+    <string name="action_rescan_library">重新扫描媒体库</string>
+
+    <string name="library_title">本地媒体库</string>
+    <string name="library_scan_folder_default">扫描目录：全部媒体库</string>
+    <string name="library_tab_all">全部</string>
+    <string name="library_tab_album">专辑</string>
+    <string name="library_tab_artist">艺术家</string>
+    <string name="library_empty">没有可播放的曲目</string>
+    <string name="library_permission_required">请先授权音频读取权限</string>
+    <string name="library_empty_with_error">媒体库为空：%1$s</string>
+    <string name="track_subtitle_format">%1$s · %2$s</string>
+
+    <string name="effects_master_switch">启用音效处理</string>
+    <string name="effects_master_hint">关闭后将旁路所有音效处理模块。</string>
+    <string name="effects_tab_eq">EQ</string>
+    <string name="effects_tab_reverb">混响</string>
+    <string name="effects_tab_other">其他</string>
+    <string name="effects_sound_color">音色调节</string>
+    <string name="effects_bass">低频增强</string>
+    <string name="effects_virtualizer">空间环绕</string>
+    <string name="effects_loudness">响度增益</string>
+    <string name="effects_equalizer">8 段均衡器</string>
+    <string name="effects_eq_hint">纵向滑条调节，每段显示频率与增益（dB）。</string>
+    <string name="effects_reverb_title">空间化混响</string>
+    <string name="effects_spatial_enabled">启用空间化模拟</string>
+    <string name="effects_convolution_title">卷积混响（IRS）</string>
+    <string name="effects_convolution_enabled">启用卷积混响</string>
+    <string name="effects_convolution_import">导入 IRS</string>
+    <string name="effects_convolution_clear">清除</string>
+    <string name="effects_convolution_ir_not_loaded">当前 IRS：未导入</string>
+    <string name="effects_convolution_ir_name_value">当前 IRS：%1$s</string>
+    <string name="effects_convolution_wet_value">卷积湿声：%1$d%%</string>
+    <string name="effects_spatial_distance_default">距离：1.00 m</string>
+    <string name="effects_spatial_distance_value">距离：%1$s m</string>
+    <string name="effects_spatial_gain_default">主增益：0.00 dB</string>
+    <string name="effects_spatial_gain_value">主增益：%1$s dB</string>
+    <string name="effects_channel_position_option">声道位置</string>
+    <string name="effects_channel_position_hint">点击后在下方展开 XYZ 位置面板；默认左右联动，开启声道分离后可独立调节。</string>
+    <string name="effects_channel_position_panel_title">声道 XYZ 位置</string>
+    <string name="effects_channel_separate_switch">启用声道分离调节</string>
+    <string name="effects_channel_mode_linked">当前模式：左右联动</string>
+    <string name="effects_channel_mode_split">当前模式：左右分离</string>
+    <string name="effects_channel_position_summary_default">X：+0  Y：+0  Z：+0</string>
+    <string name="effects_channel_position_summary_linked">联动  X：%1$+d  Y：%2$+d  Z：%3$+d</string>
+    <string name="effects_channel_position_summary_split">L（%1$+d,%2$+d,%3$+d）  R（%4$+d,%5$+d,%6$+d）</string>
+    <string name="effects_channel_linked_label">联动控制（左右声道同时）</string>
+    <string name="effects_channel_left_label">左声道</string>
+    <string name="effects_channel_right_label">右声道</string>
+    <string name="effects_pos_x">左右位置（X）</string>
+    <string name="effects_pos_y">上下位置（Y）</string>
+    <string name="effects_pos_z">前后位置（Z）</string>
+    <string name="effects_pos_hint">在极坐标网格内拖动圆点设定前后/左右，侧边纵向滑条调节高度。</string>
+    <string name="effects_pos_xz_value">X：%1$+d  Z：%2$+d  半径：%3$d%%</string>
+    <string name="effects_radius_scale_value">调节半径：%1$d%%</string>
+    <string name="effects_pos_z_slider_value">Z 轴滑条：%1$+d</string>
+    <string name="effects_pos_x_slider_value">X 轴滑条：%1$+d</string>
+    <string name="effects_room_size">房间尺寸</string>
+    <string name="effects_room_damping">高频阻尼</string>
+    <string name="effects_early_reflection">早期反射</string>
+    <string name="effects_wet_mix">湿声比例</string>
+    <string name="effects_perceptual_comp">感知压缩</string>
+    <string name="effects_axis_value">%1$+d</string>
+    <string name="effects_percent_value">%1$d%%</string>
+    <string name="effects_gain_db_value">%1$.1f dB</string>
+    <string name="effects_freq_hz_value">%1$d Hz</string>
+    <string name="effects_freq_khz_value">%1$.1f kHz</string>
+    <string name="effect_percent_default">0%</string>
+    <string name="effect_percent_value">%1$d%%</string>
+    <string name="effect_gain_default">0 mB</string>
+    <string name="effect_gain_value">%1$d mB</string>
+    <string name="effect_band_default">0.0 dB</string>
+    <string name="effect_band_value">%1$.1f dB</string>
+
+    <string name="settings_menu_library">媒体库</string>
+    <string name="settings_menu_audio">音频</string>
+    <string name="settings_menu_theme">主题</string>
+    <string name="settings_menu_about">关于</string>
+    <string name="settings_library_title">媒体库设置</string>
+
+    <string name="settings_hifi_switch">开启 Hi-Fi 输出优先</string>
+    <string name="settings_hifi_on_hint">已优先启用高保真输出策略，并尝试硬件 Offload。</string>
+    <string name="settings_hifi_off_hint">当前为标准输出策略，可按需开启 Hi-Fi。</string>
+    <string name="settings_sample_rate_default">输出采样率：未知</string>
+    <string name="settings_buffer_default">输出缓冲帧：未知</string>
+    <string name="settings_offload_default">硬件 Offload：未知</string>
+    <string name="settings_sample_rate_value">输出采样率：%1$s Hz</string>
+    <string name="settings_buffer_value">输出缓冲帧：%1$s</string>
+    <string name="settings_offload_value">硬件 Offload：%1$s</string>
+
+    <string name="settings_theme_title">主题设置</string>
+    <string name="theme_mode_system">跟随系统</string>
+    <string name="theme_mode_light">浅色模式</string>
+    <string name="theme_mode_dark">深色模式</string>
+
+    <string name="settings_about_title">关于 HiFX</string>
+    <string name="settings_about_version">版本：%1$s</string>
+    <string name="settings_about_desc">HiFX 是基于 Material You 的本地高保真音乐播放器。</string>
+
+    <string name="unknown_value">未知</string>
+    <string name="supported">支持</string>
+    <string name="not_supported">不支持</string>
+
+    <string name="notification_channel_music">HiFX 播放控制</string>
+    <string name="notification_channel_music_desc">用于后台播放与媒体控制</string>
+
+    <string name="title_home">Home</string>
+    <string name="title_dashboard">Dashboard</string>
+    <string name="title_notifications">Notifications</string>
+    <string name="navigation_drawer_open">Open navigation drawer</string>
+    <string name="navigation_drawer_close">Close navigation drawer</string>
+
+    <string name="effects_pos_xz_dual_value">L(X:%1$+d Z:%2$+d)  R(X:%3$+d Z:%4$+d)</string>
+    <string name="effects_pos_x_selected_value">%1$s X 轴：%2$+d</string>
+    <string name="effects_pos_y_selected_value">%1$s Y 轴：%2$+d</string>
+    <string name="effects_pos_z_selected_value">%1$s Z 轴：%2$+d</string>
+    <string name="effects_channel_left_short">L</string>
+    <string name="effects_channel_right_short">R</string>
+    <string name="effects_irs_file_required">仅支持导入 .irs 文件</string>
+    <string name="effects_surround_mode_title">环绕声模式</string>
+    <string name="effects_surround_mode_hint">使用 HRTF 近似模拟多声道监听（立体声 / 5.1 / 7.1）</string>
+    <string name="effects_surround_mode_stereo">立体声</string>
+    <string name="effects_surround_mode_5_1">5.1</string>
+    <string name="effects_surround_mode_7_1">7.1</string>
+    <string name="effects_pos_hint_dual">在同一极坐标网格中拖动 L/R 圆点；点击圆点可选中，并用下方 X/Y/Z 滑条精调。</string>
+    <string name="effects_reverb_meter_default">实时混响：0%</string>
+    <string name="effects_reverb_meter_value">实时混响：%1$d%%</string>
+    <string name="library_alpha_index_desc">字母快速索引</string>
+    <string name="action_seek_backward">后退 10 秒</string>
+    <string name="action_seek_forward">前进 10 秒</string>
+</resources>
