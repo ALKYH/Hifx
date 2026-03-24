@@ -4,6 +4,7 @@ import android.content.Context
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
+import android.graphics.Path
 import android.util.AttributeSet
 import android.view.MotionEvent
 import android.view.View
@@ -26,6 +27,25 @@ class SpatialPadView @JvmOverloads constructor(
         style = Paint.Style.STROKE
         color = Color.parseColor("#66FFFFFF")
         strokeWidth = 2f
+    }
+    private val headFillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.FILL
+        color = Color.parseColor("#35E0E0E0")
+    }
+    private val headStrokePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.STROKE
+        color = Color.parseColor("#CFEAEAEA")
+        strokeWidth = 2f * density
+    }
+    private val earPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.STROKE
+        color = Color.parseColor("#9FD0D0D0")
+        strokeWidth = 1.8f * density
+    }
+    private val nosePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.STROKE
+        color = Color.parseColor("#B5FFFFFF")
+        strokeWidth = 1.8f * density
     }
     private val axisPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.STROKE
@@ -65,7 +85,8 @@ class SpatialPadView @JvmOverloads constructor(
     private var selectedHandle = Handle.LEFT
     private var draggingHandle: Handle? = null
     private var linkedMode = true
-    private var controlRadiusPercent: Int = 100
+    private var controlRadiusCm: Int = DEFAULT_CONTROL_RADIUS_CM
+    private var headRadiusCm: Float = DEFAULT_HEAD_RADIUS_CM
 
     var onSelectionChanged: ((selected: Handle, fromUser: Boolean) -> Unit)? = null
     var onPositionChanged: ((
@@ -90,19 +111,34 @@ class SpatialPadView @JvmOverloads constructor(
     }
 
     fun setControlRadiusPercent(percent: Int, notify: Boolean = false) {
-        val clamped = percent.coerceIn(20, 100)
-        if (clamped == controlRadiusPercent) {
+        setControlRadiusCm(percent, notify)
+    }
+
+    fun setControlRadiusCm(radiusCm: Int, notify: Boolean = false) {
+        val clamped = radiusCm.coerceIn(MIN_CONTROL_RADIUS_CM, MAX_CONTROL_RADIUS_CM)
+        if (clamped == controlRadiusCm) {
             return
         }
         val leftX = currentOutputX(leftXNorm)
         val leftZ = currentOutputZ(leftZNorm)
         val rightX = currentOutputX(rightXNorm)
         val rightZ = currentOutputZ(rightZNorm)
-        controlRadiusPercent = clamped
+        controlRadiusCm = clamped
         setHandles(leftX, leftZ, rightX, rightZ, notify)
     }
 
-    fun getControlRadiusPercent(): Int = controlRadiusPercent
+    fun getControlRadiusPercent(): Int = controlRadiusCm
+
+    fun getControlRadiusCm(): Int = controlRadiusCm
+
+    fun setHeadRadiusCm(valueCm: Float) {
+        val clamped = valueCm.coerceIn(6.5f, 12f)
+        if (kotlin.math.abs(clamped - headRadiusCm) < 0.001f) {
+            return
+        }
+        headRadiusCm = clamped
+        invalidate()
+    }
 
     fun setHandles(leftX: Int, leftZ: Int, rightX: Int, rightZ: Int, notify: Boolean = false) {
         leftXNorm = toNormalized(leftX)
@@ -165,6 +201,7 @@ class SpatialPadView @JvmOverloads constructor(
         }
         canvas.drawLine(cx - radius, cy, cx + radius, cy, axisPaint)
         canvas.drawLine(cx, cy - radius, cx, cy + radius, axisPaint)
+        drawHeadContour(canvas, cx, cy, radius)
 
         drawHandle(
             canvas = canvas,
@@ -188,6 +225,26 @@ class SpatialPadView @JvmOverloads constructor(
             label = "R",
             selected = selectedHandle == Handle.RIGHT
         )
+    }
+
+    private fun drawHeadContour(canvas: Canvas, cx: Float, cy: Float, padRadius: Float) {
+        val radiusRatio = (headRadiusCm / controlRadiusCm.toFloat()).coerceIn(0.07f, 0.62f)
+        val headRadiusPx = (padRadius * radiusRatio).coerceAtLeast(8f * density)
+        canvas.drawCircle(cx, cy, headRadiusPx, headFillPaint)
+        canvas.drawCircle(cx, cy, headRadiusPx, headStrokePaint)
+
+        val earOffsetX = headRadiusPx * 1.02f
+        val earRadius = (headRadiusPx * 0.28f).coerceAtLeast(3f * density)
+        canvas.drawCircle(cx - earOffsetX, cy, earRadius, earPaint)
+        canvas.drawCircle(cx + earOffsetX, cy, earRadius, earPaint)
+
+        val nosePath = Path().apply {
+            moveTo(cx, cy - headRadiusPx * 1.08f)
+            lineTo(cx - headRadiusPx * 0.18f, cy - headRadiusPx * 0.84f)
+            moveTo(cx, cy - headRadiusPx * 1.08f)
+            lineTo(cx + headRadiusPx * 0.18f, cy - headRadiusPx * 0.84f)
+        }
+        canvas.drawPath(nosePath, nosePaint)
     }
 
     override fun onTouchEvent(event: MotionEvent): Boolean {
@@ -322,16 +379,16 @@ class SpatialPadView @JvmOverloads constructor(
     }
 
     private fun toNormalized(value: Int): Float {
-        val scale = controlRadiusPercent.toFloat().coerceAtLeast(1f)
+        val scale = controlRadiusCm.toFloat().coerceAtLeast(1f)
         return (value / scale).coerceIn(-1f, 1f)
     }
 
     private fun currentOutputX(normalized: Float): Int {
-        return (normalized * controlRadiusPercent).roundToInt().coerceIn(-100, 100)
+        return (normalized * controlRadiusCm).roundToInt().coerceIn(-MAX_CONTROL_RADIUS_CM, MAX_CONTROL_RADIUS_CM)
     }
 
     private fun currentOutputZ(normalized: Float): Int {
-        return (normalized * controlRadiusPercent).roundToInt().coerceIn(-100, 100)
+        return (normalized * controlRadiusCm).roundToInt().coerceIn(-MAX_CONTROL_RADIUS_CM, MAX_CONTROL_RADIUS_CM)
     }
 
     private fun clampToUnit(x: Float, z: Float): Pair<Float, Float> {
@@ -344,4 +401,11 @@ class SpatialPadView @JvmOverloads constructor(
 
     private val density: Float
         get() = resources.displayMetrics.density
+
+    companion object {
+        private const val MIN_CONTROL_RADIUS_CM = 20
+        private const val MAX_CONTROL_RADIUS_CM = 120
+        private const val DEFAULT_CONTROL_RADIUS_CM = 100
+        private const val DEFAULT_HEAD_RADIUS_CM = 8.7f
+    }
 }

@@ -139,15 +139,65 @@
             <LinearLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
+                android:layout_marginBottom="12dp"
+                android:gravity="center_vertical"
+                android:orientation="horizontal">
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/button_shuffle"
+                    style="@style/Widget.Material3.Button.TextButton"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="@string/action_shuffle" />
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/button_repeat_mode"
+                    style="@style/Widget.Material3.Button.TextButton"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="@string/action_repeat_mode" />
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/button_sleep_timer"
+                    style="@style/Widget.Material3.Button.TextButton"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="@string/action_sleep_timer" />
+            </LinearLayout>
+
+            <TextView
+                android:id="@+id/text_sleep_timer"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginBottom="10dp"
+                android:gravity="center"
+                android:text="@string/player_sleep_timer_off"
+                android:textAppearance="?attr/textAppearanceLabelMedium" />
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
                 android:gravity="center"
                 android:orientation="horizontal">
 
                 <com.google.android.material.button.MaterialButton
+                    android:id="@+id/button_previous_track"
+                    style="@style/Widget.Material3.Button.Icon"
+                    android:layout_width="52dp"
+                    android:layout_height="52dp"
+                    android:layout_marginEnd="8dp"
+                    android:insetTop="0dp"
+                    android:insetBottom="0dp"
+                    app:icon="@android:drawable/ic_media_previous" />
+
+                <com.google.android.material.button.MaterialButton
                     android:id="@+id/button_seek_back"
                     style="@style/Widget.Material3.Button.Icon"
-                    android:layout_width="56dp"
-                    android:layout_height="56dp"
-                    android:layout_marginEnd="12dp"
+                    android:layout_width="52dp"
+                    android:layout_height="52dp"
+                    android:layout_marginEnd="8dp"
                     android:insetTop="0dp"
                     android:insetBottom="0dp"
                     app:icon="@android:drawable/ic_media_rew" />
@@ -165,12 +215,22 @@
                 <com.google.android.material.button.MaterialButton
                     android:id="@+id/button_seek_forward"
                     style="@style/Widget.Material3.Button.Icon"
-                    android:layout_width="56dp"
-                    android:layout_height="56dp"
-                    android:layout_marginStart="12dp"
+                    android:layout_width="52dp"
+                    android:layout_height="52dp"
+                    android:layout_marginStart="8dp"
                     android:insetTop="0dp"
                     android:insetBottom="0dp"
                     app:icon="@android:drawable/ic_media_ff" />
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/button_next_track"
+                    style="@style/Widget.Material3.Button.Icon"
+                    android:layout_width="52dp"
+                    android:layout_height="52dp"
+                    android:layout_marginStart="8dp"
+                    android:insetTop="0dp"
+                    android:insetBottom="0dp"
+                    app:icon="@android:drawable/ic_media_next" />
             </LinearLayout>
         </LinearLayout>
     </ScrollView>

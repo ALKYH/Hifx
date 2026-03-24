@@ -52,6 +52,8 @@ class AudioPlaybackService : Service() {
             ACTION_PLAY -> AudioEngine.play()
             ACTION_PAUSE -> AudioEngine.pause()
             ACTION_TOGGLE_PLAY_PAUSE -> AudioEngine.togglePlayPause()
+            ACTION_SKIP_PREVIOUS -> AudioEngine.skipToPreviousTrack()
+            ACTION_SKIP_NEXT -> AudioEngine.skipToNextTrack()
             ACTION_SEEK_BACKWARD -> AudioEngine.seekBy(-10_000L)
             ACTION_SEEK_FORWARD -> AudioEngine.seekBy(10_000L)
             ACTION_STOP_PLAYBACK -> AudioEngine.clearCurrentTrack()
@@ -93,17 +95,17 @@ class AudioPlaybackService : Service() {
             },
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
-        val rewindIntent = MediaButtonReceiver.buildMediaButtonPendingIntent(
+        val previousIntent = MediaButtonReceiver.buildMediaButtonPendingIntent(
             this,
-            PlaybackStateCompat.ACTION_REWIND
+            PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS
         )
         val playPauseIntent = MediaButtonReceiver.buildMediaButtonPendingIntent(
             this,
             PlaybackStateCompat.ACTION_PLAY_PAUSE
         )
-        val forwardIntent = MediaButtonReceiver.buildMediaButtonPendingIntent(
+        val nextIntent = MediaButtonReceiver.buildMediaButtonPendingIntent(
             this,
-            PlaybackStateCompat.ACTION_FAST_FORWARD
+            PlaybackStateCompat.ACTION_SKIP_TO_NEXT
         )
         val stopIntent = MediaButtonReceiver.buildMediaButtonPendingIntent(
             this,
@@ -123,9 +125,9 @@ class AudioPlaybackService : Service() {
             .setOngoing(state.isPlaying)
             .setDeleteIntent(stopIntent)
             .addAction(
-                android.R.drawable.ic_media_rew,
-                getString(R.string.action_seek_backward),
-                rewindIntent
+                android.R.drawable.ic_media_previous,
+                getString(R.string.action_previous_track),
+                previousIntent
             )
             .addAction(
                 if (state.isPlaying) android.R.drawable.ic_media_pause else android.R.drawable.ic_media_play,
@@ -133,9 +135,9 @@ class AudioPlaybackService : Service() {
                 playPauseIntent
             )
             .addAction(
-                android.R.drawable.ic_media_ff,
-                getString(R.string.action_seek_forward),
-                forwardIntent
+                android.R.drawable.ic_media_next,
+                getString(R.string.action_next_track),
+                nextIntent
             )
             .addAction(
                 android.R.drawable.ic_menu_close_clear_cancel,
@@ -195,6 +197,14 @@ class AudioPlaybackService : Service() {
                     AudioEngine.seekTo(pos)
                 }
 
+                override fun onSkipToNext() {
+                    AudioEngine.skipToNextTrack()
+                }
+
+                override fun onSkipToPrevious() {
+                    AudioEngine.skipToPreviousTrack()
+                }
+
                 override fun onFastForward() {
                     AudioEngine.seekBy(10_000L)
                 }
@@ -219,6 +229,8 @@ class AudioPlaybackService : Service() {
             PlaybackStateCompat.ACTION_PLAY_PAUSE or
             PlaybackStateCompat.ACTION_STOP or
             PlaybackStateCompat.ACTION_SEEK_TO or
+            PlaybackStateCompat.ACTION_SKIP_TO_NEXT or
+            PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS or
             PlaybackStateCompat.ACTION_FAST_FORWARD or
             PlaybackStateCompat.ACTION_REWIND
 
@@ -274,6 +286,8 @@ class AudioPlaybackService : Service() {
         const val ACTION_TOGGLE_PLAY_PAUSE = "com.example.hifx.action.TOGGLE_PLAY_PAUSE"
         const val ACTION_PLAY = "com.example.hifx.action.PLAY"
         const val ACTION_PAUSE = "com.example.hifx.action.PAUSE"
+        const val ACTION_SKIP_PREVIOUS = "com.example.hifx.action.SKIP_PREVIOUS"
+        const val ACTION_SKIP_NEXT = "com.example.hifx.action.SKIP_NEXT"
         const val ACTION_SEEK_BACKWARD = "com.example.hifx.action.SEEK_BACKWARD"
         const val ACTION_SEEK_FORWARD = "com.example.hifx.action.SEEK_FORWARD"
         const val ACTION_STOP_PLAYBACK = "com.example.hifx.action.STOP_PLAYBACK"

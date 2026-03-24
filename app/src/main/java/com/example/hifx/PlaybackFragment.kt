@@ -29,6 +29,7 @@ class PlaybackFragment : Fragment() {
     private lateinit var adapter: MusicLibraryAdapter
     private lateinit var layoutManager: LinearLayoutManager
     private var selectedTab: LibraryTab = LibraryTab.ALL
+    private var currentPlayableTracks: List<com.example.hifx.audio.LibraryTrack> = emptyList()
     private var letterToPosition: Map<String, Int> = emptyMap()
     private val indexLetters: List<String> = buildList {
         for (code in 'A'.code..'Z'.code) add(code.toChar().toString())
@@ -56,7 +57,12 @@ class PlaybackFragment : Fragment() {
 
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         adapter = MusicLibraryAdapter { track ->
-            AudioEngine.playTrack(track)
+            val startIndex = currentPlayableTracks.indexOfFirst { it.id == track.id }
+            if (startIndex >= 0) {
+                AudioEngine.playTrackList(currentPlayableTracks, startIndex)
+            } else {
+                AudioEngine.playTrack(track)
+            }
             startActivity(Intent(requireContext(), PlayerActivity::class.java))
         }
         layoutManager = LinearLayoutManager(requireContext())
@@ -115,6 +121,11 @@ class PlaybackFragment : Fragment() {
             LibraryTab.ALL -> state.tracks.map { LibraryListRow.TrackRow(it) }
             LibraryTab.ALBUM -> buildSectionRows(state.albums)
             LibraryTab.ARTIST -> buildSectionRows(state.artists)
+        }
+        currentPlayableTracks = when (selectedTab) {
+            LibraryTab.ALL -> state.tracks
+            LibraryTab.ALBUM -> state.albums.flatMap { it.tracks }
+            LibraryTab.ARTIST -> state.artists.flatMap { it.tracks }
         }
         adapter.submitRows(rows)
         rebuildLetterIndex(rows)

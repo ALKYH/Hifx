@@ -8,6 +8,7 @@ import java.nio.ByteOrder
 import kotlin.math.PI
 import kotlin.math.abs
 import kotlin.math.atan2
+import kotlin.math.cos
 import kotlin.math.exp
 import kotlin.math.max
 import kotlin.math.min
@@ -33,13 +34,31 @@ internal data class HrtfRenderConfig(
     val crossfeed: Float = 0.28f,
     val externalization: Float = 0.55f,
     val useHrtfDatabase: Boolean = true,
-    val surroundMode: Int = 0
+    val surroundMode: Int = 0,
+    val frontLeftGain: Float = 1f,
+    val frontRightGain: Float = 1f,
+    val centerGain: Float = 1f,
+    val lfeGain: Float = 1f,
+    val surroundLeftGain: Float = 1f,
+    val surroundRightGain: Float = 1f,
+    val rearLeftGain: Float = 1f,
+    val rearRightGain: Float = 1f
 )
 
 private data class HrtfBin(
     val itdScale: Float,
     val farShadowDb: Float,
-    val farCutoffHz: Float
+    val farCutoffHz: Float,
+    val farNotchHz: Float,
+    val farNotchDepthDb: Float
+)
+
+private data class BiquadCoefficients(
+    val b0: Float,
+    val b1: Float,
+    val b2: Float,
+    val a1: Float,
+    val a2: Float
 )
 
 private data class HrtfCoefficients(
@@ -58,7 +77,11 @@ private data class HrtfCoefficients(
     val earlyMix: Float,
     val earlyDelaySamples: Float,
     val azimuthPan: Float,
-    val lateralFocus: Float
+    val lateralFocus: Float,
+    val leftNotch: BiquadCoefficients,
+    val rightNotch: BiquadCoefficients,
+    val leftNotchMix: Float,
+    val rightNotchMix: Float
 )
 
 private class SourceRenderState {
@@ -69,6 +92,14 @@ private class SourceRenderState {
     var earWriteIndex = 0
     var leftLpState = 0f
     var rightLpState = 0f
+    var leftNotchX1 = 0f
+    var leftNotchX2 = 0f
+    var leftNotchY1 = 0f
+    var leftNotchY2 = 0f
+    var rightNotchX1 = 0f
+    var rightNotchX2 = 0f
+    var rightNotchY1 = 0f
+    var rightNotchY2 = 0f
 
     fun clear() {
         sourceDelay.fill(0f)
@@ -78,12 +109,24 @@ private class SourceRenderState {
         earWriteIndex = 0
         leftLpState = 0f
         rightLpState = 0f
+        leftNotchX1 = 0f
+        leftNotchX2 = 0f
+        leftNotchY1 = 0f
+        leftNotchY2 = 0f
+        rightNotchX1 = 0f
+        rightNotchX2 = 0f
+        rightNotchY1 = 0f
+        rightNotchY2 = 0f
     }
 }
 
 internal class HrtfBinauralProcessor : BaseAudioProcessor() {
     @Volatile
     private var config = HrtfRenderConfig()
+    @Volatile
+    private var pendingStateReset = false
+
+    private var wasProcessing = false
 
     private val leftSourceState = SourceRenderState()
     private val rightSourceState = SourceRenderState()
@@ -95,8 +138,21 @@ internal class HrtfBinauralProcessor : BaseAudioProcessor() {
     private val rearRightState = SourceRenderState()
 
     private var lfeMonoState = 0f
+    private var lfeSecondState = 0f
+    private var bassMgmtLeftState = 0f
+    private var bassMgmtRightState = 0f
+    private var centerHighPassState = 0f
+    private var centerBandLowPassState = 0f
+    private var surroundHighPassState = 0f
+    private var surroundBandLowPassState = 0f
+    private var rearHighPassState = 0f
+    private var rearBandLowPassState = 0f
 
     fun updateConfig(newConfig: HrtfRenderConfig) {
+        val previousConfig = config
+        val previousProcessing =
+            previousConfig.enabled && previousConfig.spatialEnabled && previousConfig.blend > 0.001f
+
         val clampedLeftX = newConfig.leftXNorm.coerceIn(-1f, 1f)
         val clampedLeftY = newConfig.leftYNorm.coerceIn(-1f, 1f)
         val clampedLeftZ = newConfig.leftZNorm.coerceIn(-1f, 1f)
@@ -104,7 +160,7 @@ internal class HrtfBinauralProcessor : BaseAudioProcessor() {
         val clampedRightY = if (newConfig.channelSeparated) newConfig.rightYNorm.coerceIn(-1f, 1f) else clampedLeftY
         val clampedRightZ = if (newConfig.channelSeparated) newConfig.rightZNorm.coerceIn(-1f, 1f) else clampedLeftZ
 
-        config = newConfig.copy(
+        val updated = newConfig.copy(
             leftXNorm = clampedLeftX,
             leftYNorm = clampedLeftY,
             leftZNorm = clampedLeftZ,
@@ -117,8 +173,21 @@ internal class HrtfBinauralProcessor : BaseAudioProcessor() {
             blend = newConfig.blend.coerceIn(0f, 1f),
             crossfeed = newConfig.crossfeed.coerceIn(0f, 1f),
             externalization = newConfig.externalization.coerceIn(0f, 1f),
-            surroundMode = newConfig.surroundMode.coerceIn(0, 2)
+            surroundMode = newConfig.surroundMode.coerceIn(0, 2),
+            frontLeftGain = newConfig.frontLeftGain.coerceIn(0f, 2f),
+            frontRightGain = newConfig.frontRightGain.coerceIn(0f, 2f),
+            centerGain = newConfig.centerGain.coerceIn(0f, 2f),
+            lfeGain = newConfig.lfeGain.coerceIn(0f, 2f),
+            surroundLeftGain = newConfig.surroundLeftGain.coerceIn(0f, 2f),
+            surroundRightGain = newConfig.surroundRightGain.coerceIn(0f, 2f),
+            rearLeftGain = newConfig.rearLeftGain.coerceIn(0f, 2f),
+            rearRightGain = newConfig.rearRightGain.coerceIn(0f, 2f)
         )
+        config = updated
+        val nextProcessing = updated.enabled && updated.spatialEnabled && updated.blend > 0.001f
+        if (previousProcessing != nextProcessing) {
+            pendingStateReset = true
+        }
     }
 
     override fun onConfigure(inputAudioFormat: AudioProcessor.AudioFormat): AudioProcessor.AudioFormat {
@@ -136,22 +205,32 @@ internal class HrtfBinauralProcessor : BaseAudioProcessor() {
         inputBuffer.order(ByteOrder.LITTLE_ENDIAN)
         outputBuffer.order(ByteOrder.LITTLE_ENDIAN)
 
+        if (pendingStateReset) {
+            clearInternalState()
+            pendingStateReset = false
+            wasProcessing = false
+        }
+
         val localConfig = config
         val shouldProcess = localConfig.enabled && localConfig.spatialEnabled && localConfig.blend > 0.001f
+        if (shouldProcess != wasProcessing) {
+            clearInternalState()
+            wasProcessing = shouldProcess
+        }
         if (!shouldProcess) {
             outputBuffer.put(inputBuffer)
             outputBuffer.flip()
             return
         }
 
-        val leftCoeff = buildCoefficients(
+        val stereoLeftCoeff = buildCoefficients(
             xNorm = localConfig.leftXNorm,
             yNorm = localConfig.leftYNorm,
             zNorm = localConfig.leftZNorm,
             config = localConfig,
             sampleRate = inputAudioFormat.sampleRate
         )
-        val rightCoeff = buildCoefficients(
+        val stereoRightCoeff = buildCoefficients(
             xNorm = localConfig.rightXNorm,
             yNorm = localConfig.rightYNorm,
             zNorm = localConfig.rightZNorm,
@@ -159,76 +238,46 @@ internal class HrtfBinauralProcessor : BaseAudioProcessor() {
             sampleRate = inputAudioFormat.sampleRate
         )
         val surroundMode = localConfig.surroundMode.coerceIn(0, 2)
-        val centerCoeff = if (surroundMode != 0) {
-            buildCoefficients(
-                xNorm = 0f,
-                yNorm = 0f,
-                zNorm = 0.85f,
+        fun coeffFromAzimuth(azimuthDeg: Float, yNorm: Float = 0f): HrtfCoefficients {
+            val radians = Math.toRadians(azimuthDeg.toDouble())
+            return buildCoefficients(
+                xNorm = sin(radians).toFloat().coerceIn(-1f, 1f),
+                yNorm = yNorm.coerceIn(-1f, 1f),
+                zNorm = cos(radians).toFloat().coerceIn(-1f, 1f),
                 config = localConfig,
                 sampleRate = inputAudioFormat.sampleRate
             )
-        } else {
-            null
         }
-        val lfeCoeff = if (surroundMode != 0) {
-            buildCoefficients(
-                xNorm = 0f,
-                yNorm = -0.25f,
-                zNorm = 0.35f,
-                config = localConfig,
-                sampleRate = inputAudioFormat.sampleRate
-            )
-        } else {
-            null
-        }
-        val surroundLeftCoeff = if (surroundMode != 0) {
-            buildCoefficients(
-                xNorm = -0.98f,
-                yNorm = 0f,
-                zNorm = -0.22f,
-                config = localConfig,
-                sampleRate = inputAudioFormat.sampleRate
-            )
-        } else {
-            null
-        }
-        val surroundRightCoeff = if (surroundMode != 0) {
-            buildCoefficients(
-                xNorm = 0.98f,
-                yNorm = 0f,
-                zNorm = -0.22f,
-                config = localConfig,
-                sampleRate = inputAudioFormat.sampleRate
-            )
-        } else {
-            null
-        }
-        val rearLeftCoeff = if (surroundMode == 2) {
-            buildCoefficients(
-                xNorm = -0.74f,
-                yNorm = 0f,
-                zNorm = -0.88f,
-                config = localConfig,
-                sampleRate = inputAudioFormat.sampleRate
-            )
-        } else {
-            null
-        }
-        val rearRightCoeff = if (surroundMode == 2) {
-            buildCoefficients(
-                xNorm = 0.74f,
-                yNorm = 0f,
-                zNorm = -0.88f,
-                config = localConfig,
-                sampleRate = inputAudioFormat.sampleRate
-            )
-        } else {
-            null
-        }
+
+        val frontLeftCoeff = if (surroundMode == 0) stereoLeftCoeff else coeffFromAzimuth(-30f)
+        val frontRightCoeff = if (surroundMode == 0) stereoRightCoeff else coeffFromAzimuth(30f)
+        val centerCoeff = if (surroundMode != 0) coeffFromAzimuth(0f, yNorm = 0.02f) else null
+        val lfeCoeff = if (surroundMode != 0) coeffFromAzimuth(0f, yNorm = -0.12f) else null
+        val sideAzimuth = if (surroundMode == 1) 110f else 90f
+        val surroundLeftCoeff = if (surroundMode != 0) coeffFromAzimuth(-sideAzimuth) else null
+        val surroundRightCoeff = if (surroundMode != 0) coeffFromAzimuth(sideAzimuth) else null
+        val rearLeftCoeff = if (surroundMode == 2) coeffFromAzimuth(-150f) else null
+        val rearRightCoeff = if (surroundMode == 2) coeffFromAzimuth(150f) else null
+        val frontLeftChannelGain = localConfig.frontLeftGain.coerceIn(0f, 2f)
+        val frontRightChannelGain = localConfig.frontRightGain.coerceIn(0f, 2f)
+        val centerChannelGain = localConfig.centerGain.coerceIn(0f, 2f)
+        val lfeChannelGain = localConfig.lfeGain.coerceIn(0f, 2f)
+        val surroundLeftChannelGain = localConfig.surroundLeftGain.coerceIn(0f, 2f)
+        val surroundRightChannelGain = localConfig.surroundRightGain.coerceIn(0f, 2f)
+        val rearLeftChannelGain = localConfig.rearLeftGain.coerceIn(0f, 2f)
+        val rearRightChannelGain = localConfig.rearRightGain.coerceIn(0f, 2f)
 
         val blend = localConfig.blend.coerceIn(0f, 1f)
         val wetSourceGain = 0.62f
         val headroom = (1f - 0.26f * blend).coerceIn(0.68f, 1f)
+        val sampleRate = inputAudioFormat.sampleRate
+        val bassManagementCoeff = if (surroundMode != 0) onePoleCoefficient(90f, sampleRate) else 0f
+        val centerHpCoeff = if (surroundMode != 0) onePoleCoefficient(140f, sampleRate) else 0f
+        val centerLpCoeff = if (surroundMode != 0) onePoleCoefficient(6800f, sampleRate) else 0f
+        val surroundHpCoeff = if (surroundMode != 0) onePoleCoefficient(180f, sampleRate) else 0f
+        val surroundLpCoeff = if (surroundMode != 0) onePoleCoefficient(7200f, sampleRate) else 0f
+        val rearHpCoeff = if (surroundMode != 0) onePoleCoefficient(220f, sampleRate) else 0f
+        val rearLpCoeff = if (surroundMode != 0) onePoleCoefficient(5600f, sampleRate) else 0f
         while (inputBuffer.remaining() >= 4) {
             val inLeft = shortToFloat(inputBuffer.short)
             val inRight = shortToFloat(inputBuffer.short)
@@ -237,24 +286,55 @@ internal class HrtfBinauralProcessor : BaseAudioProcessor() {
             if (surroundMode == 0) {
                 val leftSourceWet = renderSource(
                     inputSample = inLeft,
-                    coeff = leftCoeff,
+                    coeff = frontLeftCoeff,
                     state = leftSourceState
                 )
                 val rightSourceWet = renderSource(
                     inputSample = inRight,
-                    coeff = rightCoeff,
+                    coeff = frontRightCoeff,
                     state = rightSourceState
                 )
-                wetOutLeft = (leftSourceWet.first + rightSourceWet.first) * wetSourceGain
-                wetOutRight = (leftSourceWet.second + rightSourceWet.second) * wetSourceGain
+                wetOutLeft = (
+                    leftSourceWet.first * frontLeftChannelGain +
+                        rightSourceWet.first * frontRightChannelGain
+                    ) * wetSourceGain
+                wetOutRight = (
+                    leftSourceWet.second * frontLeftChannelGain +
+                        rightSourceWet.second * frontRightChannelGain
+                    ) * wetSourceGain
             } else {
+                bassMgmtLeftState = onePoleLowpass(inLeft, bassMgmtLeftState, bassManagementCoeff)
+                bassMgmtRightState = onePoleLowpass(inRight, bassMgmtRightState, bassManagementCoeff)
+                val frontLeftHigh = inLeft - bassMgmtLeftState
+                val frontRightHigh = inRight - bassMgmtRightState
+                val frontBassMono = (bassMgmtLeftState + bassMgmtRightState) * 0.5f
+
                 val mono = (inLeft + inRight) * 0.5f
-                val centerIn = mono * 0.92f
-                val lfeIn = extractLfe(mono, inputAudioFormat.sampleRate) * 0.85f
-                val surroundLeftIn = (inLeft * 0.76f + inRight * 0.24f) * 0.82f
-                val surroundRightIn = (inRight * 0.76f + inLeft * 0.24f) * 0.82f
-                val rearLeftIn = (inLeft * 0.62f + inRight * 0.18f) * 0.65f
-                val rearRightIn = (inRight * 0.62f + inLeft * 0.18f) * 0.65f
+                centerHighPassState = onePoleLowpass(mono, centerHighPassState, centerHpCoeff)
+                val centerHighPassed = mono - centerHighPassState
+                centerBandLowPassState = onePoleLowpass(centerHighPassed, centerBandLowPassState, centerLpCoeff)
+                val centerBand = centerBandLowPassState
+
+                val ambience = (inLeft - inRight) * 0.5f
+                surroundHighPassState = onePoleLowpass(ambience, surroundHighPassState, surroundHpCoeff)
+                val surroundHighPassed = ambience - surroundHighPassState
+                surroundBandLowPassState = onePoleLowpass(surroundHighPassed, surroundBandLowPassState, surroundLpCoeff)
+                val surroundBand = surroundBandLowPassState
+
+                val rearSeed = surroundBand * 0.68f + (mono - centerBand) * 0.32f
+                rearHighPassState = onePoleLowpass(rearSeed, rearHighPassState, rearHpCoeff)
+                val rearHighPassed = rearSeed - rearHighPassState
+                rearBandLowPassState = onePoleLowpass(rearHighPassed, rearBandLowPassState, rearLpCoeff)
+                val rearBand = rearBandLowPassState
+
+                val centerIn = centerBand * 0.96f
+                val lfeIn = extractLfe(frontBassMono * 1.05f, sampleRate) * 0.92f
+                val frontLeftIn = frontLeftHigh * 0.88f + centerBand * 0.18f
+                val frontRightIn = frontRightHigh * 0.88f + centerBand * 0.18f
+                val surroundLeftIn = surroundBand * 0.92f + rearBand * 0.08f
+                val surroundRightIn = -surroundBand * 0.92f - rearBand * 0.08f
+                val rearLeftIn = rearBand * 0.82f + surroundBand * 0.10f
+                val rearRightIn = -rearBand * 0.82f - surroundBand * 0.10f
 
                 var accumulatorLeft = 0f
                 var accumulatorRight = 0f
@@ -266,18 +346,29 @@ internal class HrtfBinauralProcessor : BaseAudioProcessor() {
                     accumulatorRight += rendered.second * gain
                 }
 
-                mixSpeaker(inLeft, leftCoeff, leftSourceState, 0.70f)
-                mixSpeaker(inRight, rightCoeff, rightSourceState, 0.70f)
-                mixSpeaker(centerIn, centerCoeff, centerSourceState, 0.48f)
-                mixSpeaker(lfeIn, lfeCoeff, lfeSourceState, 0.30f)
-                mixSpeaker(surroundLeftIn, surroundLeftCoeff, surroundLeftState, 0.44f)
-                mixSpeaker(surroundRightIn, surroundRightCoeff, surroundRightState, 0.44f)
+                mixSpeaker(frontLeftIn, frontLeftCoeff, leftSourceState, 0.66f * frontLeftChannelGain)
+                mixSpeaker(frontRightIn, frontRightCoeff, rightSourceState, 0.66f * frontRightChannelGain)
+                mixSpeaker(centerIn, centerCoeff, centerSourceState, 0.56f * centerChannelGain)
+                mixSpeaker(lfeIn, lfeCoeff, lfeSourceState, 0.34f * lfeChannelGain)
+                val sideGain = if (surroundMode == 2) 0.36f else 0.50f
+                mixSpeaker(
+                    surroundLeftIn,
+                    surroundLeftCoeff,
+                    surroundLeftState,
+                    sideGain * surroundLeftChannelGain
+                )
+                mixSpeaker(
+                    surroundRightIn,
+                    surroundRightCoeff,
+                    surroundRightState,
+                    sideGain * surroundRightChannelGain
+                )
                 if (surroundMode == 2) {
-                    mixSpeaker(rearLeftIn, rearLeftCoeff, rearLeftState, 0.34f)
-                    mixSpeaker(rearRightIn, rearRightCoeff, rearRightState, 0.34f)
+                    mixSpeaker(rearLeftIn, rearLeftCoeff, rearLeftState, 0.30f * rearLeftChannelGain)
+                    mixSpeaker(rearRightIn, rearRightCoeff, rearRightState, 0.30f * rearRightChannelGain)
                 }
 
-                val modeCompensation = if (surroundMode == 2) 0.57f else 0.63f
+                val modeCompensation = if (surroundMode == 2) 0.62f else 0.70f
                 wetOutLeft = accumulatorLeft * wetSourceGain * modeCompensation
                 wetOutRight = accumulatorRight * wetSourceGain * modeCompensation
             }
@@ -295,10 +386,14 @@ internal class HrtfBinauralProcessor : BaseAudioProcessor() {
 
     override fun onFlush() {
         clearInternalState()
+        wasProcessing = false
+        pendingStateReset = false
     }
 
     override fun onReset() {
         clearInternalState()
+        wasProcessing = false
+        pendingStateReset = false
     }
 
     private fun clearInternalState() {
@@ -311,13 +406,23 @@ internal class HrtfBinauralProcessor : BaseAudioProcessor() {
         rearLeftState.clear()
         rearRightState.clear()
         lfeMonoState = 0f
+        lfeSecondState = 0f
+        bassMgmtLeftState = 0f
+        bassMgmtRightState = 0f
+        centerHighPassState = 0f
+        centerBandLowPassState = 0f
+        surroundHighPassState = 0f
+        surroundBandLowPassState = 0f
+        rearHighPassState = 0f
+        rearBandLowPassState = 0f
     }
 
     private fun extractLfe(mono: Float, sampleRate: Int): Float {
-        val cutoff = 140f
+        val cutoff = 120f
         val coefficient = onePoleCoefficient(cutoff, sampleRate)
         lfeMonoState = onePoleLowpass(mono, lfeMonoState, coefficient)
-        return lfeMonoState
+        lfeSecondState = onePoleLowpass(lfeMonoState, lfeSecondState, coefficient)
+        return lfeSecondState
     }
 
     private fun renderSource(
@@ -345,6 +450,9 @@ internal class HrtfBinauralProcessor : BaseAudioProcessor() {
         val sideGain = (1f + coeff.lateralFocus).coerceIn(1f, 1.9f)
         shapedLeft = mid + side * sideGain
         shapedRight = mid - side * sideGain
+
+        shapedLeft = applyLeftNotch(shapedLeft, coeff, state)
+        shapedRight = applyRightNotch(shapedRight, coeff, state)
 
         state.leftHistory[state.earWriteIndex] = shapedLeft
         state.rightHistory[state.earWriteIndex] = shapedRight
@@ -388,13 +496,14 @@ internal class HrtfBinauralProcessor : BaseAudioProcessor() {
         val backFactor = (-zNorm).coerceIn(0f, 1f)
         val lateral = abs(xNorm).pow(0.85f).coerceIn(0f, 1f)
         val directionality = (0.72f + config.externalization * 0.34f + config.blend * 0.24f).coerceIn(0.7f, 1.35f)
-        val shadowStrength = (0.9f + headRadiusNorm * 0.42f + config.externalization * 0.22f).coerceIn(0.9f, 1.65f)
+        val shadowStrength =
+            (0.5f + headRadiusNorm * 0.2f + config.externalization * 0.18f).coerceIn(0.45f, 0.95f)
         val farShadowDb = (
             profile.farShadowDb * shadowStrength +
-                distanceFactor * 2.4f +
-                backFactor * 3.2f +
-                lateral * 2.6f * directionality
-            ).coerceIn(0.6f, 18f)
+                distanceFactor * 1.3f +
+                backFactor * 1.8f +
+                lateral * 1.6f * directionality
+            ).coerceIn(0.8f, 24f)
         val nearBoostDb = min(4.8f, 0.8f + farShadowDb * (0.32f + 0.15f * directionality))
 
         val ildScale = (1f + lateral * (0.22f + config.externalization * 0.28f)).coerceIn(1f, 1.72f)
@@ -407,11 +516,11 @@ internal class HrtfBinauralProcessor : BaseAudioProcessor() {
 
         val farCutoff = (
             profile.farCutoffHz -
-                backFactor * 1700f -
-                distanceFactor * 1200f -
-                lateral * 1200f -
-                headRadiusNorm * 950f
-            ).coerceIn(900f, 11_000f)
+                backFactor * 620f -
+                distanceFactor * 520f -
+                lateral * 460f -
+                headRadiusNorm * 260f
+            ).coerceIn(850f, 9_500f)
         val nearCutoff = (
             18_600f +
                 yNorm * 2400f -
@@ -423,13 +532,56 @@ internal class HrtfBinauralProcessor : BaseAudioProcessor() {
 
         val leftLpA = onePoleCoefficient(leftCutoff, sampleRate)
         val rightLpA = onePoleCoefficient(rightCutoff, sampleRate)
+        val frontWeight = ((zNorm + 1f) * 0.5f).coerceIn(0f, 1f)
+
+        val farNotchHz = (
+            profile.farNotchHz -
+                lateral * 620f -
+                backFactor * 460f +
+                distanceFactor * 240f +
+                yNorm * 380f
+            ).coerceIn(6200f, 13_000f)
+        val nearNotchHz = (
+            profile.farNotchHz +
+                1050f +
+                frontWeight * 580f -
+                backFactor * 260f +
+                headRadiusNorm * 260f
+            ).coerceIn(7200f, 15_500f)
+        val leftNotchHz = nearNotchHz * leftWeight + farNotchHz * rightWeight
+        val rightNotchHz = nearNotchHz * rightWeight + farNotchHz * leftWeight
+        val notchQ = (
+            2.6f +
+                lateral * 2.9f +
+                backFactor * 0.8f +
+                config.externalization * 0.7f
+            ).coerceIn(2.2f, 7.2f)
+        val farNotchDepthDb = (
+            profile.farNotchDepthDb *
+                (0.92f + config.externalization * 0.36f) +
+                lateral * 1.6f +
+                backFactor * 1.2f +
+                distanceFactor * 0.8f
+            ).coerceIn(2.5f, 18f)
+        val nearNotchDepthDb = (
+            0.7f +
+                lateral * 1.2f +
+                (1f - backFactor) * 0.5f +
+                frontWeight * 0.3f
+            ).coerceIn(0.4f, 3.6f)
+        val leftNotchDepthDb = nearNotchDepthDb * leftWeight + farNotchDepthDb * rightWeight
+        val rightNotchDepthDb = nearNotchDepthDb * rightWeight + farNotchDepthDb * leftWeight
+        val leftNotchMix = (1f - dbToLinear(-leftNotchDepthDb)).coerceIn(0f, 0.92f)
+        val rightNotchMix = (1f - dbToLinear(-rightNotchDepthDb)).coerceIn(0f, 0.92f)
+        val leftNotch = buildNotchBiquad(leftNotchHz, notchQ, sampleRate)
+        val rightNotch = buildNotchBiquad(rightNotchHz, notchQ, sampleRate)
 
         val farHighAttenDb = (
-            3.2f +
-                farShadowDb * 0.68f +
-                backFactor * 3.0f +
-                lateral * 2.1f
-            ).coerceIn(1.5f, 18f)
+            2.5f +
+                farShadowDb * 0.45f +
+                backFactor * 2.0f +
+                lateral * 1.6f
+            ).coerceIn(1.2f, 19f)
         val nearHighBoostDb = (
             0.4f +
                 lateral * 2.4f +
@@ -448,7 +600,6 @@ internal class HrtfBinauralProcessor : BaseAudioProcessor() {
         val leftLowGain = nearLowGain * leftWeight + farLowGain * rightWeight
         val rightLowGain = nearLowGain * rightWeight + farLowGain * leftWeight
 
-        val frontWeight = ((zNorm + 1f) * 0.5f).coerceIn(0f, 1f)
         val centerWeight = 1f - (absAzimuthDeg / 180f).coerceIn(0f, 1f)
         val lateralSuppression = (1f - lateral * 0.78f).coerceIn(0.15f, 1f)
         val rearSuppression = (1f - backFactor * 0.45f).coerceIn(0.35f, 1f)
@@ -487,7 +638,11 @@ internal class HrtfBinauralProcessor : BaseAudioProcessor() {
             earlyMix = earlyMix.coerceIn(0f, 0.24f),
             earlyDelaySamples = earlyDelaySamples,
             azimuthPan = xNorm.coerceIn(-1f, 1f),
-            lateralFocus = lateralFocus
+            lateralFocus = lateralFocus,
+            leftNotch = leftNotch,
+            rightNotch = rightNotch,
+            leftNotchMix = leftNotchMix,
+            rightNotchMix = rightNotchMix
         )
     }
 
@@ -497,7 +652,9 @@ internal class HrtfBinauralProcessor : BaseAudioProcessor() {
             return HrtfBin(
                 itdScale = 0.95f + t * 0.1f,
                 farShadowDb = 1.2f + t.pow(1.2f) * 9f,
-                farCutoffHz = 11_000f - t.pow(1.35f) * 7600f
+                farCutoffHz = 11_000f - t.pow(1.35f) * 7600f,
+                farNotchHz = 9_300f - t * 900f,
+                farNotchDepthDb = 4f + t.pow(1.15f) * 6.4f
             )
         }
         val bins = HRTF_DB_BINS
@@ -517,7 +674,9 @@ internal class HrtfBinauralProcessor : BaseAudioProcessor() {
                 return HrtfBin(
                     itdScale = lerp(left.itdScale, right.itdScale, ratio),
                     farShadowDb = lerp(left.farShadowDb, right.farShadowDb, ratio),
-                    farCutoffHz = lerp(left.farCutoffHz, right.farCutoffHz, ratio)
+                    farCutoffHz = lerp(left.farCutoffHz, right.farCutoffHz, ratio),
+                    farNotchHz = lerp(left.farNotchHz, right.farNotchHz, ratio),
+                    farNotchDepthDb = lerp(left.farNotchDepthDb, right.farNotchDepthDb, ratio)
                 )
             }
         }
@@ -533,6 +692,64 @@ internal class HrtfBinauralProcessor : BaseAudioProcessor() {
         val a = buffer[idxA]
         val b = buffer[idxB]
         return a * (1f - fraction) + b * fraction
+    }
+
+    private fun applyLeftNotch(
+        input: Float,
+        coeff: HrtfCoefficients,
+        state: SourceRenderState
+    ): Float {
+        val notch = coeff.leftNotch
+        val filtered = notch.b0 * input +
+            notch.b1 * state.leftNotchX1 +
+            notch.b2 * state.leftNotchX2 -
+            notch.a1 * state.leftNotchY1 -
+            notch.a2 * state.leftNotchY2
+        state.leftNotchX2 = state.leftNotchX1
+        state.leftNotchX1 = input
+        state.leftNotchY2 = state.leftNotchY1
+        state.leftNotchY1 = filtered
+        return input * (1f - coeff.leftNotchMix) + filtered * coeff.leftNotchMix
+    }
+
+    private fun applyRightNotch(
+        input: Float,
+        coeff: HrtfCoefficients,
+        state: SourceRenderState
+    ): Float {
+        val notch = coeff.rightNotch
+        val filtered = notch.b0 * input +
+            notch.b1 * state.rightNotchX1 +
+            notch.b2 * state.rightNotchX2 -
+            notch.a1 * state.rightNotchY1 -
+            notch.a2 * state.rightNotchY2
+        state.rightNotchX2 = state.rightNotchX1
+        state.rightNotchX1 = input
+        state.rightNotchY2 = state.rightNotchY1
+        state.rightNotchY1 = filtered
+        return input * (1f - coeff.rightNotchMix) + filtered * coeff.rightNotchMix
+    }
+
+    private fun buildNotchBiquad(centerHz: Float, q: Float, sampleRate: Int): BiquadCoefficients {
+        val frequency = centerHz.coerceIn(40f, sampleRate * 0.45f)
+        val quality = q.coerceIn(0.4f, 12f)
+        val omega = (2.0 * PI * frequency / sampleRate).toFloat()
+        val cosine = cos(omega)
+        val alpha = (sin(omega) / (2f * quality)).coerceAtLeast(0.0001f)
+        val a0 = 1f + alpha
+        val invA0 = 1f / a0
+        val b0 = 1f * invA0
+        val b1 = (-2f * cosine) * invA0
+        val b2 = 1f * invA0
+        val a1 = (-2f * cosine) * invA0
+        val a2 = (1f - alpha) * invA0
+        return BiquadCoefficients(
+            b0 = b0,
+            b1 = b1,
+            b2 = b2,
+            a1 = a1,
+            a2 = a2
+        )
     }
 
     private fun onePoleLowpass(input: Float, prev: Float, coefficientA: Float): Float {
@@ -580,16 +797,76 @@ internal class HrtfBinauralProcessor : BaseAudioProcessor() {
         private val HRTF_DB_BINS = floatArrayOf(0f, 15f, 30f, 45f, 60f, 75f, 90f, 120f, 150f, 180f)
 
         private val HRTF_DB_VALUES = arrayOf(
-            HrtfBin(itdScale = 0.92f, farShadowDb = 0.8f, farCutoffHz = 12_500f),
-            HrtfBin(itdScale = 0.96f, farShadowDb = 1.6f, farCutoffHz = 11_400f),
-            HrtfBin(itdScale = 1.00f, farShadowDb = 2.8f, farCutoffHz = 9_900f),
-            HrtfBin(itdScale = 1.03f, farShadowDb = 4.0f, farCutoffHz = 8_600f),
-            HrtfBin(itdScale = 1.06f, farShadowDb = 5.4f, farCutoffHz = 7_100f),
-            HrtfBin(itdScale = 1.08f, farShadowDb = 6.7f, farCutoffHz = 5_800f),
-            HrtfBin(itdScale = 1.10f, farShadowDb = 8.1f, farCutoffHz = 4_600f),
-            HrtfBin(itdScale = 1.08f, farShadowDb = 8.8f, farCutoffHz = 4_000f),
-            HrtfBin(itdScale = 1.04f, farShadowDb = 7.2f, farCutoffHz = 4_900f),
-            HrtfBin(itdScale = 1.00f, farShadowDb = 6.0f, farCutoffHz = 5_600f)
+            HrtfBin(
+                itdScale = 0.985f,
+                farShadowDb = 6.103f,
+                farCutoffHz = 3030.3f,
+                farNotchHz = 8717.2f,
+                farNotchDepthDb = 8.763f
+            ),
+            HrtfBin(
+                itdScale = 0.944f,
+                farShadowDb = 7.634f,
+                farCutoffHz = 3006.4f,
+                farNotchHz = 8583.6f,
+                farNotchDepthDb = 12f
+            ),
+            HrtfBin(
+                itdScale = 0.902f,
+                farShadowDb = 11.967f,
+                farCutoffHz = 2027.6f,
+                farNotchHz = 8879.6f,
+                farNotchDepthDb = 12f
+            ),
+            HrtfBin(
+                itdScale = 0.915f,
+                farShadowDb = 16.465f,
+                farCutoffHz = 1700f,
+                farNotchHz = 8713.1f,
+                farNotchDepthDb = 9.586f
+            ),
+            HrtfBin(
+                itdScale = 0.959f,
+                farShadowDb = 19.640f,
+                farCutoffHz = 1700f,
+                farNotchHz = 8478.9f,
+                farNotchDepthDb = 12f
+            ),
+            HrtfBin(
+                itdScale = 0.976f,
+                farShadowDb = 21.363f,
+                farCutoffHz = 1700f,
+                farNotchHz = 11_083.6f,
+                farNotchDepthDb = 12f
+            ),
+            HrtfBin(
+                itdScale = 0.890f,
+                farShadowDb = 21.090f,
+                farCutoffHz = 1700f,
+                farNotchHz = 11_743.6f,
+                farNotchDepthDb = 12f
+            ),
+            HrtfBin(
+                itdScale = 0.642f,
+                farShadowDb = 16.069f,
+                farCutoffHz = 1700f,
+                farNotchHz = 9429.4f,
+                farNotchDepthDb = 12f
+            ),
+            HrtfBin(
+                itdScale = 0.355f,
+                farShadowDb = 7.090f,
+                farCutoffHz = 3208.8f,
+                farNotchHz = 9700.3f,
+                farNotchDepthDb = 10.430f
+            ),
+            HrtfBin(
+                itdScale = 0.202f,
+                farShadowDb = 2.342f,
+                farCutoffHz = 6949.8f,
+                farNotchHz = 8818.7f,
+                farNotchDepthDb = 6.405f
+            )
         )
     }
 }

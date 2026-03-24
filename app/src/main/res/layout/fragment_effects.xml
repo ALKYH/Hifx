@@ -173,37 +173,11 @@
                         android:text="@string/effects_reverb_title"
                         android:textAppearance="?attr/textAppearanceTitleMedium" />
 
-                    <com.google.android.material.materialswitch.MaterialSwitch
-                        android:id="@+id/switch_spatial_enabled"
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:layout_marginTop="8dp"
-                        android:text="@string/effects_spatial_enabled" />
-
-                    <TextView
-                        android:id="@+id/text_spatial_distance"
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:layout_marginTop="6dp"
-                        android:text="@string/effects_spatial_distance_default"
-                        android:textAppearance="?attr/textAppearanceBodySmall" />
-
-                    <TextView
-                        android:id="@+id/text_spatial_gain"
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:layout_marginTop="2dp"
-                        android:text="@string/effects_spatial_gain_default"
-                        android:textAppearance="?attr/textAppearanceBodySmall" />
-
                     <com.google.android.material.card.MaterialCardView
-                        android:id="@+id/card_channel_position"
+                        android:id="@+id/card_spatial_controller"
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
-                        android:layout_marginTop="12dp"
-                        android:clickable="true"
-                        android:focusable="true"
-                        android:foreground="?attr/selectableItemBackgroundBorderless"
+                        android:layout_marginTop="10dp"
                         app:cardBackgroundColor="?attr/colorSurfaceVariant"
                         app:cardCornerRadius="16dp"
                         app:strokeColor="?attr/colorOutlineVariant"
@@ -215,29 +189,87 @@
                             android:orientation="vertical"
                             android:padding="14dp">
 
-                            <TextView
+                            <com.google.android.material.materialswitch.MaterialSwitch
+                                android:id="@+id/switch_spatial_enabled"
                                 android:layout_width="match_parent"
                                 android:layout_height="wrap_content"
-                                android:text="@string/effects_channel_position_option"
-                                android:textAppearance="?attr/textAppearanceLabelLarge" />
+                                android:text="@string/effects_spatial_enabled" />
 
                             <TextView
-                                android:id="@+id/text_channel_mode_value"
+                                android:id="@+id/text_spatial_distance"
                                 android:layout_width="match_parent"
                                 android:layout_height="wrap_content"
-                                android:layout_marginTop="4dp"
-                                android:text="@string/effects_channel_mode_linked"
+                                android:layout_marginTop="6dp"
+                                android:text="@string/effects_spatial_distance_default"
                                 android:textAppearance="?attr/textAppearanceBodySmall" />
 
                             <TextView
-                                android:id="@+id/text_channel_position_value"
+                                android:id="@+id/text_spatial_gain"
                                 android:layout_width="match_parent"
                                 android:layout_height="wrap_content"
                                 android:layout_marginTop="2dp"
-                                android:text="@string/effects_channel_position_summary_default"
+                                android:text="@string/effects_spatial_gain_default"
                                 android:textAppearance="?attr/textAppearanceBodySmall" />
                         </LinearLayout>
                     </com.google.android.material.card.MaterialCardView>
+
+                    <com.google.android.material.card.MaterialCardView
+                        android:id="@+id/card_channel_options"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="12dp"
+                        app:cardBackgroundColor="?attr/colorSurfaceVariant"
+                        app:cardCornerRadius="16dp"
+                        app:strokeColor="?attr/colorOutlineVariant"
+                        app:strokeWidth="1dp">
+
+                        <LinearLayout
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:orientation="vertical"
+                            android:padding="14dp">
+
+                            <com.google.android.material.card.MaterialCardView
+                                android:id="@+id/card_channel_position"
+                                android:layout_width="match_parent"
+                                android:layout_height="wrap_content"
+                                android:clickable="true"
+                                android:focusable="true"
+                                android:foreground="?attr/selectableItemBackgroundBorderless"
+                                app:cardBackgroundColor="?attr/colorSurface"
+                                app:cardCornerRadius="12dp"
+                                app:strokeColor="?attr/colorOutlineVariant"
+                                app:strokeWidth="1dp">
+
+                                <LinearLayout
+                                    android:layout_width="match_parent"
+                                    android:layout_height="wrap_content"
+                                    android:orientation="vertical"
+                                    android:padding="14dp">
+
+                                    <TextView
+                                        android:layout_width="match_parent"
+                                        android:layout_height="wrap_content"
+                                        android:text="@string/effects_channel_position_option"
+                                        android:textAppearance="?attr/textAppearanceLabelLarge" />
+
+                                    <TextView
+                                        android:id="@+id/text_channel_mode_value"
+                                        android:layout_width="match_parent"
+                                        android:layout_height="wrap_content"
+                                        android:layout_marginTop="4dp"
+                                        android:text="@string/effects_channel_mode_linked"
+                                        android:textAppearance="?attr/textAppearanceBodySmall" />
+
+                                    <TextView
+                                        android:id="@+id/text_channel_position_value"
+                                        android:layout_width="match_parent"
+                                        android:layout_height="wrap_content"
+                                        android:layout_marginTop="2dp"
+                                        android:text="@string/effects_channel_position_summary_default"
+                                        android:textAppearance="?attr/textAppearanceBodySmall" />
+                                </LinearLayout>
+                            </com.google.android.material.card.MaterialCardView>
 
                     <LinearLayout
                         android:id="@+id/layout_channel_position_panel"
@@ -293,6 +325,14 @@
                             android:background="?attr/colorSecondaryContainer" />
 
                         <TextView
+                            android:id="@+id/text_head_contour_hint"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="4dp"
+                            android:text="@string/effects_head_contour_hint"
+                            android:textAppearance="?attr/textAppearanceBodySmall" />
+
+                        <TextView
                             android:id="@+id/text_pos_xz_dual"
                             android:layout_width="match_parent"
                             android:layout_height="wrap_content"
@@ -313,7 +353,7 @@
                             android:stepSize="1"
                             android:value="100"
                             android:valueFrom="20"
-                            android:valueTo="100" />
+                            android:valueTo="120" />
 
                         <TextView
                             android:id="@+id/text_pos_x_selected"
@@ -327,8 +367,8 @@
                             android:layout_height="wrap_content"
                             android:stepSize="1"
                             android:value="0"
-                            android:valueFrom="-100"
-                            android:valueTo="100" />
+                            android:valueFrom="-120"
+                            android:valueTo="120" />
 
                         <TextView
                             android:id="@+id/text_pos_y_selected"
@@ -342,8 +382,8 @@
                             android:layout_height="wrap_content"
                             android:stepSize="1"
                             android:value="0"
-                            android:valueFrom="-100"
-                            android:valueTo="100" />
+                            android:valueFrom="-120"
+                            android:valueTo="120" />
 
                         <TextView
                             android:id="@+id/text_pos_z_selected"
@@ -357,9 +397,11 @@
                             android:layout_height="wrap_content"
                             android:stepSize="1"
                             android:value="0"
-                            android:valueFrom="-100"
-                            android:valueTo="100" />
+                            android:valueFrom="-120"
+                            android:valueTo="120" />
                     </LinearLayout>
+                        </LinearLayout>
+                    </com.google.android.material.card.MaterialCardView>
 
                     <com.google.android.material.card.MaterialCardView
                         android:layout_width="match_parent"
@@ -420,6 +462,151 @@
                                     android:layout_weight="1"
                                     android:text="@string/effects_surround_mode_7_1" />
                             </com.google.android.material.button.MaterialButtonToggleGroup>
+
+                            <com.google.android.material.button.MaterialButton
+                                android:id="@+id/button_toggle_surround_gain_panel"
+                                style="@style/Widget.Material3.Button.TextButton"
+                                android:layout_width="wrap_content"
+                                android:layout_height="wrap_content"
+                                android:layout_marginTop="8dp"
+                                android:text="@string/effects_surround_gain_expand" />
+
+                            <LinearLayout
+                                android:id="@+id/layout_surround_gain_panel"
+                                android:layout_width="match_parent"
+                                android:layout_height="wrap_content"
+                                android:layout_marginTop="4dp"
+                                android:orientation="vertical"
+                                android:visibility="gone">
+
+                                <TextView
+                                    android:id="@+id/text_surround_gain_hint"
+                                    android:layout_width="match_parent"
+                                    android:layout_height="wrap_content"
+                                    android:text="@string/effects_surround_gain_hint"
+                                    android:textAppearance="?attr/textAppearanceBodySmall" />
+
+                                <TextView
+                                    android:id="@+id/text_surround_gain_fl"
+                                    android:layout_width="match_parent"
+                                    android:layout_height="wrap_content"
+                                    android:layout_marginTop="8dp"
+                                    android:textAppearance="?attr/textAppearanceLabelSmall" />
+
+                                <com.google.android.material.slider.Slider
+                                    android:id="@+id/slider_surround_gain_fl"
+                                    android:layout_width="match_parent"
+                                    android:layout_height="wrap_content"
+                                    android:stepSize="1"
+                                    android:value="100"
+                                    android:valueFrom="0"
+                                    android:valueTo="200" />
+
+                                <TextView
+                                    android:id="@+id/text_surround_gain_fr"
+                                    android:layout_width="match_parent"
+                                    android:layout_height="wrap_content"
+                                    android:textAppearance="?attr/textAppearanceLabelSmall" />
+
+                                <com.google.android.material.slider.Slider
+                                    android:id="@+id/slider_surround_gain_fr"
+                                    android:layout_width="match_parent"
+                                    android:layout_height="wrap_content"
+                                    android:stepSize="1"
+                                    android:value="100"
+                                    android:valueFrom="0"
+                                    android:valueTo="200" />
+
+                                <TextView
+                                    android:id="@+id/text_surround_gain_c"
+                                    android:layout_width="match_parent"
+                                    android:layout_height="wrap_content"
+                                    android:textAppearance="?attr/textAppearanceLabelSmall" />
+
+                                <com.google.android.material.slider.Slider
+                                    android:id="@+id/slider_surround_gain_c"
+                                    android:layout_width="match_parent"
+                                    android:layout_height="wrap_content"
+                                    android:stepSize="1"
+                                    android:value="100"
+                                    android:valueFrom="0"
+                                    android:valueTo="200" />
+
+                                <TextView
+                                    android:id="@+id/text_surround_gain_lfe"
+                                    android:layout_width="match_parent"
+                                    android:layout_height="wrap_content"
+                                    android:textAppearance="?attr/textAppearanceLabelSmall" />
+
+                                <com.google.android.material.slider.Slider
+                                    android:id="@+id/slider_surround_gain_lfe"
+                                    android:layout_width="match_parent"
+                                    android:layout_height="wrap_content"
+                                    android:stepSize="1"
+                                    android:value="100"
+                                    android:valueFrom="0"
+                                    android:valueTo="200" />
+
+                                <TextView
+                                    android:id="@+id/text_surround_gain_sl"
+                                    android:layout_width="match_parent"
+                                    android:layout_height="wrap_content"
+                                    android:textAppearance="?attr/textAppearanceLabelSmall" />
+
+                                <com.google.android.material.slider.Slider
+                                    android:id="@+id/slider_surround_gain_sl"
+                                    android:layout_width="match_parent"
+                                    android:layout_height="wrap_content"
+                                    android:stepSize="1"
+                                    android:value="100"
+                                    android:valueFrom="0"
+                                    android:valueTo="200" />
+
+                                <TextView
+                                    android:id="@+id/text_surround_gain_sr"
+                                    android:layout_width="match_parent"
+                                    android:layout_height="wrap_content"
+                                    android:textAppearance="?attr/textAppearanceLabelSmall" />
+
+                                <com.google.android.material.slider.Slider
+                                    android:id="@+id/slider_surround_gain_sr"
+                                    android:layout_width="match_parent"
+                                    android:layout_height="wrap_content"
+                                    android:stepSize="1"
+                                    android:value="100"
+                                    android:valueFrom="0"
+                                    android:valueTo="200" />
+
+                                <TextView
+                                    android:id="@+id/text_surround_gain_rl"
+                                    android:layout_width="match_parent"
+                                    android:layout_height="wrap_content"
+                                    android:textAppearance="?attr/textAppearanceLabelSmall" />
+
+                                <com.google.android.material.slider.Slider
+                                    android:id="@+id/slider_surround_gain_rl"
+                                    android:layout_width="match_parent"
+                                    android:layout_height="wrap_content"
+                                    android:stepSize="1"
+                                    android:value="100"
+                                    android:valueFrom="0"
+                                    android:valueTo="200" />
+
+                                <TextView
+                                    android:id="@+id/text_surround_gain_rr"
+                                    android:layout_width="match_parent"
+                                    android:layout_height="wrap_content"
+                                    android:textAppearance="?attr/textAppearanceLabelSmall" />
+
+                                <com.google.android.material.slider.Slider
+                                    android:id="@+id/slider_surround_gain_rr"
+                                    android:layout_width="match_parent"
+                                    android:layout_height="wrap_content"
+                                    android:stepSize="1"
+                                    android:value="100"
+                                    android:valueFrom="0"
+                                    android:valueTo="200" />
+                            </LinearLayout>
                         </LinearLayout>
                     </com.google.android.material.card.MaterialCardView>
 

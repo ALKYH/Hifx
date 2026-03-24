@@ -45,10 +45,22 @@ internal class ConvolutionReverbProcessor : BaseAudioProcessor() {
     private var fftWorkImag = FloatArray(0)
 
     private var limiterGain = 1f
+    private var wetAutoGain = 1f
+    private var wasActive = false
 
     fun updateConfig(enabled: Boolean, wetMix: Float) {
-        this.enabled = enabled
-        this.wetMix = wetMix.coerceIn(0f, 1f)
+        synchronized(convolutionLock) {
+            val previousEnabled = this.enabled
+            this.enabled = enabled
+            this.wetMix = wetMix.coerceIn(0f, 1f)
+            if (previousEnabled != this.enabled) {
+                clearOverlapState()
+                limiterGain = 1f
+                wetAutoGain = 1f
+                realtimeMeter = 0f
+                wasActive = false
+            }
+        }
     }
 
     fun readRealtimeMeterPercent(): Int {
@@ -63,7 +75,9 @@ internal class ConvolutionReverbProcessor : BaseAudioProcessor() {
             impulseCompensation = computeImpulseCompensation(prepared)
             configureConvolutionPlan(prepared)
             limiterGain = 1f
+            wetAutoGain = 1f
             realtimeMeter = 0f
+            wasActive = false
         }
     }
 
@@ -84,10 +98,19 @@ internal class ConvolutionReverbProcessor : BaseAudioProcessor() {
 
         synchronized(convolutionLock) {
             val localEnabled = enabled && impulse.isNotEmpty() && fftSize > 0 && kernelReal.isNotEmpty()
+            if (localEnabled != wasActive) {
+                clearOverlapState()
+                limiterGain = 1f
+                wetAutoGain = 1f
+                realtimeMeter = 0f
+                wasActive = localEnabled
+            }
             if (!localEnabled) {
                 clearOverlapState()
                 limiterGain = 1f
+                wetAutoGain = 1f
                 realtimeMeter = 0f
+                wasActive = false
                 outputBuffer.put(inputBuffer)
                 outputBuffer.flip()
                 return
@@ -111,17 +134,33 @@ internal class ConvolutionReverbProcessor : BaseAudioProcessor() {
 
             val wet = wetMix.coerceIn(0f, 1f)
             val dry = 1f - wet
-            val irComp = impulseCompensation.coerceIn(0.06f, 1f)
-            val levelCompensation = (1f - wet * 0.25f).coerceIn(0.72f, 1f)
+            val irComp = impulseCompensation.coerceIn(0.02f, 1f)
+            val levelCompensation = (1f - wet * 0.32f).coerceIn(0.58f, 1f)
             val limiterThreshold = 0.92f
             val limiterRelease = 0.0035f
+            val wetLimiterThreshold = 0.72f
+            val wetLimiterAttack = 0.28f
+            val wetLimiterRelease = 0.0018f
             var meter = realtimeMeter
             val meterAttack = 0.18f
             val meterRelease = 0.025f
 
             for (index in 0 until frameCount) {
-                val wetLeftSample = wetLeft[index] * wet * irComp
-                val wetRightSample = wetRight[index] * wet * irComp
+                var wetLeftSample = wetLeft[index] * wet * irComp
+                var wetRightSample = wetRight[index] * wet * irComp
+                val wetPeak = max(abs(wetLeftSample), abs(wetRightSample))
+                val wetTargetGain = if (wetPeak > wetLimiterThreshold) {
+                    (wetLimiterThreshold / wetPeak).coerceIn(0.05f, 1f)
+                } else {
+                    1f
+                }
+                wetAutoGain = if (wetTargetGain < wetAutoGain) {
+                    wetAutoGain + (wetTargetGain - wetAutoGain) * wetLimiterAttack
+                } else {
+                    wetAutoGain + (wetTargetGain - wetAutoGain) * wetLimiterRelease
+                }
+                wetLeftSample *= wetAutoGain
+                wetRightSample *= wetAutoGain
                 val mixedLeft = (inputLeft[index] * dry + wetLeftSample) * levelCompensation
                 val mixedRight = (inputRight[index] * dry + wetRightSample) * levelCompensation
 
@@ -154,7 +193,9 @@ internal class ConvolutionReverbProcessor : BaseAudioProcessor() {
         synchronized(convolutionLock) {
             clearOverlapState()
             limiterGain = 1f
+            wetAutoGain = 1f
             realtimeMeter = 0f
+            wasActive = false
         }
     }
 
@@ -164,9 +205,11 @@ internal class ConvolutionReverbProcessor : BaseAudioProcessor() {
             impulseCompensation = 1f
             clearConvolutionPlan()
             limiterGain = 1f
+            wetAutoGain = 1f
             realtimeMeter = 0f
             enabled = false
             wetMix = 0.35f
+            wasActive = false
         }
     }
 
@@ -412,8 +455,8 @@ internal class ConvolutionReverbProcessor : BaseAudioProcessor() {
             peak = max(peak, a)
         }
         val l2 = sqrt(max(l2Sq, 0f))
-        val expectedGain = max(1f, peak * 0.9f + l2 * 0.9f + l1 * 0.08f)
-        return (0.9f / expectedGain).coerceIn(0.06f, 1f)
+        val expectedGain = max(1f, peak * 1.2f + l2 * 1.45f + l1 * 0.12f)
+        return (0.78f / expectedGain).coerceIn(0.02f, 1f)
     }
 
     private fun shortToFloat(value: Short): Float {
@@ -426,7 +469,7 @@ internal class ConvolutionReverbProcessor : BaseAudioProcessor() {
     }
 
     private fun softSaturate(value: Float): Float {
-        val drive = 1.18f
+        val drive = 1.08f
         val scaled = (value * drive).coerceIn(-4f, 4f)
         val norm = tanh(drive.toDouble()).toFloat().coerceAtLeast(0.0001f)
         return (tanh(scaled.toDouble()).toFloat() / norm).coerceIn(-1f, 1f)

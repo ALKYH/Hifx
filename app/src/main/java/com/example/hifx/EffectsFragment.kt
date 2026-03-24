@@ -32,6 +32,7 @@ class EffectsFragment : Fragment() {
 
     private var internalUpdating = false
     private var channelPanelExpanded = false
+    private var surroundGainPanelExpanded = false
     private var selectedHandle: SpatialPadView.Handle = SpatialPadView.Handle.LEFT
     private lateinit var eqBandBindings: List<ItemEqBandVerticalBinding>
 
@@ -122,6 +123,34 @@ class EffectsFragment : Fragment() {
                 R.id.button_surround_5_1 -> AudioEngine.setSurroundMode(AudioEngine.SURROUND_MODE_5_1)
                 R.id.button_surround_7_1 -> AudioEngine.setSurroundMode(AudioEngine.SURROUND_MODE_7_1)
             }
+        }
+        binding.buttonToggleSurroundGainPanel.setOnClickListener {
+            surroundGainPanelExpanded = !surroundGainPanelExpanded
+            updateSurroundGainPanelVisibility()
+        }
+        bindSlider(binding.sliderSurroundGainFl) {
+            AudioEngine.setSurroundChannelGain(AudioEngine.SURROUND_CHANNEL_FRONT_LEFT, it)
+        }
+        bindSlider(binding.sliderSurroundGainFr) {
+            AudioEngine.setSurroundChannelGain(AudioEngine.SURROUND_CHANNEL_FRONT_RIGHT, it)
+        }
+        bindSlider(binding.sliderSurroundGainC) {
+            AudioEngine.setSurroundChannelGain(AudioEngine.SURROUND_CHANNEL_CENTER, it)
+        }
+        bindSlider(binding.sliderSurroundGainLfe) {
+            AudioEngine.setSurroundChannelGain(AudioEngine.SURROUND_CHANNEL_LFE, it)
+        }
+        bindSlider(binding.sliderSurroundGainSl) {
+            AudioEngine.setSurroundChannelGain(AudioEngine.SURROUND_CHANNEL_SIDE_LEFT, it)
+        }
+        bindSlider(binding.sliderSurroundGainSr) {
+            AudioEngine.setSurroundChannelGain(AudioEngine.SURROUND_CHANNEL_SIDE_RIGHT, it)
+        }
+        bindSlider(binding.sliderSurroundGainRl) {
+            AudioEngine.setSurroundChannelGain(AudioEngine.SURROUND_CHANNEL_REAR_LEFT, it)
+        }
+        bindSlider(binding.sliderSurroundGainRr) {
+            AudioEngine.setSurroundChannelGain(AudioEngine.SURROUND_CHANNEL_REAR_RIGHT, it)
         }
 
         bindSlider(binding.sliderBass) { AudioEngine.setBassStrength(it) }
@@ -229,8 +258,8 @@ class EffectsFragment : Fragment() {
         binding.textLoudnessValue.text = getString(R.string.effect_gain_value, state.loudnessGainMb)
 
         binding.textSpatialDistance.text = getString(
-            R.string.effects_spatial_distance_value,
-            "%.2f".format(state.derivedDistanceMeters)
+            R.string.effects_spatial_distance_value_cm,
+            "%.1f".format(state.derivedDistanceMeters * 100f)
         )
         binding.textSpatialGain.text = getString(
             R.string.effects_spatial_gain_value,
@@ -256,6 +285,7 @@ class EffectsFragment : Fragment() {
         binding.switchConvolutionEnabled.isEnabled = !state.convolutionIrUri.isNullOrBlank()
 
         renderSurroundMode(state.surroundMode)
+        renderSurroundChannelGains(state)
         renderChannelPanel(state)
 
         eqBandBindings.forEachIndexed { index, bandBinding ->
@@ -294,15 +324,133 @@ class EffectsFragment : Fragment() {
         if (binding.toggleSurroundMode.checkedButtonId != buttonId) {
             binding.toggleSurroundMode.check(buttonId)
         }
+
+        val isStereo = mode == AudioEngine.SURROUND_MODE_STEREO
+        val showRear = mode == AudioEngine.SURROUND_MODE_7_1
+
+        setSurroundGainControlVisible(
+            textView = binding.textSurroundGainC,
+            slider = binding.sliderSurroundGainC,
+            visible = !isStereo
+        )
+        setSurroundGainControlVisible(
+            textView = binding.textSurroundGainLfe,
+            slider = binding.sliderSurroundGainLfe,
+            visible = !isStereo
+        )
+        setSurroundGainControlVisible(
+            textView = binding.textSurroundGainSl,
+            slider = binding.sliderSurroundGainSl,
+            visible = !isStereo
+        )
+        setSurroundGainControlVisible(
+            textView = binding.textSurroundGainSr,
+            slider = binding.sliderSurroundGainSr,
+            visible = !isStereo
+        )
+        setSurroundGainControlVisible(
+            textView = binding.textSurroundGainRl,
+            slider = binding.sliderSurroundGainRl,
+            visible = showRear
+        )
+        setSurroundGainControlVisible(
+            textView = binding.textSurroundGainRr,
+            slider = binding.sliderSurroundGainRr,
+            visible = showRear
+        )
+    }
+
+    private fun renderSurroundChannelGains(state: EffectsUiState) {
+        val mode = state.surroundMode
+        val frontLeft: Int
+        val frontRight: Int
+        val center: Int
+        val lfe: Int
+        val sideLeft: Int
+        val sideRight: Int
+        val rearLeft: Int
+        val rearRight: Int
+        when (mode) {
+            AudioEngine.SURROUND_MODE_5_1 -> {
+                frontLeft = state.surround51FlPercent
+                frontRight = state.surround51FrPercent
+                center = state.surround51CPercent
+                lfe = state.surround51LfePercent
+                sideLeft = state.surround51SlPercent
+                sideRight = state.surround51SrPercent
+                rearLeft = 100
+                rearRight = 100
+            }
+
+            AudioEngine.SURROUND_MODE_7_1 -> {
+                frontLeft = state.surround71FlPercent
+                frontRight = state.surround71FrPercent
+                center = state.surround71CPercent
+                lfe = state.surround71LfePercent
+                sideLeft = state.surround71SlPercent
+                sideRight = state.surround71SrPercent
+                rearLeft = state.surround71RlPercent
+                rearRight = state.surround71RrPercent
+            }
+
+            else -> {
+                frontLeft = state.surroundStereoFlPercent
+                frontRight = state.surroundStereoFrPercent
+                center = 100
+                lfe = 100
+                sideLeft = 100
+                sideRight = 100
+                rearLeft = 100
+                rearRight = 100
+            }
+        }
+
+        binding.sliderSurroundGainFl.value = frontLeft.toFloat()
+        binding.sliderSurroundGainFr.value = frontRight.toFloat()
+        binding.sliderSurroundGainC.value = center.toFloat()
+        binding.sliderSurroundGainLfe.value = lfe.toFloat()
+        binding.sliderSurroundGainSl.value = sideLeft.toFloat()
+        binding.sliderSurroundGainSr.value = sideRight.toFloat()
+        binding.sliderSurroundGainRl.value = rearLeft.toFloat()
+        binding.sliderSurroundGainRr.value = rearRight.toFloat()
+
+        renderSurroundGainLabel(binding.textSurroundGainFl, R.string.effects_surround_channel_fl, frontLeft)
+        renderSurroundGainLabel(binding.textSurroundGainFr, R.string.effects_surround_channel_fr, frontRight)
+        renderSurroundGainLabel(binding.textSurroundGainC, R.string.effects_surround_channel_c, center)
+        renderSurroundGainLabel(binding.textSurroundGainLfe, R.string.effects_surround_channel_lfe, lfe)
+        renderSurroundGainLabel(binding.textSurroundGainSl, R.string.effects_surround_channel_sl, sideLeft)
+        renderSurroundGainLabel(binding.textSurroundGainSr, R.string.effects_surround_channel_sr, sideRight)
+        renderSurroundGainLabel(binding.textSurroundGainRl, R.string.effects_surround_channel_rl, rearLeft)
+        renderSurroundGainLabel(binding.textSurroundGainRr, R.string.effects_surround_channel_rr, rearRight)
+
+        updateSurroundGainPanelVisibility()
+    }
+
+    private fun renderSurroundGainLabel(view: android.widget.TextView, channelRes: Int, value: Int) {
+        view.text = getString(
+            R.string.effects_surround_gain_channel_value,
+            getString(channelRes),
+            value
+        )
+    }
+
+    private fun setSurroundGainControlVisible(
+        textView: android.widget.TextView,
+        slider: Slider,
+        visible: Boolean
+    ) {
+        textView.isVisible = visible
+        slider.isVisible = visible
     }
 
     private fun renderChannelPanel(state: EffectsUiState) {
         binding.switchChannelSeparated.isChecked = state.channelSeparated
         updateChannelPanelVisibility()
 
-        val displayRadius = max(state.spatialLeftRadiusPercent, state.spatialRightRadiusPercent).coerceIn(20, 100)
+        val displayRadius = max(state.spatialLeftRadiusPercent, state.spatialRightRadiusPercent).coerceIn(20, 120)
         binding.spatialPadDual.setLinkedMode(!state.channelSeparated)
-        binding.spatialPadDual.setControlRadiusPercent(displayRadius)
+        binding.spatialPadDual.setControlRadiusCm(displayRadius)
+        binding.spatialPadDual.setHeadRadiusCm(state.hrtfHeadRadiusMm / 10f)
         binding.spatialPadDual.setHandles(
             state.spatialLeftX,
             state.spatialLeftZ,
@@ -312,13 +460,13 @@ class EffectsFragment : Fragment() {
         binding.spatialPadDual.setSelectedHandle(selectedHandle)
 
         binding.textPosXzDual.text = getString(
-            R.string.effects_pos_xz_dual_value,
+            R.string.effects_pos_xz_dual_value_cm,
             state.spatialLeftX,
             state.spatialLeftZ,
             state.spatialRightX,
             state.spatialRightZ
         )
-        binding.textRadiusSelected.text = getString(R.string.effects_radius_scale_value, displayRadius)
+        binding.textRadiusSelected.text = getString(R.string.effects_radius_scale_value_cm, displayRadius)
         binding.sliderRadiusSelected.value = displayRadius.toFloat()
 
         val selectedX = if (selectedHandle == SpatialPadView.Handle.LEFT) state.spatialLeftX else state.spatialRightX
@@ -333,9 +481,9 @@ class EffectsFragment : Fragment() {
         bindAxisSliderRange(binding.sliderPosZSelected, displayRadius, selectedZ)
         binding.sliderPosYSelected.value = selectedY.toFloat()
 
-        binding.textPosXSelected.text = getString(R.string.effects_pos_x_selected_value, selectedLabel, selectedX)
-        binding.textPosYSelected.text = getString(R.string.effects_pos_y_selected_value, selectedLabel, selectedY)
-        binding.textPosZSelected.text = getString(R.string.effects_pos_z_selected_value, selectedLabel, selectedZ)
+        binding.textPosXSelected.text = getString(R.string.effects_pos_x_selected_value_cm, selectedLabel, selectedX)
+        binding.textPosYSelected.text = getString(R.string.effects_pos_y_selected_value_cm, selectedLabel, selectedY)
+        binding.textPosZSelected.text = getString(R.string.effects_pos_z_selected_value_cm, selectedLabel, selectedZ)
 
         renderSelectedChannelButtons()
     }
@@ -406,8 +554,19 @@ class EffectsFragment : Fragment() {
         binding.layoutChannelPositionPanel.isVisible = channelPanelExpanded
     }
 
+    private fun updateSurroundGainPanelVisibility() {
+        binding.layoutSurroundGainPanel.isVisible = surroundGainPanelExpanded
+        binding.buttonToggleSurroundGainPanel.text = getString(
+            if (surroundGainPanelExpanded) {
+                R.string.effects_surround_gain_collapse
+            } else {
+                R.string.effects_surround_gain_expand
+            }
+        )
+    }
+
     private fun bindAxisSliderRange(slider: Slider, radius: Int, value: Int) {
-        val clampedRadius = radius.coerceIn(20, 100).toFloat()
+        val clampedRadius = radius.coerceIn(20, 120).toFloat()
         if (slider.valueFrom != -clampedRadius) {
             slider.valueFrom = -clampedRadius
         }
@@ -420,14 +579,14 @@ class EffectsFragment : Fragment() {
     private fun buildChannelSummary(state: EffectsUiState): String {
         return if (!state.channelSeparated) {
             getString(
-                R.string.effects_channel_position_summary_linked,
+                R.string.effects_channel_position_summary_linked_cm,
                 state.spatialLeftX,
                 state.spatialLeftY,
                 state.spatialLeftZ
             )
         } else {
             getString(
-                R.string.effects_channel_position_summary_split,
+                R.string.effects_channel_position_summary_split_cm,
                 state.spatialLeftX,
                 state.spatialLeftY,
                 state.spatialLeftZ,
