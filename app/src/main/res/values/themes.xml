@@ -6,4 +6,9 @@
     </style>
 
     <style name="Theme.HiFX" parent="Theme.Hifx" />
+
+    <style name="ShapeAppearanceOverlay.MiniPlayer.Cover" parent="">
+        <item name="cornerFamily">rounded</item>
+        <item name="cornerSize">6dp</item>
+    </style>
 </resources>

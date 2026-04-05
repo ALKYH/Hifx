@@ -294,6 +294,7 @@
                             android:text="@string/effects_channel_separate_switch" />
 
                         <LinearLayout
+                            android:id="@+id/layout_channel_selector"
                             android:layout_width="match_parent"
                             android:layout_height="wrap_content"
                             android:layout_marginTop="8dp"
@@ -338,6 +339,29 @@
                             android:layout_height="wrap_content"
                             android:layout_marginTop="8dp"
                             android:textAppearance="?attr/textAppearanceBodySmall" />
+
+                        <LinearLayout
+                            android:id="@+id/layout_channel_spacing"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="6dp"
+                            android:orientation="vertical">
+
+                            <TextView
+                                android:id="@+id/text_channel_spacing_value"
+                                android:layout_width="match_parent"
+                                android:layout_height="wrap_content"
+                                android:textAppearance="?attr/textAppearanceLabelSmall" />
+
+                            <com.google.android.material.slider.Slider
+                                android:id="@+id/slider_channel_spacing"
+                                android:layout_width="match_parent"
+                                android:layout_height="wrap_content"
+                                android:stepSize="1"
+                                android:value="24"
+                                android:valueFrom="0"
+                                android:valueTo="240" />
+                        </LinearLayout>
 
                         <TextView
                             android:id="@+id/text_radius_selected"
@@ -404,6 +428,7 @@
                     </com.google.android.material.card.MaterialCardView>
 
                     <com.google.android.material.card.MaterialCardView
+                        android:id="@+id/card_surround_settings"
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
                         android:layout_marginTop="12dp"
@@ -428,8 +453,15 @@
                                 android:layout_width="match_parent"
                                 android:layout_height="wrap_content"
                                 android:layout_marginTop="4dp"
-                                android:text="@string/effects_surround_mode_hint"
+                                android:text="启用后将与空间化互斥，仅支持 5.1 / 7.1"
                                 android:textAppearance="?attr/textAppearanceBodySmall" />
+
+                            <com.google.android.material.materialswitch.MaterialSwitch
+                                android:id="@+id/switch_surround_enabled"
+                                android:layout_width="match_parent"
+                                android:layout_height="wrap_content"
+                                android:layout_marginTop="6dp"
+                                android:text="启用环绕声" />
 
                             <com.google.android.material.button.MaterialButtonToggleGroup
                                 android:id="@+id/toggle_surround_mode"
@@ -437,14 +469,6 @@
                                 android:layout_height="wrap_content"
                                 android:layout_marginTop="10dp"
                                 app:singleSelection="true">
-
-                                <com.google.android.material.button.MaterialButton
-                                    android:id="@+id/button_surround_stereo"
-                                    style="@style/Widget.Material3.Button.OutlinedButton"
-                                    android:layout_width="0dp"
-                                    android:layout_height="wrap_content"
-                                    android:layout_weight="1"
-                                    android:text="@string/effects_surround_mode_stereo" />
 
                                 <com.google.android.material.button.MaterialButton
                                     android:id="@+id/button_surround_5_1"

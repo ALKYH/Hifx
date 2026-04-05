@@ -12,6 +12,7 @@
         android:name=".HifxApp"
         android:allowBackup="true"
         android:dataExtractionRules="@xml/data_extraction_rules"
+        android:enableOnBackInvokedCallback="true"
         android:fullBackupContent="@xml/backup_rules"
         android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
@@ -19,7 +20,6 @@
         android:supportsRtl="true"
         android:theme="@style/Theme.Hifx"
         tools:targetApi="31">
-
         <service
             android:name=".audio.AudioPlaybackService"
             android:enabled="true"

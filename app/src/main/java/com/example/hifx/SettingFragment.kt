@@ -5,6 +5,8 @@ import android.os.Bundle
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
+import android.widget.AdapterView
+import android.widget.ArrayAdapter
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatDelegate
 import androidx.fragment.app.Fragment
@@ -22,6 +24,9 @@ class SettingsFragment : Fragment() {
 
     private var internalUpdating = false
     private var selectedSection: SettingsSection = SettingsSection.LIBRARY
+    private var usbSpinnerIds: List<Int?> = listOf(null)
+    private val bitDepthOptions = listOf(16, 32)
+    private val bitrateOptionsKbps = listOf<Int?>(null, 320, 512, 768, 1024, 1536, 3072, 6144, 9216)
 
     private val openTreeLauncher =
         registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
@@ -86,6 +91,12 @@ class SettingsFragment : Fragment() {
                 AudioEngine.setHiFiMode(isChecked)
             }
         }
+        binding.switchHiResApi.setOnCheckedChangeListener { _, isChecked ->
+            if (!internalUpdating) {
+                AudioEngine.setHiResApiEnabled(isChecked)
+            }
+        }
+        setupAudioSelectionControls()
         binding.buttonRefreshDeviceInfo.setOnClickListener {
             AudioEngine.refreshOutputInfo()
         }
@@ -103,6 +114,50 @@ class SettingsFragment : Fragment() {
         }
     }
 
+    private fun setupAudioSelectionControls() {
+        binding.spinnerBitDepth.adapter = ArrayAdapter(
+            requireContext(),
+            android.R.layout.simple_spinner_dropdown_item,
+            bitDepthOptions.map { "${it}-bit" }
+        )
+        binding.spinnerBitDepth.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+            override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
+                if (!internalUpdating) {
+                    AudioEngine.setPreferredBitDepth(bitDepthOptions.getOrElse(position) { 32 })
+                }
+            }
+
+            override fun onNothingSelected(parent: AdapterView<*>?) = Unit
+        }
+
+        binding.spinnerMaxBitrate.adapter = ArrayAdapter(
+            requireContext(),
+            android.R.layout.simple_spinner_dropdown_item,
+            bitrateOptionsKbps.map { kbps ->
+                if (kbps == null) getString(R.string.settings_bitrate_unlimited) else "$kbps kbps"
+            }
+        )
+        binding.spinnerMaxBitrate.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+            override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
+                if (!internalUpdating) {
+                    AudioEngine.setPreferredMaxAudioBitrateKbps(bitrateOptionsKbps.getOrNull(position))
+                }
+            }
+
+            override fun onNothingSelected(parent: AdapterView<*>?) = Unit
+        }
+
+        binding.spinnerUsbDac.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+            override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
+                if (!internalUpdating) {
+                    AudioEngine.setPreferredUsbOutputDeviceId(usbSpinnerIds.getOrNull(position))
+                }
+            }
+
+            override fun onNothingSelected(parent: AdapterView<*>?) = Unit
+        }
+    }
+
     private fun observeSettings() {
         viewLifecycleOwner.lifecycleScope.launch {
             viewLifecycleOwner.repeatOnLifecycle(Lifecycle.State.STARTED) {
@@ -117,6 +172,7 @@ class SettingsFragment : Fragment() {
         internalUpdating = true
         binding.textScanFolder.text = state.scanFolderLabel
         binding.switchHiFi.isChecked = state.hiFiMode
+        binding.switchHiResApi.isChecked = state.hiResApiEnabled
         binding.textSampleRate.text = getString(
             R.string.settings_sample_rate_value,
             state.outputSampleRateHz?.toString() ?: getString(R.string.unknown_value)
@@ -129,6 +185,15 @@ class SettingsFragment : Fragment() {
             R.string.settings_offload_value,
             if (state.offloadSupported) getString(R.string.supported) else getString(R.string.not_supported)
         )
+        val bitDepthIndex = bitDepthOptions.indexOf(state.preferredBitDepth).coerceAtLeast(0)
+        binding.spinnerBitDepth.setSelection(bitDepthIndex, false)
+        val bitrateIndex = bitrateOptionsKbps.indexOf(state.preferredMaxBitrateKbps).coerceAtLeast(0)
+        binding.spinnerMaxBitrate.setSelection(bitrateIndex, false)
+        renderUsbOptions(state)
+        binding.textActiveRoute.text = getString(
+            R.string.settings_active_route_value,
+            state.activeOutputRouteLabel
+        )
         binding.textHiFiHint.text = if (state.hiFiMode) {
             getString(R.string.settings_hifi_on_hint)
         } else {
@@ -140,6 +205,18 @@ class SettingsFragment : Fragment() {
             else -> binding.radioThemeSystem.isChecked = true
         }
         internalUpdating = false
+    }
+
+    private fun renderUsbOptions(state: SettingsUiState) {
+        usbSpinnerIds = listOf(null) + state.usbOutputOptions.map { it.id }
+        val labels = listOf(getString(R.string.settings_route_auto)) + state.usbOutputOptions.map { it.label }
+        binding.spinnerUsbDac.adapter = ArrayAdapter(
+            requireContext(),
+            android.R.layout.simple_spinner_dropdown_item,
+            labels
+        )
+        val selectedIndex = usbSpinnerIds.indexOf(state.preferredUsbDeviceId).takeIf { it >= 0 } ?: 0
+        binding.spinnerUsbDac.setSelection(selectedIndex, false)
     }
 
     private fun renderSection(section: SettingsSection) {

@@ -6,6 +6,8 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.os.Build
 import android.os.IBinder
 import android.os.SystemClock
@@ -29,6 +31,8 @@ class AudioPlaybackService : Service() {
     private lateinit var mediaSession: MediaSessionCompat
     private var isForegroundStarted = false
     private var lastNotificationToken = ""
+    private var lastArtworkUri: String? = null
+    private var lastArtworkBitmap: Bitmap? = null
 
     override fun onCreate() {
         super.onCreate()
@@ -86,6 +90,7 @@ class AudioPlaybackService : Service() {
             return
         }
         lastNotificationToken = token
+        val artworkBitmap = resolveArtworkBitmap(state.artworkUri)
 
         val contentIntent = PendingIntent.getActivity(
             this,
@@ -116,6 +121,7 @@ class AudioPlaybackService : Service() {
             .setSmallIcon(R.drawable.ic_music_note)
             .setContentTitle(state.title)
             .setContentText(state.subtitle)
+            .setLargeIcon(artworkBitmap)
             .setContentIntent(contentIntent)
             .setOnlyAlertOnce(true)
             .setSilent(true)
@@ -253,11 +259,37 @@ class AudioPlaybackService : Service() {
             .putString(MediaMetadataCompat.METADATA_KEY_DISPLAY_TITLE, state.title)
             .putString(MediaMetadataCompat.METADATA_KEY_DISPLAY_SUBTITLE, state.subtitle)
 
+        val artworkBitmap = resolveArtworkBitmap(state.artworkUri)
+        if (artworkBitmap != null) {
+            metadataBuilder.putBitmap(MediaMetadataCompat.METADATA_KEY_ART, artworkBitmap)
+            metadataBuilder.putBitmap(MediaMetadataCompat.METADATA_KEY_ALBUM_ART, artworkBitmap)
+            metadataBuilder.putBitmap(MediaMetadataCompat.METADATA_KEY_DISPLAY_ICON, artworkBitmap)
+        }
+
         if (state.durationMs > 0L) {
             metadataBuilder.putLong(MediaMetadataCompat.METADATA_KEY_DURATION, state.durationMs)
         }
         mediaSession.setMetadata(metadataBuilder.build())
         mediaSession.isActive = state.hasMedia
+    }
+
+    private fun resolveArtworkBitmap(artworkUri: android.net.Uri?): Bitmap? {
+        val key = artworkUri?.toString()
+        if (key == lastArtworkUri) {
+            return lastArtworkBitmap
+        }
+        lastArtworkUri = key
+        if (artworkUri == null) {
+            lastArtworkBitmap = null
+            return null
+        }
+        val bitmap = runCatching {
+            contentResolver.openInputStream(artworkUri)?.use { input ->
+                BitmapFactory.decodeStream(input)
+            }
+        }.getOrNull()
+        lastArtworkBitmap = bitmap
+        return bitmap
     }
 
     private fun createChannelIfNeeded() {

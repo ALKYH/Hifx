@@ -10,6 +10,7 @@ import android.view.View
 import android.view.ViewGroup
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.ContextCompat
+import androidx.core.widget.doAfterTextChanged
 import androidx.fragment.app.Fragment
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
@@ -29,6 +30,7 @@ class PlaybackFragment : Fragment() {
     private lateinit var adapter: MusicLibraryAdapter
     private lateinit var layoutManager: LinearLayoutManager
     private var selectedTab: LibraryTab = LibraryTab.ALL
+    private var searchQuery: String = ""
     private var currentPlayableTracks: List<com.example.hifx.audio.LibraryTrack> = emptyList()
     private var letterToPosition: Map<String, Int> = emptyMap()
     private val indexLetters: List<String> = buildList {
@@ -70,6 +72,10 @@ class PlaybackFragment : Fragment() {
         binding.recyclerLibrary.adapter = adapter
         setupAlphabetIndex()
         setupTabs()
+        binding.editLibrarySearch.doAfterTextChanged { editable ->
+            searchQuery = editable?.toString().orEmpty()
+            renderRows(AudioEngine.libraryState.value)
+        }
         binding.buttonRequestPermission.setOnClickListener { requestReadAudioPermission() }
         observeLibraryState()
         renderPermissionState()
@@ -114,19 +120,31 @@ class PlaybackFragment : Fragment() {
     }
 
     private fun renderRows(state: MediaLibraryUiState) {
-        binding.textScanFolder.text = state.scanFolderLabel
         binding.progressLibrary.visibility = if (state.loading) View.VISIBLE else View.GONE
 
-        val rows = when (selectedTab) {
-            LibraryTab.ALL -> state.tracks.map { LibraryListRow.TrackRow(it) }
-            LibraryTab.ALBUM -> buildSectionRows(state.albums)
-            LibraryTab.ARTIST -> buildSectionRows(state.artists)
+        val normalizedQuery = searchQuery.trim()
+        val rows: List<LibraryListRow>
+        val playableTracks: List<com.example.hifx.audio.LibraryTrack>
+        when (selectedTab) {
+            LibraryTab.ALL -> {
+                val tracks = state.tracks.filter { trackMatchesQuery(it, normalizedQuery) }
+                rows = tracks.map { LibraryListRow.TrackRow(it) }
+                playableTracks = tracks
+            }
+
+            LibraryTab.ALBUM -> {
+                val sections = filterSectionsByQuery(state.albums, normalizedQuery)
+                rows = buildSectionRows(sections)
+                playableTracks = sections.flatMap { it.tracks }
+            }
+
+            LibraryTab.ARTIST -> {
+                val sections = filterSectionsByQuery(state.artists, normalizedQuery)
+                rows = buildSectionRows(sections)
+                playableTracks = sections.flatMap { it.tracks }
+            }
         }
-        currentPlayableTracks = when (selectedTab) {
-            LibraryTab.ALL -> state.tracks
-            LibraryTab.ALBUM -> state.albums.flatMap { it.tracks }
-            LibraryTab.ARTIST -> state.artists.flatMap { it.tracks }
-        }
+        currentPlayableTracks = playableTracks
         adapter.submitRows(rows)
         rebuildLetterIndex(rows)
 
@@ -147,6 +165,37 @@ class PlaybackFragment : Fragment() {
             rows += section.tracks.map { LibraryListRow.TrackRow(it) }
         }
         return rows
+    }
+
+    private fun filterSectionsByQuery(
+        sections: List<com.example.hifx.audio.TrackSection>,
+        query: String
+    ): List<com.example.hifx.audio.TrackSection> {
+        if (query.isBlank()) {
+            return sections
+        }
+        return sections.mapNotNull { section ->
+            val sectionMatched = section.title.contains(query, ignoreCase = true)
+            val filteredTracks = if (sectionMatched) {
+                section.tracks
+            } else {
+                section.tracks.filter { trackMatchesQuery(it, query) }
+            }
+            if (filteredTracks.isEmpty()) {
+                null
+            } else {
+                section.copy(tracks = filteredTracks)
+            }
+        }
+    }
+
+    private fun trackMatchesQuery(track: com.example.hifx.audio.LibraryTrack, query: String): Boolean {
+        if (query.isBlank()) {
+            return true
+        }
+        return track.title.contains(query, ignoreCase = true) ||
+            track.artist.contains(query, ignoreCase = true) ||
+            track.album.contains(query, ignoreCase = true)
     }
 
     private fun renderPermissionState() {

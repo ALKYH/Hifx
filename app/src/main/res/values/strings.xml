@@ -1,4 +1,4 @@
-<resources>
+﻿<resources>
     <string name="app_name">HiFX</string>
 
     <string name="page_playback">播放</string>
@@ -23,6 +23,7 @@
     <string name="action_rescan_library">重新扫描媒体库</string>
 
     <string name="library_title">本地媒体库</string>
+    <string name="library_search_hint">搜索歌曲、专辑、艺术家</string>
     <string name="library_scan_folder_default">扫描目录：全部媒体库</string>
     <string name="library_tab_all">全部</string>
     <string name="library_tab_album">专辑</string>
@@ -137,6 +138,7 @@
     <string name="effects_pos_z_selected_value">%1$s Z 轴：%2$+d</string>
     <string name="effects_channel_left_short">L</string>
     <string name="effects_channel_right_short">R</string>
+    <string name="effects_channel_linked_short">L/R</string>
     <string name="effects_irs_file_required">仅支持导入 .irs 文件</string>
     <string name="effects_surround_mode_title">环绕声模式</string>
     <string name="effects_surround_mode_hint">使用 HRTF 近似模拟多声道监听（立体声 / 5.1 / 7.1）</string>
@@ -186,5 +188,14 @@
     <string name="effects_pos_z_selected_value_cm">%1$s Z 轴：%2$+d cm</string>
     <string name="effects_channel_position_summary_linked_cm">联动  X：%1$+d cm  Y：%2$+d cm  Z：%3$+d cm</string>
     <string name="effects_channel_position_summary_split_cm">L（%1$+d,%2$+d,%3$+d cm）  R（%4$+d,%5$+d,%6$+d cm）</string>
+    <string name="effects_channel_spacing_value_cm">左右声道间距：%1$d cm</string>
     <string name="effects_head_contour_hint">灰色轮廓为基于 HRTF 头部半径的人头示意（鼻尖朝上为正前方）。</string>
+    <string name="settings_hires_api_switch">启用 Hi-Res API</string>
+    <string name="settings_bit_depth_title">输出位深</string>
+    <string name="settings_bitrate_title">最大音频码率</string>
+    <string name="settings_usb_route_title">USB DAC 输出路由</string>
+    <string name="settings_route_auto">系统默认 (Auto)</string>
+    <string name="settings_bitrate_unlimited">不限制</string>
+    <string name="settings_active_route_default">当前路由：系统默认</string>
+    <string name="settings_active_route_value">当前路由：%1$s</string>
 </resources>

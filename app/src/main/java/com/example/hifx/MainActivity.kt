@@ -1,17 +1,29 @@
 package com.example.hifx
 
 import android.content.Intent
+import android.animation.ValueAnimator
+import android.graphics.Outline
+import android.graphics.Rect
 import android.os.Bundle
 import android.view.MotionEvent
 import android.view.View
+import android.view.ViewGroup
+import android.view.ViewOutlineProvider
+import android.widget.FrameLayout
+import android.widget.ImageView
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.animation.doOnEnd
+import androidx.core.view.updatePadding
 import androidx.fragment.app.Fragment
+import androidx.interpolator.view.animation.FastOutSlowInInterpolator
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
 import com.example.hifx.audio.AudioEngine
 import com.example.hifx.audio.PlaybackUiState
 import com.example.hifx.databinding.ActivityMainBinding
+import com.example.hifx.databinding.LayoutMiniPlayerBinding
+import com.example.hifx.ui.PlayerTransitionState
 import com.example.hifx.util.loadArtworkOrDefault
 import com.google.android.material.slider.Slider
 import kotlinx.coroutines.launch
@@ -21,6 +33,7 @@ import kotlin.math.roundToInt
 class MainActivity : AppCompatActivity() {
 
     private lateinit var binding: ActivityMainBinding
+    private lateinit var miniPlayerBinding: LayoutMiniPlayerBinding
     private var miniProgressUserSeeking = false
     private var latestDurationMs: Long = 0L
     private var latestPlaybackState: PlaybackUiState = PlaybackUiState()
@@ -28,21 +41,47 @@ class MainActivity : AppCompatActivity() {
     private var lastHasMedia = false
     private var gestureDownX = 0f
     private var gestureDownY = 0f
+    private var containerInsetAnimator: ValueAnimator? = null
+    private var miniCardBaseBottomMargin = -1
+    private var miniHandleBaseBottomMargin = -1
+    private val standardInterpolator = FastOutSlowInInterpolator()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
+        miniPlayerBinding = LayoutMiniPlayerBinding.bind(
+            binding.root.findViewById(R.id.mini_player)
+        )
 
         setSupportActionBar(binding.toolbar)
         setupBottomNavigation()
         setupMiniPlayerActions()
+        attachPlayerExitWarmupBridge()
         observeMiniPlayerState()
+        binding.root.post {
+            updateMiniPlayerBottomSpacing()
+            updateFragmentBottomInset(animated = false)
+        }
 
         if (savedInstanceState == null) {
             binding.bottomNav.menu.findItem(R.id.navigation_playback).isChecked = true
             navigateByItem(R.id.navigation_playback)
         }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        if (PlayerTransitionState.consumeMainUiWarmupRequest()) {
+            prewarmHomeUiForPlayerExit()
+        }
+        // Fallback: if overlay payload is already published, start it after Activity is visible.
+        startPendingCollapseOverlayOnHome()
+    }
+
+    override fun onDestroy() {
+        PlayerTransitionState.onMainUiWarmupRequested = null
+        super.onDestroy()
     }
 
     private fun setupBottomNavigation() {
@@ -52,13 +91,16 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun setupMiniPlayerActions() {
-        binding.miniPlayerCard.setOnClickListener {
-            startActivity(Intent(this, PlayerActivity::class.java))
+        miniPlayerBinding.miniPlayerCard.setOnClickListener {
+            openPlayerDetailWithAnimation()
         }
-        binding.buttonMiniPlayPause.setOnClickListener {
+        miniPlayerBinding.viewMiniHandle.setOnClickListener {
+            setMiniCollapsedByGesture(collapsed = false, animated = true)
+        }
+        miniPlayerBinding.buttonMiniPlayPause.setOnClickListener {
             AudioEngine.togglePlayPause()
         }
-        binding.progressMini.addOnSliderTouchListener(object : Slider.OnSliderTouchListener {
+        miniPlayerBinding.progressMini.addOnSliderTouchListener(object : Slider.OnSliderTouchListener {
             override fun onStartTrackingTouch(slider: Slider) {
                 miniProgressUserSeeking = true
                 animateMiniProgressEmphasis(true)
@@ -88,6 +130,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun renderMiniPlayer(state: PlaybackUiState) {
         latestPlaybackState = state
+        PlayerTransitionState.updatePrewarmedPlaybackState(state)
         val availabilityChanged = state.hasMedia != lastHasMedia
         lastHasMedia = state.hasMedia
 
@@ -95,38 +138,50 @@ class MainActivity : AppCompatActivity() {
             miniCollapsedByGesture = false
         }
         applyMiniPlayerVisibility(animated = availabilityChanged)
+        updateFragmentBottomInset(animated = availabilityChanged)
 
         if (!state.hasMedia) {
             latestDurationMs = 0L
+            PlayerTransitionState.miniPlayerRectOnScreen = null
             return
         }
-        binding.imageMiniCover.loadArtworkOrDefault(state.artworkUri)
-        binding.textMiniTitle.text = state.title
-        binding.textMiniSubtitle.text = state.subtitle
-        binding.buttonMiniPlayPause.setIconResource(
+        miniPlayerBinding.imageMiniCover.loadArtworkOrDefault(state.artworkUri)
+        miniPlayerBinding.textMiniTitle.text = state.title
+        miniPlayerBinding.textMiniSubtitle.text = state.subtitle
+        miniPlayerBinding.buttonMiniPlayPause.setImageResource(
             if (state.isPlaying) android.R.drawable.ic_media_pause else android.R.drawable.ic_media_play
         )
         latestDurationMs = state.durationMs
         val hasDuration = state.durationMs > 0L
-        binding.progressMini.isEnabled = hasDuration
+        miniPlayerBinding.progressMini.isEnabled = hasDuration
         if (hasDuration && !miniProgressUserSeeking) {
             val ratio = (state.positionMs.toFloat() / state.durationMs.toFloat()).coerceIn(0f, 1f)
-            binding.progressMini.value = (ratio * 1000f).roundToInt().toFloat()
+            miniPlayerBinding.progressMini.value = (ratio * 1000f).roundToInt().toFloat()
         } else if (!hasDuration && !miniProgressUserSeeking) {
-            binding.progressMini.value = 0f
+            miniPlayerBinding.progressMini.value = 0f
         }
+        updateMiniPlayerTransitionState()
     }
 
     private fun applyMiniPlayerVisibility(animated: Boolean) {
-        val shouldShow = latestPlaybackState.hasMedia && !miniCollapsedByGesture
-        val card = binding.miniPlayerCard
+        val hasMedia = latestPlaybackState.hasMedia
+        val shouldShow = hasMedia && !miniCollapsedByGesture
+        val card = miniPlayerBinding.miniPlayerCard
+        val handle = miniPlayerBinding.viewMiniHandle
         val collapsedTranslation = 46f * resources.displayMetrics.density
+        val handleTranslation = 12f * resources.displayMetrics.density
 
         if (!animated) {
             card.animate().cancel()
+            handle.animate().cancel()
             card.alpha = if (shouldShow) 1f else 0f
             card.translationY = if (shouldShow) 0f else collapsedTranslation
             card.visibility = if (shouldShow) View.VISIBLE else View.GONE
+            val showHandle = hasMedia && !shouldShow
+            handle.alpha = if (showHandle) 1f else 0f
+            handle.translationY = if (showHandle) 0f else handleTranslation
+            handle.visibility = if (showHandle) View.VISIBLE else View.GONE
+            updateMiniPlayerTransitionState()
             return
         }
 
@@ -139,24 +194,54 @@ class MainActivity : AppCompatActivity() {
             card.animate()
                 .alpha(1f)
                 .translationY(0f)
+                .setInterpolator(standardInterpolator)
                 .setDuration(180L)
                 .start()
+            if (handle.visibility == View.VISIBLE) {
+                handle.animate()
+                    .alpha(0f)
+                    .translationY(handleTranslation)
+                    .setInterpolator(standardInterpolator)
+                    .setDuration(150L)
+                    .withEndAction {
+                        handle.visibility = View.GONE
+                    }
+                    .start()
+            }
             return
         }
 
-        if (card.visibility != View.VISIBLE) {
+        if (!hasMedia) {
+            card.visibility = View.GONE
+            handle.visibility = View.GONE
             return
         }
-        card.animate()
-            .alpha(0f)
-            .translationY(collapsedTranslation)
-            .setDuration(180L)
-            .withEndAction {
-                if (!(latestPlaybackState.hasMedia && !miniCollapsedByGesture)) {
-                    card.visibility = View.GONE
+
+        if (card.visibility == View.VISIBLE) {
+            card.animate()
+                .alpha(0f)
+                .translationY(collapsedTranslation)
+                .setInterpolator(standardInterpolator)
+                .setDuration(180L)
+                .withEndAction {
+                    if (!(latestPlaybackState.hasMedia && !miniCollapsedByGesture)) {
+                        card.visibility = View.GONE
+                    }
                 }
-            }
+                .start()
+        }
+        if (handle.visibility != View.VISIBLE) {
+            handle.visibility = View.VISIBLE
+            handle.alpha = 0f
+            handle.translationY = handleTranslation
+        }
+        handle.animate()
+            .alpha(1f)
+            .translationY(0f)
+            .setInterpolator(standardInterpolator)
+            .setDuration(180L)
             .start()
+        updateMiniPlayerTransitionState()
     }
 
     private fun setMiniCollapsedByGesture(collapsed: Boolean, animated: Boolean = true) {
@@ -165,13 +250,191 @@ class MainActivity : AppCompatActivity() {
         }
         miniCollapsedByGesture = collapsed
         applyMiniPlayerVisibility(animated = animated)
+        updateFragmentBottomInset(animated = animated)
     }
 
     private fun animateMiniProgressEmphasis(emphasized: Boolean) {
-        binding.progressMini.animate()
+        miniPlayerBinding.progressMini.animate()
             .scaleY(if (emphasized) 1.55f else 1f)
+            .setInterpolator(standardInterpolator)
             .setDuration(140L)
             .start()
+    }
+
+    private fun updateFragmentBottomInset(animated: Boolean) {
+        updateMiniPlayerBottomSpacing()
+        val navHeight = binding.bottomNav.height.takeIf { it > 0 }
+            ?: binding.bottomNav.measuredHeight.takeIf { it > 0 }
+            ?: 0
+
+        val miniHeight = miniPlayerBinding.miniPlayerCard.height.takeIf { it > 0 }
+            ?: miniPlayerBinding.miniPlayerCard.measuredHeight.takeIf { it > 0 }
+            ?: 0
+
+        val miniLp = miniPlayerBinding.miniPlayerCard.layoutParams as? FrameLayout.LayoutParams
+        val miniBottomMargin = miniLp?.bottomMargin ?: 0
+        val miniVisible = latestPlaybackState.hasMedia && !miniCollapsedByGesture
+
+        val navInset = navHeight + dp(8f)
+        val miniInset = miniHeight + miniBottomMargin + dp(6f)
+        val targetBottomInset = if (miniVisible) maxOf(navInset, miniInset) else navInset
+
+        val container = binding.fragmentContainer
+        val current = container.paddingBottom
+        if (!animated || current == targetBottomInset) {
+            containerInsetAnimator?.cancel()
+            container.updatePadding(bottom = targetBottomInset)
+            return
+        }
+        containerInsetAnimator?.cancel()
+        containerInsetAnimator = ValueAnimator.ofInt(current, targetBottomInset).apply {
+            duration = 200L
+            interpolator = standardInterpolator
+            addUpdateListener { animator ->
+                container.updatePadding(bottom = animator.animatedValue as Int)
+            }
+            start()
+        }
+    }
+
+    private fun dp(value: Float): Int = (value * resources.displayMetrics.density).roundToInt()
+
+    private fun updateMiniPlayerBottomSpacing() {
+        val navHeight = binding.bottomNav.height.takeIf { it > 0 }
+            ?: binding.bottomNav.measuredHeight.takeIf { it > 0 }
+            ?: return
+
+        val cardLp = miniPlayerBinding.miniPlayerCard.layoutParams as? FrameLayout.LayoutParams ?: return
+        if (miniCardBaseBottomMargin < 0) {
+            miniCardBaseBottomMargin = cardLp.bottomMargin.coerceAtLeast(dp(6f))
+        }
+        val targetCardBottom = navHeight + miniCardBaseBottomMargin
+        if (cardLp.bottomMargin != targetCardBottom) {
+            cardLp.bottomMargin = targetCardBottom
+            miniPlayerBinding.miniPlayerCard.layoutParams = cardLp
+        }
+
+        val handleLp = miniPlayerBinding.viewMiniHandle.layoutParams as? FrameLayout.LayoutParams ?: return
+        if (miniHandleBaseBottomMargin < 0) {
+            miniHandleBaseBottomMargin = handleLp.bottomMargin.coerceAtLeast(dp(6f))
+        }
+        val targetHandleBottom = navHeight + miniHandleBaseBottomMargin
+        if (handleLp.bottomMargin != targetHandleBottom) {
+            handleLp.bottomMargin = targetHandleBottom
+            miniPlayerBinding.viewMiniHandle.layoutParams = handleLp
+        }
+    }
+
+    private fun attachPlayerExitWarmupBridge() {
+        PlayerTransitionState.onMainUiWarmupRequested = {
+            runOnUiThread {
+                prewarmHomeUiForPlayerExit()
+                if (lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) {
+                    startPendingCollapseOverlayOnHome()
+                }
+            }
+        }
+        if (PlayerTransitionState.consumeMainUiWarmupRequest()) {
+            prewarmHomeUiForPlayerExit()
+            if (lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) {
+                startPendingCollapseOverlayOnHome()
+            }
+        }
+    }
+
+    private fun prewarmHomeUiForPlayerExit() {
+        if (isFinishing || isDestroyed) {
+            return
+        }
+        updateMiniPlayerBottomSpacing()
+        applyMiniPlayerVisibility(animated = false)
+        updateFragmentBottomInset(animated = false)
+        updateMiniPlayerTransitionState()
+    }
+
+    private fun startPendingCollapseOverlayOnHome() {
+        val payload = PlayerTransitionState.consumeCollapseOverlay() ?: return
+        val overlayHost = findViewById<ViewGroup>(android.R.id.content) ?: run {
+            payload.snapshot.recycle()
+            return
+        }
+        val hostLoc = IntArray(2)
+        overlayHost.getLocationOnScreen(hostLoc)
+        val source = Rect(
+            payload.sourceRectOnScreen.left - hostLoc[0],
+            payload.sourceRectOnScreen.top - hostLoc[1],
+            payload.sourceRectOnScreen.right - hostLoc[0],
+            payload.sourceRectOnScreen.bottom - hostLoc[1]
+        )
+        val target = Rect(
+            payload.targetRectOnScreen.left - hostLoc[0],
+            payload.targetRectOnScreen.top - hostLoc[1],
+            payload.targetRectOnScreen.right - hostLoc[0],
+            payload.targetRectOnScreen.bottom - hostLoc[1]
+        )
+        if (source.width() <= 0 || source.height() <= 0 || target.width() <= 0 || target.height() <= 0) {
+            payload.snapshot.recycle()
+            return
+        }
+
+        val duration = 300L
+        val startCorner = dp(2f).toFloat()
+        val endCorner = dp(20f).toFloat()
+        var currentCorner = startCorner
+        var clipWidth = source.width()
+        var clipHeight = source.height()
+        val clipRect = Rect(0, 0, clipWidth, clipHeight)
+
+        val maskedSnapshot = FrameLayout(this).apply {
+            x = source.left.toFloat()
+            y = source.top.toFloat()
+            layoutParams = FrameLayout.LayoutParams(source.width(), source.height())
+            setLayerType(View.LAYER_TYPE_HARDWARE, null)
+            clipToOutline = true
+            outlineProvider = object : ViewOutlineProvider() {
+                override fun getOutline(view: View, outline: Outline) {
+                    outline.setRoundRect(0, 0, clipWidth, clipHeight, currentCorner)
+                }
+            }
+        }
+        val snapshotImage = ImageView(this).apply {
+            setImageBitmap(payload.snapshot)
+            scaleType = ImageView.ScaleType.FIT_XY
+            layoutParams = FrameLayout.LayoutParams(source.width(), source.height())
+        }
+        maskedSnapshot.addView(snapshotImage)
+        overlayHost.addView(maskedSnapshot)
+
+        ValueAnimator.ofFloat(0f, 1f).apply {
+            this.duration = duration
+            this.interpolator = standardInterpolator
+            addUpdateListener { anim ->
+                val t = anim.animatedValue as Float
+                val w = (source.width() + (target.width() - source.width()) * t).toInt().coerceAtLeast(1)
+                val h = (source.height() + (target.height() - source.height()) * t).toInt().coerceAtLeast(1)
+                val x = source.left + (target.left - source.left) * t
+                val y = source.top + (target.top - source.top) * t
+
+                currentCorner = startCorner + (endCorner - startCorner) * t
+                clipWidth = w
+                clipHeight = h
+                clipRect.right = clipWidth
+                clipRect.bottom = clipHeight
+
+                maskedSnapshot.x = x
+                maskedSnapshot.y = y
+                maskedSnapshot.clipBounds = clipRect
+                maskedSnapshot.invalidateOutline()
+                snapshotImage.x = source.left.toFloat() - x
+                snapshotImage.y = source.top.toFloat() - y
+            }
+            doOnEnd {
+                maskedSnapshot.setLayerType(View.LAYER_TYPE_NONE, null)
+                overlayHost.removeView(maskedSnapshot)
+                payload.snapshot.recycle()
+            }
+            start()
+        }
     }
 
     override fun dispatchTouchEvent(ev: MotionEvent): Boolean {
@@ -182,12 +445,17 @@ class MainActivity : AppCompatActivity() {
     private fun handleGlobalMiniPlayerGesture(ev: MotionEvent) {
         when (ev.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
+                if (!isBottomInteractionArea(ev.rawY)) {
+                    gestureDownX = Float.NaN
+                    gestureDownY = Float.NaN
+                    return
+                }
                 gestureDownX = ev.rawX
                 gestureDownY = ev.rawY
             }
 
             MotionEvent.ACTION_UP -> {
-                if (miniProgressUserSeeking || !latestPlaybackState.hasMedia) {
+                if (miniProgressUserSeeking || !latestPlaybackState.hasMedia || gestureDownX.isNaN()) {
                     return
                 }
                 val dx = ev.rawX - gestureDownX
@@ -203,6 +471,39 @@ class MainActivity : AppCompatActivity() {
                 }
             }
         }
+    }
+
+    private fun isBottomInteractionArea(rawY: Float): Boolean {
+        val navHeight = binding.bottomNav.height.takeIf { it > 0 } ?: binding.bottomNav.measuredHeight
+        val boundary = binding.root.height - navHeight - dp(120f)
+        return rawY >= boundary
+    }
+
+    private fun openPlayerDetailWithAnimation() {
+        updateMiniPlayerTransitionState()
+        PlayerTransitionState.updatePrewarmedPlaybackState(latestPlaybackState)
+        val intent = Intent(this, PlayerActivity::class.java)
+        startActivity(intent)
+        overridePendingTransition(0, 0)
+    }
+
+    private fun updateMiniPlayerTransitionState() {
+        val target = when {
+            miniPlayerBinding.miniPlayerCard.visibility == View.VISIBLE -> miniPlayerBinding.miniPlayerCard
+            miniPlayerBinding.viewMiniHandle.visibility == View.VISIBLE -> miniPlayerBinding.viewMiniHandle
+            else -> null
+        } ?: run {
+            PlayerTransitionState.miniPlayerRectOnScreen = null
+            return
+        }
+        val loc = IntArray(2)
+        target.getLocationOnScreen(loc)
+        PlayerTransitionState.miniPlayerRectOnScreen = Rect(
+            loc[0],
+            loc[1],
+            loc[0] + target.width,
+            loc[1] + target.height
+        )
     }
 
     private fun navigateByItem(itemId: Int): Boolean {

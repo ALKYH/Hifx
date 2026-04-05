@@ -27,6 +27,8 @@ internal data class HrtfRenderConfig(
     val rightXNorm: Float = 0f,
     val rightYNorm: Float = 0f,
     val rightZNorm: Float = 0f,
+    val leftDistanceMeters: Float = 1f,
+    val rightDistanceMeters: Float = 1f,
     val roomDampingNorm: Float = 0.35f,
     val wetMixNorm: Float = 0.4f,
     val headRadiusMeters: Float = 0.087f,
@@ -156,9 +158,9 @@ internal class HrtfBinauralProcessor : BaseAudioProcessor() {
         val clampedLeftX = newConfig.leftXNorm.coerceIn(-1f, 1f)
         val clampedLeftY = newConfig.leftYNorm.coerceIn(-1f, 1f)
         val clampedLeftZ = newConfig.leftZNorm.coerceIn(-1f, 1f)
-        val clampedRightX = if (newConfig.channelSeparated) newConfig.rightXNorm.coerceIn(-1f, 1f) else clampedLeftX
-        val clampedRightY = if (newConfig.channelSeparated) newConfig.rightYNorm.coerceIn(-1f, 1f) else clampedLeftY
-        val clampedRightZ = if (newConfig.channelSeparated) newConfig.rightZNorm.coerceIn(-1f, 1f) else clampedLeftZ
+        val clampedRightX = newConfig.rightXNorm.coerceIn(-1f, 1f)
+        val clampedRightY = newConfig.rightYNorm.coerceIn(-1f, 1f)
+        val clampedRightZ = newConfig.rightZNorm.coerceIn(-1f, 1f)
 
         val updated = newConfig.copy(
             leftXNorm = clampedLeftX,
@@ -167,6 +169,8 @@ internal class HrtfBinauralProcessor : BaseAudioProcessor() {
             rightXNorm = clampedRightX,
             rightYNorm = clampedRightY,
             rightZNorm = clampedRightZ,
+            leftDistanceMeters = newConfig.leftDistanceMeters.coerceIn(0.07f, MAX_SOURCE_DISTANCE_METERS),
+            rightDistanceMeters = newConfig.rightDistanceMeters.coerceIn(0.07f, MAX_SOURCE_DISTANCE_METERS),
             roomDampingNorm = newConfig.roomDampingNorm.coerceIn(0f, 1f),
             wetMixNorm = newConfig.wetMixNorm.coerceIn(0f, 1f),
             headRadiusMeters = newConfig.headRadiusMeters.coerceIn(0.07f, 0.11f),
@@ -228,36 +232,70 @@ internal class HrtfBinauralProcessor : BaseAudioProcessor() {
             yNorm = localConfig.leftYNorm,
             zNorm = localConfig.leftZNorm,
             config = localConfig,
-            sampleRate = inputAudioFormat.sampleRate
+            sampleRate = inputAudioFormat.sampleRate,
+            sourceDistanceMeters = localConfig.leftDistanceMeters
         )
         val stereoRightCoeff = buildCoefficients(
             xNorm = localConfig.rightXNorm,
             yNorm = localConfig.rightYNorm,
             zNorm = localConfig.rightZNorm,
             config = localConfig,
-            sampleRate = inputAudioFormat.sampleRate
+            sampleRate = inputAudioFormat.sampleRate,
+            sourceDistanceMeters = localConfig.rightDistanceMeters
         )
         val surroundMode = localConfig.surroundMode.coerceIn(0, 2)
-        fun coeffFromAzimuth(azimuthDeg: Float, yNorm: Float = 0f): HrtfCoefficients {
+        val frontDistanceMeters = (
+            (localConfig.leftDistanceMeters + localConfig.rightDistanceMeters) * 0.5f
+            ).coerceIn(0.07f, MAX_SOURCE_DISTANCE_METERS)
+        fun coeffFromAzimuth(
+            azimuthDeg: Float,
+            yNorm: Float = 0f,
+            distanceMeters: Float = frontDistanceMeters
+        ): HrtfCoefficients {
             val radians = Math.toRadians(azimuthDeg.toDouble())
             return buildCoefficients(
                 xNorm = sin(radians).toFloat().coerceIn(-1f, 1f),
                 yNorm = yNorm.coerceIn(-1f, 1f),
                 zNorm = cos(radians).toFloat().coerceIn(-1f, 1f),
                 config = localConfig,
-                sampleRate = inputAudioFormat.sampleRate
+                sampleRate = inputAudioFormat.sampleRate,
+                sourceDistanceMeters = distanceMeters.coerceIn(0.07f, MAX_SOURCE_DISTANCE_METERS)
             )
         }
 
         val frontLeftCoeff = if (surroundMode == 0) stereoLeftCoeff else coeffFromAzimuth(-30f)
         val frontRightCoeff = if (surroundMode == 0) stereoRightCoeff else coeffFromAzimuth(30f)
-        val centerCoeff = if (surroundMode != 0) coeffFromAzimuth(0f, yNorm = 0.02f) else null
-        val lfeCoeff = if (surroundMode != 0) coeffFromAzimuth(0f, yNorm = -0.12f) else null
+        val centerCoeff = if (surroundMode != 0) {
+            coeffFromAzimuth(0f, yNorm = 0.02f, distanceMeters = frontDistanceMeters * 0.98f)
+        } else {
+            null
+        }
+        val lfeCoeff = if (surroundMode != 0) {
+            coeffFromAzimuth(0f, yNorm = -0.12f, distanceMeters = frontDistanceMeters * 1.06f)
+        } else {
+            null
+        }
         val sideAzimuth = if (surroundMode == 1) 110f else 90f
-        val surroundLeftCoeff = if (surroundMode != 0) coeffFromAzimuth(-sideAzimuth) else null
-        val surroundRightCoeff = if (surroundMode != 0) coeffFromAzimuth(sideAzimuth) else null
-        val rearLeftCoeff = if (surroundMode == 2) coeffFromAzimuth(-150f) else null
-        val rearRightCoeff = if (surroundMode == 2) coeffFromAzimuth(150f) else null
+        val surroundLeftCoeff = if (surroundMode != 0) {
+            coeffFromAzimuth(-sideAzimuth, distanceMeters = frontDistanceMeters * 1.08f)
+        } else {
+            null
+        }
+        val surroundRightCoeff = if (surroundMode != 0) {
+            coeffFromAzimuth(sideAzimuth, distanceMeters = frontDistanceMeters * 1.08f)
+        } else {
+            null
+        }
+        val rearLeftCoeff = if (surroundMode == 2) {
+            coeffFromAzimuth(-150f, distanceMeters = frontDistanceMeters * 1.14f)
+        } else {
+            null
+        }
+        val rearRightCoeff = if (surroundMode == 2) {
+            coeffFromAzimuth(150f, distanceMeters = frontDistanceMeters * 1.14f)
+        } else {
+            null
+        }
         val frontLeftChannelGain = localConfig.frontLeftGain.coerceIn(0f, 2f)
         val frontRightChannelGain = localConfig.frontRightGain.coerceIn(0f, 2f)
         val centerChannelGain = localConfig.centerGain.coerceIn(0f, 2f)
@@ -475,7 +513,8 @@ internal class HrtfBinauralProcessor : BaseAudioProcessor() {
         yNorm: Float,
         zNorm: Float,
         config: HrtfRenderConfig,
-        sampleRate: Int
+        sampleRate: Int,
+        sourceDistanceMeters: Float
     ): HrtfCoefficients {
         val azimuth = atan2(xNorm.toDouble(), zNorm.toDouble()).toFloat()
         val absAzimuthRad = abs(azimuth).coerceIn(0f, PI.toFloat())
@@ -490,9 +529,12 @@ internal class HrtfBinauralProcessor : BaseAudioProcessor() {
         val leftDelaySamples = (itdSamples * xNorm.coerceIn(0f, 1f)).coerceAtLeast(0f)
         val rightDelaySamples = (itdSamples * (-xNorm).coerceIn(0f, 1f)).coerceAtLeast(0f)
 
-        val distanceNorm = sqrt((xNorm * xNorm + yNorm * yNorm + zNorm * zNorm).toDouble()).toFloat()
-        val distanceMeters = 0.35f + distanceNorm.coerceIn(0f, 1.73f) * 5.8f
-        val distanceFactor = ((distanceMeters - 0.4f) / 6f).coerceIn(0f, 1f)
+        val minimumDistance = (headRadius + 0.005f).coerceIn(0.07f, 0.16f)
+        val distanceMeters = sourceDistanceMeters.coerceIn(minimumDistance, MAX_SOURCE_DISTANCE_METERS)
+        val distanceFactor = (
+            (distanceMeters - minimumDistance) /
+                (MAX_SOURCE_DISTANCE_METERS - minimumDistance).coerceAtLeast(0.001f)
+            ).coerceIn(0f, 1f)
         val backFactor = (-zNorm).coerceIn(0f, 1f)
         val lateral = abs(xNorm).pow(0.85f).coerceIn(0f, 1f)
         val directionality = (0.72f + config.externalization * 0.34f + config.blend * 0.24f).coerceIn(0.7f, 1.35f)
@@ -794,6 +836,7 @@ internal class HrtfBinauralProcessor : BaseAudioProcessor() {
 
     companion object {
         private const val SPEED_OF_SOUND_MPS = 343f
+        private const val MAX_SOURCE_DISTANCE_METERS = 4f
         private val HRTF_DB_BINS = floatArrayOf(0f, 15f, 30f, 45f, 60f, 75f, 90f, 120f, 150f, 180f)
 
         private val HRTF_DB_VALUES = arrayOf(

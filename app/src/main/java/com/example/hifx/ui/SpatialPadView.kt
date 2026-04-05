@@ -3,12 +3,16 @@ package com.example.hifx.ui
 import android.content.Context
 import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.DashPathEffect
 import android.graphics.Paint
 import android.graphics.Path
 import android.util.AttributeSet
 import android.view.MotionEvent
 import android.view.View
+import kotlin.math.abs
 import kotlin.math.cos
+import kotlin.math.min
+import kotlin.math.pow
 import kotlin.math.roundToInt
 import kotlin.math.sin
 import kotlin.math.sqrt
@@ -36,6 +40,20 @@ class SpatialPadView @JvmOverloads constructor(
         style = Paint.Style.STROKE
         color = Color.parseColor("#CFEAEAEA")
         strokeWidth = 2f * density
+    }
+    private val headBoundaryPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.STROKE
+        color = Color.parseColor("#E6FFFFFF")
+        strokeWidth = 1.6f * density
+        pathEffect = DashPathEffect(
+            floatArrayOf(5f * density, 4f * density),
+            0f
+        )
+    }
+    private val headBoundaryTickPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.STROKE
+        color = Color.parseColor("#CCFFFFFF")
+        strokeWidth = 1.5f * density
     }
     private val earPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.STROKE
@@ -70,6 +88,12 @@ class SpatialPadView @JvmOverloads constructor(
         color = Color.parseColor("#CCFFFFFF")
         strokeWidth = 2f * density
     }
+    private val linkedBarPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.STROKE
+        color = Color.parseColor("#E6FFFFFF")
+        strokeWidth = 4f * density
+        strokeCap = Paint.Cap.ROUND
+    }
     private val handleTextPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.FILL
         color = Color.WHITE
@@ -87,6 +111,8 @@ class SpatialPadView @JvmOverloads constructor(
     private var linkedMode = true
     private var controlRadiusCm: Int = DEFAULT_CONTROL_RADIUS_CM
     private var headRadiusCm: Float = DEFAULT_HEAD_RADIUS_CM
+    private var linkedChannelSpacingCm: Int = DEFAULT_LINKED_SPACING_CM
+    private val headBoundaryPath = Path()
 
     var onSelectionChanged: ((selected: Handle, fromUser: Boolean) -> Unit)? = null
     var onPositionChanged: ((
@@ -102,10 +128,30 @@ class SpatialPadView @JvmOverloads constructor(
         if (linkedMode == linked) {
             return
         }
+        val centerX = (leftXNorm + rightXNorm) * 0.5f
+        val centerZ = (leftZNorm + rightZNorm) * 0.5f
         linkedMode = linked
         if (linked) {
-            rightXNorm = leftXNorm
-            rightZNorm = leftZNorm
+            applyLinkedLayout(centerX, centerZ)
+        } else {
+            invalidate()
+        }
+    }
+
+    fun setLinkedChannelSpacingCm(valueCm: Int, notify: Boolean = false) {
+        val clamped = valueCm.coerceIn(MIN_LINKED_SPACING_CM, MAX_LINKED_SPACING_CM)
+        if (linkedChannelSpacingCm == clamped) {
+            return
+        }
+        linkedChannelSpacingCm = clamped
+        if (linkedMode) {
+            val centerX = (leftXNorm + rightXNorm) * 0.5f
+            val centerZ = (leftZNorm + rightZNorm) * 0.5f
+            applyLinkedLayout(centerX, centerZ)
+            if (notify) {
+                notifyPositionChanged(false)
+            }
+        } else {
             invalidate()
         }
     }
@@ -137,27 +183,32 @@ class SpatialPadView @JvmOverloads constructor(
             return
         }
         headRadiusCm = clamped
-        invalidate()
+        val leftX = currentOutputX(leftXNorm)
+        val leftZ = currentOutputZ(leftZNorm)
+        val rightX = currentOutputX(rightXNorm)
+        val rightZ = currentOutputZ(rightZNorm)
+        setHandles(leftX, leftZ, rightX, rightZ, notify = false)
     }
 
     fun setHandles(leftX: Int, leftZ: Int, rightX: Int, rightZ: Int, notify: Boolean = false) {
-        leftXNorm = toNormalized(leftX)
-        leftZNorm = toNormalized(leftZ)
-        val left = clampToUnit(leftXNorm, leftZNorm)
-        leftXNorm = left.first
-        leftZNorm = left.second
-
-        rightXNorm = toNormalized(rightX)
-        rightZNorm = toNormalized(rightZ)
-        val right = clampToUnit(rightXNorm, rightZNorm)
-        rightXNorm = right.first
-        rightZNorm = right.second
-
         if (linkedMode) {
-            rightXNorm = leftXNorm
-            rightZNorm = leftZNorm
+            val centerX = toNormalized((leftX + rightX) / 2)
+            val centerZ = toNormalized((leftZ + rightZ) / 2)
+            applyLinkedLayout(centerX, centerZ)
+        } else {
+            leftXNorm = toNormalized(leftX)
+            leftZNorm = toNormalized(leftZ)
+            val left = clampToHrtfDomain(leftXNorm, leftZNorm)
+            leftXNorm = left.first
+            leftZNorm = left.second
+
+            rightXNorm = toNormalized(rightX)
+            rightZNorm = toNormalized(rightZ)
+            val right = clampToHrtfDomain(rightXNorm, rightZNorm)
+            rightXNorm = right.first
+            rightZNorm = right.second
+            invalidate()
         }
-        invalidate()
         if (notify) {
             notifyPositionChanged(false)
         }
@@ -203,6 +254,14 @@ class SpatialPadView @JvmOverloads constructor(
         canvas.drawLine(cx, cy - radius, cx, cy + radius, axisPaint)
         drawHeadContour(canvas, cx, cy, radius)
 
+        if (linkedMode) {
+            val leftPx = cx + leftXNorm * radius
+            val leftPy = cy - leftZNorm * radius
+            val rightPx = cx + rightXNorm * radius
+            val rightPy = cy - rightZNorm * radius
+            canvas.drawLine(leftPx, leftPy, rightPx, rightPy, linkedBarPaint)
+        }
+
         drawHandle(
             canvas = canvas,
             cx = cx,
@@ -230,8 +289,11 @@ class SpatialPadView @JvmOverloads constructor(
     private fun drawHeadContour(canvas: Canvas, cx: Float, cy: Float, padRadius: Float) {
         val radiusRatio = (headRadiusCm / controlRadiusCm.toFloat()).coerceIn(0.07f, 0.62f)
         val headRadiusPx = (padRadius * radiusRatio).coerceAtLeast(8f * density)
-        canvas.drawCircle(cx, cy, headRadiusPx, headFillPaint)
-        canvas.drawCircle(cx, cy, headRadiusPx, headStrokePaint)
+        val boundary = buildPolarHeadBoundaryPath(cx, cy, headRadiusPx)
+        canvas.drawPath(boundary, headFillPaint)
+        canvas.drawPath(boundary, headStrokePaint)
+        canvas.drawPath(boundary, headBoundaryPaint)
+        drawHeadBoundaryTicks(canvas, cx, cy, headRadiusPx)
 
         val earOffsetX = headRadiusPx * 1.02f
         val earRadius = (headRadiusPx * 0.28f).coerceAtLeast(3f * density)
@@ -245,6 +307,36 @@ class SpatialPadView @JvmOverloads constructor(
             lineTo(cx + headRadiusPx * 0.18f, cy - headRadiusPx * 0.84f)
         }
         canvas.drawPath(nosePath, nosePaint)
+    }
+
+    private fun buildPolarHeadBoundaryPath(cx: Float, cy: Float, radiusPx: Float): Path {
+        val segments = 96
+        headBoundaryPath.reset()
+        for (index in 0..segments) {
+            val angle = ((index.toFloat() / segments.toFloat()) * Math.PI * 2.0 - Math.PI / 2.0).toFloat()
+            val x = cx + cos(angle) * radiusPx
+            val y = cy + sin(angle) * radiusPx
+            if (index == 0) {
+                headBoundaryPath.moveTo(x, y)
+            } else {
+                headBoundaryPath.lineTo(x, y)
+            }
+        }
+        headBoundaryPath.close()
+        return headBoundaryPath
+    }
+
+    private fun drawHeadBoundaryTicks(canvas: Canvas, cx: Float, cy: Float, radiusPx: Float) {
+        val inner = radiusPx * 0.92f
+        val outer = radiusPx * 1.06f
+        for (degree in 0 until 360 step 30) {
+            val angle = Math.toRadians((degree - 90).toDouble()).toFloat()
+            val startX = cx + cos(angle) * inner
+            val startY = cy + sin(angle) * inner
+            val endX = cx + cos(angle) * outer
+            val endY = cy + sin(angle) * outer
+            canvas.drawLine(startX, startY, endX, endY, headBoundaryTickPaint)
+        }
     }
 
     override fun onTouchEvent(event: MotionEvent): Boolean {
@@ -311,24 +403,22 @@ class SpatialPadView @JvmOverloads constructor(
         }
         var nx = (x - cx) / radius
         var nz = -(y - cy) / radius
-        val clamped = clampToUnit(nx, nz)
+        val clamped = clampToHrtfDomain(nx, nz)
         nx = clamped.first
         nz = clamped.second
+
+        if (linkedMode) {
+            applyLinkedLayout(nx, nz)
+            notifyPositionChanged(fromUser)
+            return
+        }
 
         if (handle == Handle.LEFT) {
             leftXNorm = nx
             leftZNorm = nz
-            if (linkedMode) {
-                rightXNorm = nx
-                rightZNorm = nz
-            }
         } else {
             rightXNorm = nx
             rightZNorm = nz
-            if (linkedMode) {
-                leftXNorm = nx
-                leftZNorm = nz
-            }
         }
         invalidate()
         notifyPositionChanged(fromUser)
@@ -399,6 +489,65 @@ class SpatialPadView @JvmOverloads constructor(
         return (x / magnitude) to (z / magnitude)
     }
 
+    private fun clampToHrtfDomain(x: Float, z: Float): Pair<Float, Float> {
+        val clamped = clampToUnit(x, z)
+        val magnitude = sqrt(clamped.first * clamped.first + clamped.second * clamped.second)
+        val minimum = minimumSourceRadiusNorm()
+        if (magnitude >= minimum) {
+            return clamped
+        }
+        if (magnitude < 0.0001f) {
+            return 0f to minimum
+        }
+        val scale = minimum / magnitude
+        return (clamped.first * scale).coerceIn(-1f, 1f) to (clamped.second * scale).coerceIn(-1f, 1f)
+    }
+
+    private fun minimumSourceRadiusNorm(): Float {
+        val controlRadius = controlRadiusCm.toFloat().coerceAtLeast(1f)
+        return (headRadiusCm / controlRadius).coerceIn(0.04f, 0.9f)
+    }
+
+    private fun linkedSpacingNorm(): Float {
+        val scale = controlRadiusCm.toFloat().coerceAtLeast(1f)
+        return (linkedChannelSpacingCm / scale).coerceIn(0f, 2f)
+    }
+
+    private fun applyLinkedLayout(centerXNorm: Float, centerZNorm: Float) {
+        var centerX = centerXNorm.coerceIn(-1f, 1f)
+        var centerZ = centerZNorm.coerceIn(-1f, 1f)
+        var halfSpacing = (linkedSpacingNorm() * 0.5f).coerceIn(0f, 1f)
+
+        val maxHalfByZ = (sqrt((1f - centerZ * centerZ).coerceAtLeast(0f)) - abs(centerX)).coerceAtLeast(0f)
+        halfSpacing = min(halfSpacing, maxHalfByZ)
+
+        val minimumRadius = minimumSourceRadiusNorm()
+        val nearXAbs = (abs(centerX) - halfSpacing).coerceAtLeast(0f)
+        val requiredZAbs = sqrt((minimumRadius * minimumRadius - nearXAbs * nearXAbs).coerceAtLeast(0f))
+        val zSign = if (centerZ >= 0f) 1f else -1f
+        var zAbs = abs(centerZ)
+        if (zAbs < requiredZAbs) {
+            zAbs = requiredZAbs
+        }
+
+        val maxZAbsByHalf = sqrt((1f - (abs(centerX) + halfSpacing).pow(2)).coerceAtLeast(0f))
+        if (zAbs > maxZAbsByHalf) {
+            zAbs = maxZAbsByHalf
+        }
+        centerZ = (zSign * zAbs).coerceIn(-1f, 1f)
+
+        val maxHalfByFinalZ = (sqrt((1f - centerZ * centerZ).coerceAtLeast(0f)) - abs(centerX)).coerceAtLeast(0f)
+        halfSpacing = min(halfSpacing, maxHalfByFinalZ)
+        val maxCenterX = (sqrt((1f - centerZ * centerZ).coerceAtLeast(0f)) - halfSpacing).coerceAtLeast(0f)
+        centerX = centerX.coerceIn(-maxCenterX, maxCenterX)
+
+        leftXNorm = (centerX - halfSpacing).coerceIn(-1f, 1f)
+        rightXNorm = (centerX + halfSpacing).coerceIn(-1f, 1f)
+        leftZNorm = centerZ
+        rightZNorm = centerZ
+        invalidate()
+    }
+
     private val density: Float
         get() = resources.displayMetrics.density
 
@@ -407,5 +556,8 @@ class SpatialPadView @JvmOverloads constructor(
         private const val MAX_CONTROL_RADIUS_CM = 120
         private const val DEFAULT_CONTROL_RADIUS_CM = 100
         private const val DEFAULT_HEAD_RADIUS_CM = 8.7f
+        private const val MIN_LINKED_SPACING_CM = 0
+        private const val MAX_LINKED_SPACING_CM = MAX_CONTROL_RADIUS_CM * 2
+        private const val DEFAULT_LINKED_SPACING_CM = 24
     }
 }

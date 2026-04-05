@@ -91,7 +91,15 @@ class EffectsFragment : Fragment() {
         }
         binding.switchSpatialEnabled.setOnCheckedChangeListener { _, isChecked ->
             if (!internalUpdating) {
+                if (isChecked) {
+                    AudioEngine.setSurroundMode(AudioEngine.SURROUND_MODE_STEREO)
+                }
                 AudioEngine.setSpatialEnabled(isChecked)
+            }
+        }
+        binding.switchSurroundEnabled.setOnCheckedChangeListener { _, isChecked ->
+            if (!internalUpdating) {
+                setSurroundEnabled(isChecked)
             }
         }
 
@@ -118,8 +126,8 @@ class EffectsFragment : Fragment() {
 
         binding.toggleSurroundMode.addOnButtonCheckedListener { _, checkedId, isChecked ->
             if (!isChecked || internalUpdating) return@addOnButtonCheckedListener
+            AudioEngine.setSpatialEnabled(false)
             when (checkedId) {
-                R.id.button_surround_stereo -> AudioEngine.setSurroundMode(AudioEngine.SURROUND_MODE_STEREO)
                 R.id.button_surround_5_1 -> AudioEngine.setSurroundMode(AudioEngine.SURROUND_MODE_5_1)
                 R.id.button_surround_7_1 -> AudioEngine.setSurroundMode(AudioEngine.SURROUND_MODE_7_1)
             }
@@ -171,6 +179,7 @@ class EffectsFragment : Fragment() {
         bindSlider(binding.sliderConvolutionWet) { AudioEngine.setConvolutionWetPercent(it) }
 
         bindSlider(binding.sliderRadiusSelected) { AudioEngine.setSpatialRadiusPercent(it) }
+        bindSlider(binding.sliderChannelSpacing) { AudioEngine.setLinkedChannelSpacingCm(it) }
         bindSlider(binding.sliderPosXSelected) { applySelectedX(it) }
         bindSlider(binding.sliderPosYSelected) { applySelectedY(it) }
         bindSlider(binding.sliderPosZSelected) { applySelectedZ(it) }
@@ -184,8 +193,10 @@ class EffectsFragment : Fragment() {
             if (fromUser && !internalUpdating) {
                 val state = AudioEngine.effectsState.value
                 if (!state.channelSeparated) {
-                    AudioEngine.setSpatialPositionX(leftX)
-                    AudioEngine.setSpatialPositionZ(leftZ)
+                    val centerX = ((leftX + rightX) / 2)
+                    val centerZ = ((leftZ + rightZ) / 2)
+                    AudioEngine.setSpatialPositionX(centerX)
+                    AudioEngine.setSpatialPositionZ(centerZ)
                 } else {
                     if (selected == SpatialPadView.Handle.LEFT) {
                         AudioEngine.setSpatialLeftPositionX(leftX)
@@ -244,6 +255,8 @@ class EffectsFragment : Fragment() {
         binding.switchEffectsEnabled.isChecked = state.enabled
         binding.effectsContainer.alpha = if (state.enabled) 1f else 0.45f
         binding.switchSpatialEnabled.isChecked = state.spatialEnabled
+        val surroundEnabled = state.surroundMode != AudioEngine.SURROUND_MODE_STEREO
+        binding.switchSurroundEnabled.isChecked = surroundEnabled
         binding.progressReverbMeter.progress = state.realtimeReverbMeterPercent
         binding.textReverbMeterValue.text = getString(
             R.string.effects_reverb_meter_value,
@@ -316,47 +329,50 @@ class EffectsFragment : Fragment() {
     }
 
     private fun renderSurroundMode(mode: Int) {
+        val surroundEnabled = mode != AudioEngine.SURROUND_MODE_STEREO
         val buttonId = when (mode) {
             AudioEngine.SURROUND_MODE_5_1 -> R.id.button_surround_5_1
             AudioEngine.SURROUND_MODE_7_1 -> R.id.button_surround_7_1
-            else -> R.id.button_surround_stereo
+            else -> R.id.button_surround_5_1
         }
         if (binding.toggleSurroundMode.checkedButtonId != buttonId) {
             binding.toggleSurroundMode.check(buttonId)
         }
+        binding.toggleSurroundMode.isEnabled = surroundEnabled
+        binding.buttonToggleSurroundGainPanel.isEnabled = surroundEnabled
+        binding.cardSurroundSettings.alpha = if (surroundEnabled) 1f else 0.72f
 
-        val isStereo = mode == AudioEngine.SURROUND_MODE_STEREO
         val showRear = mode == AudioEngine.SURROUND_MODE_7_1
 
         setSurroundGainControlVisible(
             textView = binding.textSurroundGainC,
             slider = binding.sliderSurroundGainC,
-            visible = !isStereo
+            visible = surroundEnabled
         )
         setSurroundGainControlVisible(
             textView = binding.textSurroundGainLfe,
             slider = binding.sliderSurroundGainLfe,
-            visible = !isStereo
+            visible = surroundEnabled
         )
         setSurroundGainControlVisible(
             textView = binding.textSurroundGainSl,
             slider = binding.sliderSurroundGainSl,
-            visible = !isStereo
+            visible = surroundEnabled
         )
         setSurroundGainControlVisible(
             textView = binding.textSurroundGainSr,
             slider = binding.sliderSurroundGainSr,
-            visible = !isStereo
+            visible = surroundEnabled
         )
         setSurroundGainControlVisible(
             textView = binding.textSurroundGainRl,
             slider = binding.sliderSurroundGainRl,
-            visible = showRear
+            visible = surroundEnabled && showRear
         )
         setSurroundGainControlVisible(
             textView = binding.textSurroundGainRr,
             slider = binding.sliderSurroundGainRr,
-            visible = showRear
+            visible = surroundEnabled && showRear
         )
     }
 
@@ -394,12 +410,12 @@ class EffectsFragment : Fragment() {
             }
 
             else -> {
-                frontLeft = state.surroundStereoFlPercent
-                frontRight = state.surroundStereoFrPercent
-                center = 100
-                lfe = 100
-                sideLeft = 100
-                sideRight = 100
+                frontLeft = state.surround51FlPercent
+                frontRight = state.surround51FrPercent
+                center = state.surround51CPercent
+                lfe = state.surround51LfePercent
+                sideLeft = state.surround51SlPercent
+                sideRight = state.surround51SrPercent
                 rearLeft = 100
                 rearRight = 100
             }
@@ -446,10 +462,13 @@ class EffectsFragment : Fragment() {
     private fun renderChannelPanel(state: EffectsUiState) {
         binding.switchChannelSeparated.isChecked = state.channelSeparated
         updateChannelPanelVisibility()
+        binding.layoutChannelSelector.isVisible = state.channelSeparated
+        binding.layoutChannelSpacing.isVisible = !state.channelSeparated
 
         val displayRadius = max(state.spatialLeftRadiusPercent, state.spatialRightRadiusPercent).coerceIn(20, 120)
         binding.spatialPadDual.setLinkedMode(!state.channelSeparated)
         binding.spatialPadDual.setControlRadiusCm(displayRadius)
+        binding.spatialPadDual.setLinkedChannelSpacingCm(state.linkedChannelSpacingCm)
         binding.spatialPadDual.setHeadRadiusCm(state.hrtfHeadRadiusMm / 10f)
         binding.spatialPadDual.setHandles(
             state.spatialLeftX,
@@ -468,11 +487,44 @@ class EffectsFragment : Fragment() {
         )
         binding.textRadiusSelected.text = getString(R.string.effects_radius_scale_value_cm, displayRadius)
         binding.sliderRadiusSelected.value = displayRadius.toFloat()
+        val maxSpacing = (displayRadius * 2).coerceAtLeast(0)
+        if (binding.sliderChannelSpacing.valueFrom != 0f) {
+            binding.sliderChannelSpacing.valueFrom = 0f
+        }
+        if (binding.sliderChannelSpacing.valueTo != maxSpacing.toFloat()) {
+            binding.sliderChannelSpacing.valueTo = maxSpacing.toFloat()
+        }
+        val spacingForDisplay = state.linkedChannelSpacingCm.coerceIn(0, maxSpacing)
+        binding.sliderChannelSpacing.value = spacingForDisplay.toFloat()
+        binding.textChannelSpacingValue.text = getString(
+            R.string.effects_channel_spacing_value_cm,
+            spacingForDisplay
+        )
 
-        val selectedX = if (selectedHandle == SpatialPadView.Handle.LEFT) state.spatialLeftX else state.spatialRightX
-        val selectedY = if (selectedHandle == SpatialPadView.Handle.LEFT) state.spatialLeftY else state.spatialRightY
-        val selectedZ = if (selectedHandle == SpatialPadView.Handle.LEFT) state.spatialLeftZ else state.spatialRightZ
-        val selectedLabel = if (selectedHandle == SpatialPadView.Handle.LEFT) {
+        val selectedX = if (!state.channelSeparated) {
+            (state.spatialLeftX + state.spatialRightX) / 2
+        } else if (selectedHandle == SpatialPadView.Handle.LEFT) {
+            state.spatialLeftX
+        } else {
+            state.spatialRightX
+        }
+        val selectedY = if (!state.channelSeparated) {
+            (state.spatialLeftY + state.spatialRightY) / 2
+        } else if (selectedHandle == SpatialPadView.Handle.LEFT) {
+            state.spatialLeftY
+        } else {
+            state.spatialRightY
+        }
+        val selectedZ = if (!state.channelSeparated) {
+            (state.spatialLeftZ + state.spatialRightZ) / 2
+        } else if (selectedHandle == SpatialPadView.Handle.LEFT) {
+            state.spatialLeftZ
+        } else {
+            state.spatialRightZ
+        }
+        val selectedLabel = if (!state.channelSeparated) {
+            getString(R.string.effects_channel_linked_short)
+        } else if (selectedHandle == SpatialPadView.Handle.LEFT) {
             getString(R.string.effects_channel_left_short)
         } else {
             getString(R.string.effects_channel_right_short)
@@ -485,7 +537,9 @@ class EffectsFragment : Fragment() {
         binding.textPosYSelected.text = getString(R.string.effects_pos_y_selected_value_cm, selectedLabel, selectedY)
         binding.textPosZSelected.text = getString(R.string.effects_pos_z_selected_value_cm, selectedLabel, selectedZ)
 
-        renderSelectedChannelButtons()
+        if (state.channelSeparated) {
+            renderSelectedChannelButtons()
+        }
     }
 
     private fun renderSelectedChannelButtons() {
@@ -555,7 +609,8 @@ class EffectsFragment : Fragment() {
     }
 
     private fun updateSurroundGainPanelVisibility() {
-        binding.layoutSurroundGainPanel.isVisible = surroundGainPanelExpanded
+        val surroundEnabled = AudioEngine.effectsState.value.surroundMode != AudioEngine.SURROUND_MODE_STEREO
+        binding.layoutSurroundGainPanel.isVisible = surroundGainPanelExpanded && surroundEnabled
         binding.buttonToggleSurroundGainPanel.text = getString(
             if (surroundGainPanelExpanded) {
                 R.string.effects_surround_gain_collapse
@@ -563,6 +618,21 @@ class EffectsFragment : Fragment() {
                 R.string.effects_surround_gain_expand
             }
         )
+    }
+
+    private fun setSurroundEnabled(enabled: Boolean) {
+        if (enabled) {
+            AudioEngine.setSpatialEnabled(false)
+            val current = AudioEngine.effectsState.value.surroundMode
+            val target = if (current == AudioEngine.SURROUND_MODE_7_1) {
+                AudioEngine.SURROUND_MODE_7_1
+            } else {
+                AudioEngine.SURROUND_MODE_5_1
+            }
+            AudioEngine.setSurroundMode(target)
+        } else {
+            AudioEngine.setSurroundMode(AudioEngine.SURROUND_MODE_STEREO)
+        }
     }
 
     private fun bindAxisSliderRange(slider: Slider, radius: Int, value: Int) {
@@ -580,9 +650,10 @@ class EffectsFragment : Fragment() {
         return if (!state.channelSeparated) {
             getString(
                 R.string.effects_channel_position_summary_linked_cm,
-                state.spatialLeftX,
-                state.spatialLeftY,
-                state.spatialLeftZ
+                (state.spatialLeftX + state.spatialRightX) / 2,
+                (state.spatialLeftY + state.spatialRightY) / 2,
+                (state.spatialLeftZ + state.spatialRightZ) / 2,
+                state.linkedChannelSpacingCm
             )
         } else {
             getString(

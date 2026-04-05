@@ -3,6 +3,7 @@ package com.example.hifx.audio
 import android.content.ContentUris
 import android.content.Context
 import android.content.SharedPreferences
+import android.media.AudioDeviceInfo
 import android.media.AudioFormat
 import android.media.AudioManager
 import android.media.audiofx.BassBoost
@@ -25,11 +26,14 @@ import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
+import androidx.media3.exoplayer.Renderer
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.audio.AudioSink
 import androidx.media3.exoplayer.audio.DefaultAudioSink
+import androidx.media3.exoplayer.mediacodec.MediaCodecSelector
+import androidx.media3.exoplayer.video.VideoRendererEventListener
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -47,6 +51,7 @@ import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.pow
+import kotlin.math.roundToInt
 import kotlin.math.sqrt
 
 data class LibraryTrack(
@@ -77,6 +82,7 @@ data class MediaLibraryUiState(
 data class PlaybackUiState(
     val title: String = "未选择音频",
     val subtitle: String = "支持 FLAC / WAV / MP3 / AAC",
+    val mediaUri: Uri? = null,
     val artworkUri: Uri? = null,
     val hasMedia: Boolean = false,
     val isPlaying: Boolean = false,
@@ -113,6 +119,7 @@ data class EffectsUiState(
     val spatialRightZ: Int = 0,
     val spatialLeftRadiusPercent: Int = 100,
     val spatialRightRadiusPercent: Int = 100,
+    val linkedChannelSpacingCm: Int = 24,
     val roomSize: Int = 55,
     val roomDamping: Int = 35,
     val earlyReflection: Int = 45,
@@ -152,12 +159,23 @@ data class EffectsUiState(
 
 data class SettingsUiState(
     val hiFiMode: Boolean = true,
+    val hiResApiEnabled: Boolean = true,
+    val preferredBitDepth: Int = 32,
+    val preferredMaxBitrateKbps: Int? = null,
+    val preferredUsbDeviceId: Int? = null,
+    val usbOutputOptions: List<UsbOutputOption> = emptyList(),
+    val activeOutputRouteLabel: String = "系统默认",
     val outputSampleRateHz: Int? = null,
     val outputFramesPerBuffer: Int? = null,
     val offloadSupported: Boolean = false,
     val scanFolderUri: Uri? = null,
     val scanFolderLabel: String = "全部媒体库",
     val themeMode: Int = AppCompatDelegate.MODE_NIGHT_FOLLOW_SYSTEM
+)
+
+data class UsbOutputOption(
+    val id: Int,
+    val label: String
 )
 
 private data class SpatialModel(
@@ -181,6 +199,10 @@ private data class SpatialModel(
 object AudioEngine {
     private const val PREFS_NAME = "hifx_audio_preferences"
     private const val KEY_HIFI_MODE = "key_hifi_mode"
+    private const val KEY_HIRES_API_ENABLED = "key_hires_api_enabled"
+    private const val KEY_PREFERRED_BIT_DEPTH = "key_preferred_bit_depth"
+    private const val KEY_MAX_AUDIO_BITRATE_KBPS = "key_max_audio_bitrate_kbps"
+    private const val KEY_PREFERRED_USB_DEVICE_ID = "key_preferred_usb_device_id"
     private const val KEY_EFFECT_ENABLED = "key_effect_enabled"
     private const val KEY_BASS_STRENGTH = "key_bass_strength"
     private const val KEY_VIRTUALIZER_STRENGTH = "key_virtualizer_strength"
@@ -199,6 +221,7 @@ object AudioEngine {
     private const val KEY_SPATIAL_RIGHT_Z = "key_spatial_right_z"
     private const val KEY_SPATIAL_LEFT_RADIUS_PERCENT = "key_spatial_left_radius_percent"
     private const val KEY_SPATIAL_RIGHT_RADIUS_PERCENT = "key_spatial_right_radius_percent"
+    private const val KEY_LINKED_CHANNEL_SPACING_CM = "key_linked_channel_spacing_cm"
     private const val KEY_ROOM_SIZE = "key_room_size"
     private const val KEY_ROOM_DAMPING = "key_room_damping"
     private const val KEY_EARLY_REFLECTION = "key_early_reflection"
@@ -254,6 +277,14 @@ object AudioEngine {
     private const val SPATIAL_COORD_MIN_CM = -SPATIAL_COORD_MAX_CM
     private const val SPATIAL_RADIUS_MIN_CM = 20
     private const val SPATIAL_RADIUS_MAX_CM = 120
+    private const val LINKED_CHANNEL_SPACING_MIN_CM = 0
+    private const val LINKED_CHANNEL_SPACING_MAX_CM = SPATIAL_RADIUS_MAX_CM * 2
+    private const val HRTF_SOURCE_MARGIN_CM = 0.5f
+    private const val HRTF_MAX_SOURCE_DISTANCE_METERS = 4f
+    private const val BIT_DEPTH_16 = 16
+    private const val BIT_DEPTH_32_FLOAT = 32
+    private const val MAX_AUDIO_BITRATE_MIN_KBPS = 64
+    private const val MAX_AUDIO_BITRATE_MAX_KBPS = 9216
 
     private val albumArtBaseUri: Uri = Uri.parse("content://media/external/audio/albumart")
 
@@ -366,6 +397,8 @@ object AudioEngine {
                 .coerceIn(SPATIAL_RADIUS_MIN_CM, SPATIAL_RADIUS_MAX_CM),
             spatialRightRadiusPercent = prefs.getInt(KEY_SPATIAL_RIGHT_RADIUS_PERCENT, 100)
                 .coerceIn(SPATIAL_RADIUS_MIN_CM, SPATIAL_RADIUS_MAX_CM),
+            linkedChannelSpacingCm = prefs.getInt(KEY_LINKED_CHANNEL_SPACING_CM, 24)
+                .coerceIn(LINKED_CHANNEL_SPACING_MIN_CM, LINKED_CHANNEL_SPACING_MAX_CM),
             roomSize = prefs.getInt(KEY_ROOM_SIZE, 55).coerceIn(0, 100),
             roomDamping = prefs.getInt(KEY_ROOM_DAMPING, 35).coerceIn(0, 100),
             earlyReflection = prefs.getInt(KEY_EARLY_REFLECTION, 45).coerceIn(0, 100),
@@ -418,8 +451,19 @@ object AudioEngine {
                 ?: "未导入 IRS"
         )
         _effectsState.value = withSpatialDerived(storedEffects)
+        persistSpatialPosition(_effectsState.value)
+        val preferredBitDepth = normalizeBitDepth(
+            prefs.getInt(KEY_PREFERRED_BIT_DEPTH, BIT_DEPTH_32_FLOAT)
+        )
+        val preferredMaxBitrate = prefs.getInt(KEY_MAX_AUDIO_BITRATE_KBPS, -1)
+            .takeIf { it in MAX_AUDIO_BITRATE_MIN_KBPS..MAX_AUDIO_BITRATE_MAX_KBPS }
+        val preferredUsbDeviceId = prefs.getInt(KEY_PREFERRED_USB_DEVICE_ID, -1).takeIf { it >= 0 }
         _settingsState.value = _settingsState.value.copy(
             hiFiMode = prefs.getBoolean(KEY_HIFI_MODE, true),
+            hiResApiEnabled = prefs.getBoolean(KEY_HIRES_API_ENABLED, true),
+            preferredBitDepth = preferredBitDepth,
+            preferredMaxBitrateKbps = preferredMaxBitrate,
+            preferredUsbDeviceId = preferredUsbDeviceId,
             scanFolderUri = scanUri,
             scanFolderLabel = buildScanFolderLabel(scanUri),
             themeMode = themeMode
@@ -673,6 +717,63 @@ object AudioEngine {
         syncPlaybackState()
     }
 
+    fun setHiResApiEnabled(enabled: Boolean) {
+        val current = _settingsState.value
+        if (current.hiResApiEnabled == enabled) {
+            return
+        }
+        _settingsState.value = current.copy(hiResApiEnabled = enabled)
+        prefs.edit().putBoolean(KEY_HIRES_API_ENABLED, enabled).apply()
+        rebuildPlayerPreservingState()
+        refreshOutputInfo()
+    }
+
+    fun setPreferredBitDepth(bitDepth: Int) {
+        val normalized = normalizeBitDepth(bitDepth)
+        val current = _settingsState.value
+        if (current.preferredBitDepth == normalized) {
+            return
+        }
+        _settingsState.value = current.copy(preferredBitDepth = normalized)
+        prefs.edit().putInt(KEY_PREFERRED_BIT_DEPTH, normalized).apply()
+        rebuildPlayerPreservingState()
+        refreshOutputInfo()
+    }
+
+    fun setPreferredMaxAudioBitrateKbps(kbps: Int?) {
+        val normalized = kbps?.coerceIn(MAX_AUDIO_BITRATE_MIN_KBPS, MAX_AUDIO_BITRATE_MAX_KBPS)
+        val current = _settingsState.value
+        if (current.preferredMaxBitrateKbps == normalized) {
+            return
+        }
+        _settingsState.value = current.copy(preferredMaxBitrateKbps = normalized)
+        val editor = prefs.edit()
+        if (normalized == null) {
+            editor.remove(KEY_MAX_AUDIO_BITRATE_KBPS)
+        } else {
+            editor.putInt(KEY_MAX_AUDIO_BITRATE_KBPS, normalized)
+        }
+        editor.apply()
+        applyTrackSelectionPreferences()
+    }
+
+    fun setPreferredUsbOutputDeviceId(deviceId: Int?) {
+        val current = _settingsState.value
+        if (current.preferredUsbDeviceId == deviceId) {
+            return
+        }
+        _settingsState.value = current.copy(preferredUsbDeviceId = deviceId)
+        val editor = prefs.edit()
+        if (deviceId == null) {
+            editor.remove(KEY_PREFERRED_USB_DEVICE_ID)
+        } else {
+            editor.putInt(KEY_PREFERRED_USB_DEVICE_ID, deviceId)
+        }
+        editor.apply()
+        applyPreferredOutputDevice()
+        refreshOutputInfo()
+    }
+
     fun setEffectsEnabled(enabled: Boolean) {
         _effectsState.value = withSpatialDerived(_effectsState.value.copy(enabled = enabled))
         prefs.edit().putBoolean(KEY_EFFECT_ENABLED, enabled).apply()
@@ -718,15 +819,30 @@ object AudioEngine {
     }
 
     fun setSpatialEnabled(enabled: Boolean) {
-        _effectsState.value = withSpatialDerived(_effectsState.value.copy(spatialEnabled = enabled))
+        val current = _effectsState.value
+        val updated = if (enabled) {
+            current.copy(
+                spatialEnabled = true,
+                surroundMode = SURROUND_MODE_STEREO
+            )
+        } else {
+            current.copy(spatialEnabled = false)
+        }
+        _effectsState.value = withSpatialDerived(updated)
         prefs.edit().putBoolean(KEY_SPATIAL_ENABLED, enabled).apply()
+        if (enabled) {
+            prefs.edit().putInt(KEY_SURROUND_MODE, SURROUND_MODE_STEREO).apply()
+        }
         applyEffectState()
     }
 
     fun setChannelSeparated(enabled: Boolean) {
         val state = _effectsState.value
         val updated = if (enabled) {
-            state.copy(channelSeparated = true)
+            state.copy(
+                channelSeparated = true,
+                linkedChannelSpacingCm = linkedSpacingFromState(state)
+            )
         } else {
             val mergedX = ((state.spatialLeftX + state.spatialRightX) / 2).coerceIn(SPATIAL_COORD_MIN_CM, SPATIAL_COORD_MAX_CM)
             val mergedY = ((state.spatialLeftY + state.spatialRightY) / 2).coerceIn(SPATIAL_COORD_MIN_CM, SPATIAL_COORD_MAX_CM)
@@ -734,16 +850,23 @@ object AudioEngine {
             val mergedRadius =
                 ((state.spatialLeftRadiusPercent + state.spatialRightRadiusPercent) / 2)
                     .coerceIn(SPATIAL_RADIUS_MIN_CM, SPATIAL_RADIUS_MAX_CM)
+            val linked = buildLinkedChannelPair(
+                centerX = mergedX,
+                centerZ = mergedZ,
+                spacingCm = linkedSpacingFromState(state),
+                radiusCm = mergedRadius
+            )
             state.copy(
                 channelSeparated = false,
-                spatialLeftX = mergedX.coerceIn(-mergedRadius, mergedRadius),
+                spatialLeftX = linked.leftX,
                 spatialLeftY = mergedY,
-                spatialLeftZ = mergedZ.coerceIn(-mergedRadius, mergedRadius),
-                spatialRightX = mergedX.coerceIn(-mergedRadius, mergedRadius),
+                spatialLeftZ = linked.leftZ,
+                spatialRightX = linked.rightX,
                 spatialRightY = mergedY,
-                spatialRightZ = mergedZ.coerceIn(-mergedRadius, mergedRadius),
+                spatialRightZ = linked.rightZ,
                 spatialLeftRadiusPercent = mergedRadius,
-                spatialRightRadiusPercent = mergedRadius
+                spatialRightRadiusPercent = mergedRadius,
+                linkedChannelSpacingCm = linked.spacingCm
             )
         }
         _effectsState.value = withSpatialDerived(updated)
@@ -752,12 +875,36 @@ object AudioEngine {
     }
 
     fun setSpatialPositionX(value: Int) {
-        val radius = _effectsState.value.spatialLeftRadiusPercent.coerceIn(SPATIAL_RADIUS_MIN_CM, SPATIAL_RADIUS_MAX_CM)
+        val state = _effectsState.value
+        if (state.channelSeparated) {
+            val radius = state.spatialLeftRadiusPercent.coerceIn(SPATIAL_RADIUS_MIN_CM, SPATIAL_RADIUS_MAX_CM)
+            val clamped = value.coerceIn(-radius, radius)
+            _effectsState.value = withSpatialDerived(state.copy(spatialLeftX = clamped, spatialRightX = clamped))
+            persistSpatialPosition(_effectsState.value)
+            applyEffectState()
+            return
+        }
+        val radius = min(state.spatialLeftRadiusPercent, state.spatialRightRadiusPercent)
+            .coerceIn(SPATIAL_RADIUS_MIN_CM, SPATIAL_RADIUS_MAX_CM)
         val clamped = value.coerceIn(-radius, radius)
+        val center = effectiveSpatialCenter(state)
+        val linked = buildLinkedChannelPair(
+            centerX = clamped,
+            centerZ = center.z,
+            spacingCm = linkedSpacingFromState(state),
+            radiusCm = radius
+        )
         _effectsState.value = withSpatialDerived(
-            _effectsState.value.copy(
-                spatialLeftX = clamped,
-                spatialRightX = clamped
+            state.copy(
+                spatialLeftX = linked.leftX,
+                spatialRightX = linked.rightX,
+                spatialLeftZ = linked.leftZ,
+                spatialRightZ = linked.rightZ,
+                spatialLeftY = center.y,
+                spatialRightY = center.y,
+                spatialLeftRadiusPercent = radius,
+                spatialRightRadiusPercent = radius,
+                linkedChannelSpacingCm = linked.spacingCm
             )
         )
         persistSpatialPosition(_effectsState.value)
@@ -765,24 +912,44 @@ object AudioEngine {
     }
 
     fun setSpatialPositionY(value: Int) {
+        val state = _effectsState.value
         val clamped = value.coerceIn(SPATIAL_COORD_MIN_CM, SPATIAL_COORD_MAX_CM)
-        _effectsState.value = withSpatialDerived(
-            _effectsState.value.copy(
-                spatialLeftY = clamped,
-                spatialRightY = clamped
-            )
-        )
+        _effectsState.value = withSpatialDerived(state.copy(spatialLeftY = clamped, spatialRightY = clamped))
         persistSpatialPosition(_effectsState.value)
         applyEffectState()
     }
 
     fun setSpatialPositionZ(value: Int) {
-        val radius = _effectsState.value.spatialLeftRadiusPercent.coerceIn(SPATIAL_RADIUS_MIN_CM, SPATIAL_RADIUS_MAX_CM)
+        val state = _effectsState.value
+        if (state.channelSeparated) {
+            val radius = state.spatialLeftRadiusPercent.coerceIn(SPATIAL_RADIUS_MIN_CM, SPATIAL_RADIUS_MAX_CM)
+            val clamped = value.coerceIn(-radius, radius)
+            _effectsState.value = withSpatialDerived(state.copy(spatialLeftZ = clamped, spatialRightZ = clamped))
+            persistSpatialPosition(_effectsState.value)
+            applyEffectState()
+            return
+        }
+        val radius = min(state.spatialLeftRadiusPercent, state.spatialRightRadiusPercent)
+            .coerceIn(SPATIAL_RADIUS_MIN_CM, SPATIAL_RADIUS_MAX_CM)
         val clamped = value.coerceIn(-radius, radius)
+        val center = effectiveSpatialCenter(state)
+        val linked = buildLinkedChannelPair(
+            centerX = center.x,
+            centerZ = clamped,
+            spacingCm = linkedSpacingFromState(state),
+            radiusCm = radius
+        )
         _effectsState.value = withSpatialDerived(
-            _effectsState.value.copy(
-                spatialLeftZ = clamped,
-                spatialRightZ = clamped
+            state.copy(
+                spatialLeftX = linked.leftX,
+                spatialRightX = linked.rightX,
+                spatialLeftZ = linked.leftZ,
+                spatialRightZ = linked.rightZ,
+                spatialLeftY = center.y,
+                spatialRightY = center.y,
+                spatialLeftRadiusPercent = radius,
+                spatialRightRadiusPercent = radius,
+                linkedChannelSpacingCm = linked.spacingCm
             )
         )
         persistSpatialPosition(_effectsState.value)
@@ -838,7 +1005,7 @@ object AudioEngine {
     fun setSpatialRadiusPercent(value: Int) {
         val clamped = value.coerceIn(SPATIAL_RADIUS_MIN_CM, SPATIAL_RADIUS_MAX_CM)
         val state = _effectsState.value
-        _effectsState.value = withSpatialDerived(
+        val updated = if (state.channelSeparated) {
             state.copy(
                 spatialLeftRadiusPercent = clamped,
                 spatialRightRadiusPercent = clamped,
@@ -847,7 +1014,59 @@ object AudioEngine {
                 spatialRightX = state.spatialRightX.coerceIn(-clamped, clamped),
                 spatialRightZ = state.spatialRightZ.coerceIn(-clamped, clamped)
             )
-        )
+        } else {
+            val center = effectiveSpatialCenter(state)
+            val linked = buildLinkedChannelPair(
+                centerX = center.x,
+                centerZ = center.z,
+                spacingCm = linkedSpacingFromState(state),
+                radiusCm = clamped
+            )
+            state.copy(
+                spatialLeftRadiusPercent = clamped,
+                spatialRightRadiusPercent = clamped,
+                spatialLeftX = linked.leftX,
+                spatialLeftY = center.y,
+                spatialLeftZ = linked.leftZ,
+                spatialRightX = linked.rightX,
+                spatialRightY = center.y,
+                spatialRightZ = linked.rightZ,
+                linkedChannelSpacingCm = linked.spacingCm
+            )
+        }
+        _effectsState.value = withSpatialDerived(updated)
+        persistSpatialPosition(_effectsState.value)
+        applyEffectState()
+    }
+
+    fun setLinkedChannelSpacingCm(value: Int) {
+        val state = _effectsState.value
+        val clamped = value.coerceIn(LINKED_CHANNEL_SPACING_MIN_CM, LINKED_CHANNEL_SPACING_MAX_CM)
+        val updated = if (state.channelSeparated) {
+            state.copy(linkedChannelSpacingCm = clamped)
+        } else {
+            val radius = min(state.spatialLeftRadiusPercent, state.spatialRightRadiusPercent)
+                .coerceIn(SPATIAL_RADIUS_MIN_CM, SPATIAL_RADIUS_MAX_CM)
+            val center = effectiveSpatialCenter(state)
+            val linked = buildLinkedChannelPair(
+                centerX = center.x,
+                centerZ = center.z,
+                spacingCm = clamped,
+                radiusCm = radius
+            )
+            state.copy(
+                linkedChannelSpacingCm = linked.spacingCm,
+                spatialLeftRadiusPercent = radius,
+                spatialRightRadiusPercent = radius,
+                spatialLeftX = linked.leftX,
+                spatialLeftY = center.y,
+                spatialLeftZ = linked.leftZ,
+                spatialRightX = linked.rightX,
+                spatialRightY = center.y,
+                spatialRightZ = linked.rightZ
+            )
+        }
+        _effectsState.value = withSpatialDerived(updated)
         persistSpatialPosition(_effectsState.value)
         applyEffectState()
     }
@@ -931,6 +1150,7 @@ object AudioEngine {
         val clamped = value.coerceIn(70, 110)
         _effectsState.value = withSpatialDerived(_effectsState.value.copy(hrtfHeadRadiusMm = clamped))
         prefs.edit().putInt(KEY_HRTF_HEAD_RADIUS_MM, clamped).apply()
+        persistSpatialPosition(_effectsState.value)
         applyEffectState()
     }
 
@@ -957,8 +1177,20 @@ object AudioEngine {
 
     fun setSurroundMode(mode: Int) {
         val clamped = mode.coerceIn(SURROUND_MODE_STEREO, SURROUND_MODE_7_1)
-        _effectsState.value = withSpatialDerived(_effectsState.value.copy(surroundMode = clamped))
+        val current = _effectsState.value
+        val updated = if (clamped != SURROUND_MODE_STEREO) {
+            current.copy(
+                surroundMode = clamped,
+                spatialEnabled = false
+            )
+        } else {
+            current.copy(surroundMode = clamped)
+        }
+        _effectsState.value = withSpatialDerived(updated)
         prefs.edit().putInt(KEY_SURROUND_MODE, clamped).apply()
+        if (clamped != SURROUND_MODE_STEREO) {
+            prefs.edit().putBoolean(KEY_SPATIAL_ENABLED, false).apply()
+        }
         applyEffectState()
     }
 
@@ -1100,10 +1332,24 @@ object AudioEngine {
         } else {
             false
         }
+        val usbOptions = audioManager
+            ?.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
+            ?.filter { it.isUsbOutputDevice() }
+            ?.sortedBy { it.productName?.toString().orEmpty().lowercase() }
+            ?.map { UsbOutputOption(id = it.id, label = buildUsbDeviceLabel(it)) }
+            .orEmpty()
+        val preferredUsbDevice = _settingsState.value.preferredUsbDeviceId
+            ?.takeIf { id -> usbOptions.any { it.id == id } }
+        val activeRoute = preferredUsbDevice
+            ?.let { id -> usbOptions.firstOrNull { it.id == id }?.label }
+            ?: "系统默认"
         _settingsState.value = _settingsState.value.copy(
             outputSampleRateHz = sampleRate,
             outputFramesPerBuffer = frames,
-            offloadSupported = offload
+            offloadSupported = offload,
+            usbOutputOptions = usbOptions,
+            preferredUsbDeviceId = preferredUsbDevice,
+            activeOutputRouteLabel = activeRoute
         )
     }
 
@@ -1124,6 +1370,7 @@ object AudioEngine {
 
     @UnstableApi
     private fun buildPlayer() {
+        val settings = _settingsState.value
         val attrs = AudioAttributes.Builder()
             .setUsage(C.USAGE_MEDIA)
             .setContentType(C.AUDIO_CONTENT_TYPE_MUSIC)
@@ -1137,11 +1384,27 @@ object AudioEngine {
                 enableFloatOutput: Boolean,
                 enableAudioTrackPlaybackParams: Boolean
             ): AudioSink {
+                val floatOutputEnabled = settings.hiResApiEnabled &&
+                    settings.preferredBitDepth == BIT_DEPTH_32_FLOAT &&
+                    enableFloatOutput
                 return DefaultAudioSink.Builder(context)
                     .setAudioProcessors(arrayOf(hrtfBinauralProcessor!!, convolutionReverbProcessor!!))
-                    .setEnableFloatOutput(enableFloatOutput)
+                    .setEnableFloatOutput(floatOutputEnabled)
                     .setEnableAudioTrackPlaybackParams(enableAudioTrackPlaybackParams)
                     .build()
+            }
+
+            override fun buildVideoRenderers(
+                context: Context,
+                extensionRendererMode: Int,
+                mediaCodecSelector: MediaCodecSelector,
+                enableDecoderFallback: Boolean,
+                eventHandler: Handler,
+                eventListener: VideoRendererEventListener,
+                allowedVideoJoiningTimeMs: Long,
+                out: ArrayList<Renderer>
+            ) {
+                // Audio-only app: skip creating video renderers to avoid unnecessary codec probing/noise.
             }
         }
 
@@ -1161,19 +1424,112 @@ object AudioEngine {
                     }
                 addListener(playerListener)
             }
+        applyTrackSelectionPreferences()
         applyHiFiMode(_settingsState.value.hiFiMode)
+        applyPreferredOutputDevice()
         applyEffectState()
         syncPlaybackState()
     }
 
     private fun applyHiFiMode(enabled: Boolean) {
+        val hiresEnabled = enabled && _settingsState.value.hiResApiEnabled
         player?.setSkipSilenceEnabled(false)
         val maybeMethod = player?.javaClass?.methods?.firstOrNull {
             it.name == "experimentalSetOffloadSchedulingEnabled" && it.parameterTypes.size == 1
         }
         runCatching {
-            maybeMethod?.invoke(player, enabled)
+            maybeMethod?.invoke(player, hiresEnabled)
         }
+    }
+
+    private fun applyTrackSelectionPreferences() {
+        val currentPlayer = player ?: return
+        val maxBitrate = _settingsState.value.preferredMaxBitrateKbps
+        val paramsBuilder = currentPlayer.trackSelectionParameters.buildUpon()
+        if (maxBitrate == null) {
+            paramsBuilder.setMaxAudioBitrate(Int.MAX_VALUE)
+        } else {
+            paramsBuilder.setMaxAudioBitrate(maxBitrate * 1000)
+        }
+        currentPlayer.trackSelectionParameters = paramsBuilder.build()
+    }
+
+    private fun applyPreferredOutputDevice() {
+        val currentPlayer = player ?: return
+        val audioManager = appContext.getSystemService(AudioManager::class.java) ?: return
+        val preferredDevice = _settingsState.value.preferredUsbDeviceId?.let { preferredId ->
+            audioManager.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
+                .firstOrNull { it.id == preferredId && it.isUsbOutputDevice() }
+        }
+        val routeMethod = currentPlayer.javaClass.methods.firstOrNull { method ->
+            (method.name == "setPreferredAudioDevice" || method.name == "experimentalSetPreferredAudioDevice") &&
+                method.parameterTypes.size == 1 &&
+                method.parameterTypes.firstOrNull()?.let { AudioDeviceInfo::class.java.isAssignableFrom(it) } == true
+        }
+        runCatching {
+            routeMethod?.invoke(currentPlayer, preferredDevice)
+        }
+    }
+
+    @UnstableApi
+    private fun rebuildPlayerPreservingState() {
+        if (!initialized) {
+            return
+        }
+        val snapshot = capturePlayerSnapshot()
+        player?.removeListener(playerListener)
+        player?.release()
+        player = null
+        releaseAudioEffects()
+        buildPlayer()
+        restorePlayerSnapshot(snapshot)
+    }
+
+    private fun capturePlayerSnapshot(): PlayerSnapshot {
+        val currentPlayer = player
+        return if (currentPlayer == null) {
+            PlayerSnapshot()
+        } else {
+            PlayerSnapshot(
+                mediaItems = (0 until currentPlayer.mediaItemCount).map { index -> currentPlayer.getMediaItemAt(index) },
+                index = currentPlayer.currentMediaItemIndex.coerceAtLeast(0),
+                positionMs = currentPlayer.currentPosition.coerceAtLeast(0L),
+                playWhenReady = currentPlayer.playWhenReady
+            )
+        }
+    }
+
+    private fun restorePlayerSnapshot(snapshot: PlayerSnapshot) {
+        val currentPlayer = player ?: return
+        if (snapshot.mediaItems.isEmpty()) {
+            syncPlaybackState()
+            return
+        }
+        val index = snapshot.index.coerceIn(0, snapshot.mediaItems.lastIndex)
+        currentPlayer.setMediaItems(snapshot.mediaItems, index, snapshot.positionMs.coerceAtLeast(0L))
+        currentPlayer.prepare()
+        if (snapshot.playWhenReady) {
+            AudioPlaybackService.start(appContext)
+            currentPlayer.play()
+        }
+    }
+
+    private fun normalizeBitDepth(value: Int): Int {
+        return if (value == BIT_DEPTH_16) BIT_DEPTH_16 else BIT_DEPTH_32_FLOAT
+    }
+
+    private fun AudioDeviceInfo.isUsbOutputDevice(): Boolean {
+        return when (type) {
+            AudioDeviceInfo.TYPE_USB_DEVICE,
+            AudioDeviceInfo.TYPE_USB_HEADSET,
+            AudioDeviceInfo.TYPE_USB_ACCESSORY -> true
+            else -> false
+        } && isSink
+    }
+
+    private fun buildUsbDeviceLabel(device: AudioDeviceInfo): String {
+        val product = device.productName?.toString()?.trim().takeUnless { it.isNullOrBlank() } ?: "USB DAC"
+        return "$product (#${device.id})"
     }
 
     private fun attachAudioEffects(audioSessionId: Int) {
@@ -1289,30 +1645,44 @@ object AudioEngine {
     }
 
     private fun updateHrtfProcessor(state: EffectsUiState) {
-        val rightX = if (state.channelSeparated) state.spatialRightX else state.spatialLeftX
-        val rightY = if (state.channelSeparated) state.spatialRightY else state.spatialLeftY
-        val rightZ = if (state.channelSeparated) state.spatialRightZ else state.spatialLeftZ
-        val surroundGains = activeSurroundChannelGains(state)
-        val normalizationRangeCm = SPATIAL_COORD_MAX_CM.toFloat().coerceAtLeast(1f)
+        val sanitized = enforceHrtfSourceBounds(state)
+        val rightX = sanitized.spatialRightX
+        val rightY = sanitized.spatialRightY
+        val rightZ = sanitized.spatialRightZ
+        val leftSourcePose = buildHrtfSourcePose(
+            xCm = sanitized.spatialLeftX,
+            yCm = sanitized.spatialLeftY,
+            zCm = sanitized.spatialLeftZ,
+            headRadiusMm = sanitized.hrtfHeadRadiusMm
+        )
+        val rightSourcePose = buildHrtfSourcePose(
+            xCm = rightX,
+            yCm = rightY,
+            zCm = rightZ,
+            headRadiusMm = sanitized.hrtfHeadRadiusMm
+        )
+        val surroundGains = activeSurroundChannelGains(sanitized)
         hrtfBinauralProcessor?.updateConfig(
             HrtfRenderConfig(
-                enabled = state.enabled && state.hrtfEnabled,
-                spatialEnabled = state.spatialEnabled,
-                channelSeparated = state.channelSeparated,
-                leftXNorm = (state.spatialLeftX / normalizationRangeCm).coerceIn(-1f, 1f),
-                leftYNorm = (state.spatialLeftY / normalizationRangeCm).coerceIn(-1f, 1f),
-                leftZNorm = (state.spatialLeftZ / normalizationRangeCm).coerceIn(-1f, 1f),
-                rightXNorm = (rightX / normalizationRangeCm).coerceIn(-1f, 1f),
-                rightYNorm = (rightY / normalizationRangeCm).coerceIn(-1f, 1f),
-                rightZNorm = (rightZ / normalizationRangeCm).coerceIn(-1f, 1f),
-                roomDampingNorm = state.roomDamping / 100f,
-                wetMixNorm = state.wetMix / 100f,
-                headRadiusMeters = state.hrtfHeadRadiusMm / 1000f,
-                blend = state.hrtfBlendPercent / 100f,
-                crossfeed = state.hrtfCrossfeedPercent / 100f,
-                externalization = state.hrtfExternalizationPercent / 100f,
-                useHrtfDatabase = state.hrtfUseDatabase,
-                surroundMode = state.surroundMode,
+                enabled = sanitized.enabled && sanitized.hrtfEnabled,
+                spatialEnabled = sanitized.spatialEnabled,
+                channelSeparated = sanitized.channelSeparated,
+                leftXNorm = leftSourcePose.xNorm,
+                leftYNorm = leftSourcePose.yNorm,
+                leftZNorm = leftSourcePose.zNorm,
+                rightXNorm = rightSourcePose.xNorm,
+                rightYNorm = rightSourcePose.yNorm,
+                rightZNorm = rightSourcePose.zNorm,
+                leftDistanceMeters = leftSourcePose.distanceMeters,
+                rightDistanceMeters = rightSourcePose.distanceMeters,
+                roomDampingNorm = sanitized.roomDamping / 100f,
+                wetMixNorm = sanitized.wetMix / 100f,
+                headRadiusMeters = sanitized.hrtfHeadRadiusMm / 1000f,
+                blend = sanitized.hrtfBlendPercent / 100f,
+                crossfeed = sanitized.hrtfCrossfeedPercent / 100f,
+                externalization = sanitized.hrtfExternalizationPercent / 100f,
+                useHrtfDatabase = sanitized.hrtfUseDatabase,
+                surroundMode = sanitized.surroundMode,
                 frontLeftGain = surroundGains.frontLeft,
                 frontRightGain = surroundGains.frontRight,
                 centerGain = surroundGains.center,
@@ -1373,10 +1743,137 @@ object AudioEngine {
     }
 
     private fun withSpatialDerived(state: EffectsUiState): EffectsUiState {
-        val model = buildSpatialModel(state)
-        return state.copy(
+        val normalized = enforceHrtfSourceBounds(state)
+        val model = buildSpatialModel(normalized)
+        return normalized.copy(
             derivedDistanceMeters = model.distanceMeters,
             derivedGainDb = model.gainDb
+        )
+    }
+
+    private fun enforceHrtfSourceBounds(state: EffectsUiState): EffectsUiState {
+        val headRadiusCm = (state.hrtfHeadRadiusMm / 10f).coerceIn(7f, 11f)
+        val minimumDistanceCm = (headRadiusCm + HRTF_SOURCE_MARGIN_CM).coerceAtMost(SPATIAL_RADIUS_MAX_CM.toFloat())
+
+        fun clampSource(x: Int, y: Int, z: Int, radiusCm: Int): SpatialVector {
+            val radius = radiusCm.coerceIn(SPATIAL_RADIUS_MIN_CM, SPATIAL_RADIUS_MAX_CM).toFloat()
+            var sourceX = x.toFloat().coerceIn(-radius, radius)
+            var sourceY = y.toFloat().coerceIn(SPATIAL_COORD_MIN_CM.toFloat(), SPATIAL_COORD_MAX_CM.toFloat())
+            var sourceZ = z.toFloat().coerceIn(-radius, radius)
+            val minDistance = minimumDistanceCm.coerceAtMost(radius)
+            val distance = sqrt(sourceX * sourceX + sourceY * sourceY + sourceZ * sourceZ)
+            if (distance < minDistance) {
+                if (distance < 0.0001f) {
+                    sourceX = 0f
+                    sourceY = 0f
+                    sourceZ = minDistance
+                } else {
+                    val scale = minDistance / distance
+                    sourceX *= scale
+                    sourceY *= scale
+                    sourceZ *= scale
+                }
+            }
+            return SpatialVector(
+                x = sourceX.roundToInt().coerceIn(-radiusCm, radiusCm),
+                y = sourceY.roundToInt().coerceIn(SPATIAL_COORD_MIN_CM, SPATIAL_COORD_MAX_CM),
+                z = sourceZ.roundToInt().coerceIn(-radiusCm, radiusCm)
+            )
+        }
+
+        return if (state.channelSeparated) {
+            val left = clampSource(
+                x = state.spatialLeftX,
+                y = state.spatialLeftY,
+                z = state.spatialLeftZ,
+                radiusCm = state.spatialLeftRadiusPercent
+            )
+            val right = clampSource(
+                x = state.spatialRightX,
+                y = state.spatialRightY,
+                z = state.spatialRightZ,
+                radiusCm = state.spatialRightRadiusPercent
+            )
+            state.copy(
+                spatialLeftX = left.x,
+                spatialLeftY = left.y,
+                spatialLeftZ = left.z,
+                spatialRightX = right.x,
+                spatialRightY = right.y,
+                spatialRightZ = right.z
+            )
+        } else {
+            val linkedRadius = min(state.spatialLeftRadiusPercent, state.spatialRightRadiusPercent)
+                .coerceIn(SPATIAL_RADIUS_MIN_CM, SPATIAL_RADIUS_MAX_CM)
+            val center = effectiveSpatialCenter(state)
+            val linkedPair = buildLinkedChannelPair(
+                centerX = center.x,
+                centerZ = center.z,
+                spacingCm = linkedSpacingFromState(state),
+                radiusCm = linkedRadius
+            )
+            val left = clampSource(
+                x = linkedPair.leftX,
+                y = center.y,
+                z = linkedPair.leftZ,
+                radiusCm = linkedRadius
+            )
+            val right = clampSource(
+                x = linkedPair.rightX,
+                y = center.y,
+                z = linkedPair.rightZ,
+                radiusCm = linkedRadius
+            )
+            val alignedY = ((left.y + right.y) / 2).coerceIn(SPATIAL_COORD_MIN_CM, SPATIAL_COORD_MAX_CM)
+            state.copy(
+                channelSeparated = false,
+                spatialLeftRadiusPercent = linkedRadius,
+                spatialRightRadiusPercent = linkedRadius,
+                linkedChannelSpacingCm = abs(right.x - left.x)
+                    .coerceIn(LINKED_CHANNEL_SPACING_MIN_CM, LINKED_CHANNEL_SPACING_MAX_CM),
+                spatialLeftX = left.x,
+                spatialLeftY = alignedY,
+                spatialLeftZ = left.z,
+                spatialRightX = right.x,
+                spatialRightY = alignedY,
+                spatialRightZ = right.z
+            )
+        }
+    }
+
+    private fun buildHrtfSourcePose(
+        xCm: Int,
+        yCm: Int,
+        zCm: Int,
+        headRadiusMm: Int
+    ): HrtfSourcePose {
+        val headRadiusMeters = (headRadiusMm / 1000f).coerceIn(0.07f, 0.11f)
+        val minimumDistanceMeters = (headRadiusMeters + HRTF_SOURCE_MARGIN_CM / 100f).coerceIn(0.07f, 0.16f)
+        var x = xCm / 100f
+        var y = yCm / 100f
+        var z = zCm / 100f
+        var distance = sqrt((x * x + y * y + z * z).toDouble()).toFloat()
+
+        if (distance < minimumDistanceMeters) {
+            if (distance < 0.0001f) {
+                x = 0f
+                y = 0f
+                z = minimumDistanceMeters
+            } else {
+                val scale = minimumDistanceMeters / distance
+                x *= scale
+                y *= scale
+                z *= scale
+            }
+            distance = minimumDistanceMeters
+        }
+
+        val inverseDistance = 1f / distance.coerceAtLeast(0.0001f)
+        return HrtfSourcePose(
+            xNorm = (x * inverseDistance).coerceIn(-1f, 1f),
+            yNorm = (y * inverseDistance).coerceIn(-1f, 1f),
+            zNorm = (z * inverseDistance).coerceIn(-1f, 1f),
+            distanceMeters = distance.coerceIn(minimumDistanceMeters, HRTF_MAX_SOURCE_DISTANCE_METERS)
         )
     }
 
@@ -1447,13 +1944,45 @@ object AudioEngine {
     }
 
     private fun effectiveSpatialCenter(state: EffectsUiState): SpatialVector {
-        if (!state.channelSeparated) {
-            return SpatialVector(state.spatialLeftX, state.spatialLeftY, state.spatialLeftZ)
-        }
         return SpatialVector(
             x = ((state.spatialLeftX + state.spatialRightX) / 2).coerceIn(SPATIAL_COORD_MIN_CM, SPATIAL_COORD_MAX_CM),
             y = ((state.spatialLeftY + state.spatialRightY) / 2).coerceIn(SPATIAL_COORD_MIN_CM, SPATIAL_COORD_MAX_CM),
             z = ((state.spatialLeftZ + state.spatialRightZ) / 2).coerceIn(SPATIAL_COORD_MIN_CM, SPATIAL_COORD_MAX_CM)
+        )
+    }
+
+    private fun linkedSpacingFromState(state: EffectsUiState): Int {
+        val fromState = state.linkedChannelSpacingCm
+            .coerceIn(LINKED_CHANNEL_SPACING_MIN_CM, LINKED_CHANNEL_SPACING_MAX_CM)
+        if (fromState > 0) {
+            return fromState
+        }
+        val fromPositions = abs(state.spatialRightX - state.spatialLeftX)
+        return fromPositions.coerceIn(LINKED_CHANNEL_SPACING_MIN_CM, LINKED_CHANNEL_SPACING_MAX_CM)
+    }
+
+    private fun buildLinkedChannelPair(
+        centerX: Int,
+        centerZ: Int,
+        spacingCm: Int,
+        radiusCm: Int
+    ): LinkedChannelPair {
+        val radius = radiusCm.coerceIn(SPATIAL_RADIUS_MIN_CM, SPATIAL_RADIUS_MAX_CM)
+        val clampedSpacing = spacingCm
+            .coerceIn(LINKED_CHANNEL_SPACING_MIN_CM, LINKED_CHANNEL_SPACING_MAX_CM)
+            .coerceAtMost(radius * 2)
+        val half = clampedSpacing / 2f
+        val clampedCenterX = centerX.toFloat().coerceIn(-radius + half, radius - half)
+        val clampedCenterZ = centerZ.toFloat().coerceIn(-radius.toFloat(), radius.toFloat())
+        val leftX = (clampedCenterX - half).roundToInt().coerceIn(-radius, radius)
+        val rightX = (clampedCenterX + half).roundToInt().coerceIn(-radius, radius)
+        val z = clampedCenterZ.roundToInt().coerceIn(-radius, radius)
+        return LinkedChannelPair(
+            leftX = leftX,
+            leftZ = z,
+            rightX = rightX,
+            rightZ = z,
+            spacingCm = abs(rightX - leftX).coerceIn(LINKED_CHANNEL_SPACING_MIN_CM, LINKED_CHANNEL_SPACING_MAX_CM)
         )
     }
 
@@ -1469,6 +1998,7 @@ object AudioEngine {
             .putInt(KEY_SPATIAL_RIGHT_Z, state.spatialRightZ)
             .putInt(KEY_SPATIAL_LEFT_RADIUS_PERCENT, state.spatialLeftRadiusPercent)
             .putInt(KEY_SPATIAL_RIGHT_RADIUS_PERCENT, state.spatialRightRadiusPercent)
+            .putInt(KEY_LINKED_CHANNEL_SPACING_CM, state.linkedChannelSpacingCm)
             .putInt(KEY_SPATIAL_X, center.x)
             .putInt(KEY_SPATIAL_Y, center.y)
             .putInt(KEY_SPATIAL_Z, center.z)
@@ -1502,6 +2032,21 @@ object AudioEngine {
         val z: Int
     )
 
+    private data class LinkedChannelPair(
+        val leftX: Int,
+        val leftZ: Int,
+        val rightX: Int,
+        val rightZ: Int,
+        val spacingCm: Int
+    )
+
+    private data class HrtfSourcePose(
+        val xNorm: Float,
+        val yNorm: Float,
+        val zNorm: Float,
+        val distanceMeters: Float
+    )
+
     private data class SurroundChannelGains(
         val frontLeft: Float,
         val frontRight: Float,
@@ -1516,6 +2061,13 @@ object AudioEngine {
     private data class ImpulseResponseAsset(
         val name: String,
         val samples: FloatArray
+    )
+
+    private data class PlayerSnapshot(
+        val mediaItems: List<MediaItem> = emptyList(),
+        val index: Int = 0,
+        val positionMs: Long = 0L,
+        val playWhenReady: Boolean = false
     )
 
     private fun restoreConvolutionImpulseIfNeeded(uriString: String?) {
@@ -1809,6 +2361,7 @@ object AudioEngine {
         _playbackState.value = _playbackState.value.copy(
             title = title,
             subtitle = subtitle,
+            mediaUri = currentPlayer.currentMediaItem?.localConfiguration?.uri,
             artworkUri = metadata?.artworkUri,
             hasMedia = hasMedia,
             isPlaying = currentPlayer.isPlaying,
