@@ -58,15 +58,36 @@ class PlaybackFragment : Fragment() {
     }
 
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
-        adapter = MusicLibraryAdapter { track ->
-            val startIndex = currentPlayableTracks.indexOfFirst { it.id == track.id }
-            if (startIndex >= 0) {
-                AudioEngine.playTrackList(currentPlayableTracks, startIndex)
-            } else {
-                AudioEngine.playTrack(track)
+        adapter = MusicLibraryAdapter(
+            onTrackClick = { track ->
+                val startIndex = currentPlayableTracks.indexOfFirst { it.id == track.id }
+                if (startIndex >= 0) {
+                    AudioEngine.playTrackList(currentPlayableTracks, startIndex)
+                } else {
+                    AudioEngine.playTrack(track)
+                }
+                startActivity(Intent(requireContext(), PlayerActivity::class.java))
+            },
+            onEntityClick = { row ->
+                when (row.entityType) {
+                    LibraryEntityType.ALBUM -> {
+                        parentFragmentManager.beginTransaction()
+                            .setReorderingAllowed(true)
+                            .replace(R.id.fragment_container, AlbumDetailFragment.newInstance(row.title))
+                            .addToBackStack(null)
+                            .commit()
+                    }
+
+                    LibraryEntityType.ARTIST -> {
+                        parentFragmentManager.beginTransaction()
+                            .setReorderingAllowed(true)
+                            .replace(R.id.fragment_container, ArtistDetailFragment.newInstance(row.title))
+                            .addToBackStack(null)
+                            .commit()
+                    }
+                }
             }
-            startActivity(Intent(requireContext(), PlayerActivity::class.java))
-        }
+        )
         layoutManager = LinearLayoutManager(requireContext())
         binding.recyclerLibrary.layoutManager = layoutManager
         binding.recyclerLibrary.adapter = adapter
@@ -83,6 +104,7 @@ class PlaybackFragment : Fragment() {
 
     override fun onResume() {
         super.onResume()
+        (activity as? MainActivity)?.supportActionBar?.title = getString(R.string.page_playback)
         if (hasReadAudioPermission()) {
             AudioEngine.refreshLibrary()
         }
@@ -135,13 +157,13 @@ class PlaybackFragment : Fragment() {
             LibraryTab.ALBUM -> {
                 val sections = filterSectionsByQuery(state.albums, normalizedQuery)
                 rows = buildSectionRows(sections)
-                playableTracks = sections.flatMap { it.tracks }
+                playableTracks = emptyList()
             }
 
             LibraryTab.ARTIST -> {
                 val sections = filterSectionsByQuery(state.artists, normalizedQuery)
                 rows = buildSectionRows(sections)
-                playableTracks = sections.flatMap { it.tracks }
+                playableTracks = emptyList()
             }
         }
         currentPlayableTracks = playableTracks
@@ -159,12 +181,20 @@ class PlaybackFragment : Fragment() {
     }
 
     private fun buildSectionRows(sections: List<com.example.hifx.audio.TrackSection>): List<LibraryListRow> {
-        val rows = mutableListOf<LibraryListRow>()
-        sections.forEach { section ->
-            rows += LibraryListRow.Header(section.title)
-            rows += section.tracks.map { LibraryListRow.TrackRow(it) }
+        val type = when (selectedTab) {
+            LibraryTab.ALBUM -> LibraryEntityType.ALBUM
+            LibraryTab.ARTIST -> LibraryEntityType.ARTIST
+            else -> LibraryEntityType.ALBUM
         }
-        return rows
+        return sections.map { section ->
+            val subtitle = getString(R.string.library_entity_count, section.tracks.size)
+            LibraryListRow.EntityRow(
+                entityType = type,
+                title = section.title,
+                subtitle = subtitle,
+                artworkUri = section.tracks.firstOrNull()?.artworkUri
+            )
+        }
     }
 
     private fun filterSectionsByQuery(
@@ -244,6 +274,7 @@ class PlaybackFragment : Fragment() {
             val source = when (row) {
                 is LibraryListRow.Header -> row.title
                 is LibraryListRow.TrackRow -> row.track.title
+                is LibraryListRow.EntityRow -> row.title
             }
             val key = source.toAlphabetIndexKey()
             if (!map.containsKey(key)) {

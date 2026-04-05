@@ -1,4 +1,4 @@
-package com.example.hifx
+﻿package com.example.hifx
 
 import android.content.Intent
 import android.os.Bundle
@@ -13,6 +13,7 @@ import androidx.fragment.app.Fragment
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
+import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.example.hifx.audio.AudioEngine
 import com.example.hifx.audio.SettingsUiState
 import com.example.hifx.databinding.FragmentSettingsBinding
@@ -25,6 +26,8 @@ class SettingsFragment : Fragment() {
     private var internalUpdating = false
     private var selectedSection: SettingsSection = SettingsSection.LIBRARY
     private var usbSpinnerIds: List<Int?> = listOf(null)
+    private var latestAudioPipelineDetails: String = ""
+    private val outputSampleRateOptionsHz = listOf<Int?>(null, 44_100, 48_000, 88_200, 96_000, 176_400, 192_000)
     private val bitDepthOptions = listOf(16, 32)
     private val bitrateOptionsKbps = listOf<Int?>(null, 320, 512, 768, 1024, 1536, 3072, 6144, 9216)
 
@@ -96,9 +99,17 @@ class SettingsFragment : Fragment() {
                 AudioEngine.setHiResApiEnabled(isChecked)
             }
         }
+        binding.switchUsbExclusive.setOnCheckedChangeListener { _, isChecked ->
+            if (!internalUpdating) {
+                AudioEngine.setUsbExclusiveModeEnabled(isChecked)
+            }
+        }
         setupAudioSelectionControls()
         binding.buttonRefreshDeviceInfo.setOnClickListener {
             AudioEngine.refreshOutputInfo()
+        }
+        binding.buttonShowAudioPipelineDetails.setOnClickListener {
+            showAudioPipelineDetailsDialog()
         }
         binding.groupThemeMode.setOnCheckedChangeListener { _, checkedId ->
             if (internalUpdating) {
@@ -124,6 +135,27 @@ class SettingsFragment : Fragment() {
             override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
                 if (!internalUpdating) {
                     AudioEngine.setPreferredBitDepth(bitDepthOptions.getOrElse(position) { 32 })
+                }
+            }
+
+            override fun onNothingSelected(parent: AdapterView<*>?) = Unit
+        }
+
+        binding.spinnerOutputSampleRate.adapter = ArrayAdapter(
+            requireContext(),
+            android.R.layout.simple_spinner_dropdown_item,
+            outputSampleRateOptionsHz.map { sampleRate ->
+                if (sampleRate == null) {
+                    getString(R.string.settings_output_sample_rate_auto)
+                } else {
+                    "${sampleRate / 1000.0} kHz"
+                }
+            }
+        )
+        binding.spinnerOutputSampleRate.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+            override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
+                if (!internalUpdating) {
+                    AudioEngine.setPreferredOutputSampleRateHz(outputSampleRateOptionsHz.getOrNull(position))
                 }
             }
 
@@ -187,6 +219,8 @@ class SettingsFragment : Fragment() {
         )
         val bitDepthIndex = bitDepthOptions.indexOf(state.preferredBitDepth).coerceAtLeast(0)
         binding.spinnerBitDepth.setSelection(bitDepthIndex, false)
+        val sampleRateIndex = outputSampleRateOptionsHz.indexOf(state.preferredOutputSampleRateHz).coerceAtLeast(0)
+        binding.spinnerOutputSampleRate.setSelection(sampleRateIndex, false)
         val bitrateIndex = bitrateOptionsKbps.indexOf(state.preferredMaxBitrateKbps).coerceAtLeast(0)
         binding.spinnerMaxBitrate.setSelection(bitrateIndex, false)
         renderUsbOptions(state)
@@ -194,6 +228,18 @@ class SettingsFragment : Fragment() {
             R.string.settings_active_route_value,
             state.activeOutputRouteLabel
         )
+        binding.switchUsbExclusive.isChecked = state.usbExclusiveModeEnabled
+        val hasSelectedUsb = state.preferredUsbDeviceId != null
+        val canToggleExclusive = (hasSelectedUsb && state.usbExclusiveSupported) || state.usbExclusiveModeEnabled
+        binding.switchUsbExclusive.isEnabled = canToggleExclusive
+        binding.textUsbExclusiveState.text = when {
+            !hasSelectedUsb -> getString(R.string.settings_usb_exclusive_state_no_device)
+            !state.usbExclusiveSupported -> getString(R.string.settings_usb_exclusive_state_not_supported)
+            state.usbExclusiveActive -> getString(R.string.settings_usb_exclusive_state_active)
+            state.usbExclusiveModeEnabled -> getString(R.string.settings_usb_exclusive_state_inactive)
+            else -> getString(R.string.settings_usb_exclusive_state_default)
+        }
+        latestAudioPipelineDetails = state.audioPipelineDetails
         binding.textHiFiHint.text = if (state.hiFiMode) {
             getString(R.string.settings_hifi_on_hint)
         } else {
@@ -219,6 +265,52 @@ class SettingsFragment : Fragment() {
         binding.spinnerUsbDac.setSelection(selectedIndex, false)
     }
 
+    private fun showAudioPipelineDetailsDialog() {
+        val raw = latestAudioPipelineDetails.ifBlank { getString(R.string.settings_pipeline_details_empty) }
+        val explanation = buildAudioPipelineExplanation(raw)
+        val message = buildString {
+            append(getString(R.string.settings_pipeline_explain_header))
+            append("\n")
+            append(explanation)
+            append("\n\n")
+            append(getString(R.string.settings_pipeline_raw_header))
+            append("\n")
+            append(raw)
+        }
+        MaterialAlertDialogBuilder(requireContext())
+            .setTitle(R.string.settings_pipeline_dialog_title)
+            .setMessage(message)
+            .setPositiveButton(android.R.string.ok, null)
+            .show()
+    }
+    private fun buildAudioPipelineExplanation(raw: String): String {
+        if (raw.isBlank() || raw == getString(R.string.settings_pipeline_details_empty)) {
+            return "当前没有可解释的链路数据，请先播放音频并点击“刷新设备输出信息”。"
+        }
+        val points = mutableListOf<String>()
+        raw.lineSequence().map { it.trim() }.forEach { line ->
+            when {
+                line.contains("选中音轨") -> points += "选中音轨：当前真正参与播放的轨道。"
+                line.contains("MIME") -> points += "编码格式：源文件编码类型（FLAC/AAC/MP3 等）。"
+                line.contains("音轨采样率") -> points += "音轨采样率：文件内采样率，不一定等于实际输出采样率。"
+                line.contains("音轨声道数") -> points += "音轨声道数：源轨道声道信息（2声道/多声道）。"
+                line.contains("音轨码率") -> points += "音轨码率：压缩质量指标之一。"
+                line.startsWith("解码器:") -> points += "解码器：当前实际被选中的解码器实现。"
+                line.contains("目标输出采样率") -> points += "目标输出采样率：你的偏好目标值。"
+                line.contains("系统输出采样率") -> points += "系统输出采样率：当前实际输出参数。"
+                line.contains("Offload") -> points += "Offload支持：设备能力，非当前路径的绝对证明。"
+                line.contains("USB独占开关") -> points += "USB独占：需同时看开关/支持/激活，激活=true 才表示已生效。"
+                line.startsWith("Equalizer:") -> points += "EQ链路：展示是否启用及各频段增益。"
+                line.startsWith("Convolution=") -> points += "卷积链路：展示 IR 与湿度参数，确认卷积是否生效。"
+                line.startsWith("id=") -> points += "设备清单：系统枚举到的输出设备能力原始数据。"
+            }
+        }
+        return if (points.isEmpty()) {
+            "已显示原始链路信息。可重点关注：音轨采样率、系统输出采样率、USB独占激活状态、解码器。"
+        } else {
+            "• " + points.distinct().joinToString(separator = "\n• ")
+        }
+    }
     private fun renderSection(section: SettingsSection) {
         selectedSection = section
         binding.sectionLibrary.visibility = if (section == SettingsSection.LIBRARY) View.VISIBLE else View.GONE
@@ -243,3 +335,4 @@ class SettingsFragment : Fragment() {
         ABOUT
     }
 }
+

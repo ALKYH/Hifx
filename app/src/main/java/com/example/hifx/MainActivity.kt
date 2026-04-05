@@ -25,6 +25,7 @@ import com.example.hifx.databinding.ActivityMainBinding
 import com.example.hifx.databinding.LayoutMiniPlayerBinding
 import com.example.hifx.ui.PlayerTransitionState
 import com.example.hifx.util.loadArtworkOrDefault
+import com.google.android.material.color.MaterialColors
 import com.google.android.material.slider.Slider
 import kotlinx.coroutines.launch
 import kotlin.math.abs
@@ -44,6 +45,10 @@ class MainActivity : AppCompatActivity() {
     private var containerInsetAnimator: ValueAnimator? = null
     private var miniCardBaseBottomMargin = -1
     private var miniHandleBaseBottomMargin = -1
+    private var miniSwipeTrackAnimating = false
+    private var miniGestureFromCard = false
+    private var suppressMiniCardClickOnce = false
+    private var miniHorizontalSwitchTriggered = false
     private val standardInterpolator = FastOutSlowInInterpolator()
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -92,6 +97,10 @@ class MainActivity : AppCompatActivity() {
 
     private fun setupMiniPlayerActions() {
         miniPlayerBinding.miniPlayerCard.setOnClickListener {
+            if (suppressMiniCardClickOnce) {
+                suppressMiniCardClickOnce = false
+                return@setOnClickListener
+            }
             openPlayerDetailWithAnimation()
         }
         miniPlayerBinding.viewMiniHandle.setOnClickListener {
@@ -118,6 +127,58 @@ class MainActivity : AppCompatActivity() {
         })
     }
 
+    private fun animateMiniPlayerTrackSwitch(next: Boolean) {
+        if (miniSwipeTrackAnimating || !latestPlaybackState.hasMedia) {
+            return
+        }
+        val canSwitch = if (next) latestPlaybackState.hasNext else latestPlaybackState.hasPrevious
+        val card = miniPlayerBinding.miniPlayerCard
+        if (!canSwitch) {
+            val nudge = if (next) -dp(18f).toFloat() else dp(18f).toFloat()
+            card.animate().cancel()
+            card.animate()
+                .translationX(nudge)
+                .setInterpolator(standardInterpolator)
+                .setDuration(70L)
+                .withEndAction {
+                    card.animate().translationX(0f)
+                        .setInterpolator(standardInterpolator)
+                        .setDuration(90L)
+                        .start()
+                }
+                .start()
+            return
+        }
+
+        miniSwipeTrackAnimating = true
+        val direction = if (next) -1f else 1f
+        val shift = maxOf(dp(64f).toFloat(), card.width * 0.34f)
+
+        card.animate().cancel()
+        card.animate()
+            .translationX(direction * shift)
+            .alpha(0.55f)
+            .setInterpolator(standardInterpolator)
+            .setDuration(120L)
+            .withEndAction {
+                if (next) {
+                    AudioEngine.skipToNextTrack()
+                } else {
+                    AudioEngine.skipToPreviousTrack()
+                }
+                card.translationX = -direction * shift * 0.58f
+                card.alpha = 0.55f
+                card.animate()
+                    .translationX(0f)
+                    .alpha(1f)
+                    .setInterpolator(standardInterpolator)
+                    .setDuration(170L)
+                    .withEndAction { miniSwipeTrackAnimating = false }
+                    .start()
+            }
+            .start()
+    }
+
     private fun observeMiniPlayerState() {
         lifecycleScope.launch {
             repeatOnLifecycle(Lifecycle.State.STARTED) {
@@ -137,8 +198,10 @@ class MainActivity : AppCompatActivity() {
         if (!state.hasMedia) {
             miniCollapsedByGesture = false
         }
-        applyMiniPlayerVisibility(animated = availabilityChanged)
-        updateFragmentBottomInset(animated = availabilityChanged)
+        if (availabilityChanged) {
+            applyMiniPlayerVisibility(animated = true)
+            updateFragmentBottomInset(animated = true)
+        }
 
         if (!state.hasMedia) {
             latestDurationMs = 0L
@@ -267,17 +330,9 @@ class MainActivity : AppCompatActivity() {
             ?: binding.bottomNav.measuredHeight.takeIf { it > 0 }
             ?: 0
 
-        val miniHeight = miniPlayerBinding.miniPlayerCard.height.takeIf { it > 0 }
-            ?: miniPlayerBinding.miniPlayerCard.measuredHeight.takeIf { it > 0 }
-            ?: 0
-
-        val miniLp = miniPlayerBinding.miniPlayerCard.layoutParams as? FrameLayout.LayoutParams
-        val miniBottomMargin = miniLp?.bottomMargin ?: 0
-        val miniVisible = latestPlaybackState.hasMedia && !miniCollapsedByGesture
-
         val navInset = navHeight + dp(8f)
-        val miniInset = miniHeight + miniBottomMargin + dp(6f)
-        val targetBottomInset = if (miniVisible) maxOf(navInset, miniInset) else navInset
+        // Keep content layout stable: mini player is an overlay and should not consume content space.
+        val targetBottomInset = navInset
 
         val container = binding.fragmentContainer
         val current = container.paddingBottom
@@ -402,7 +457,18 @@ class MainActivity : AppCompatActivity() {
             scaleType = ImageView.ScaleType.FIT_XY
             layoutParams = FrameLayout.LayoutParams(source.width(), source.height())
         }
+        val snapshotMask = View(this).apply {
+            layoutParams = FrameLayout.LayoutParams(source.width(), source.height())
+            setBackgroundColor(
+                MaterialColors.getColor(
+                    binding.root,
+                    com.google.android.material.R.attr.colorSurface
+                )
+            )
+            alpha = 0.58f
+        }
         maskedSnapshot.addView(snapshotImage)
+        maskedSnapshot.addView(snapshotMask)
         overlayHost.addView(maskedSnapshot)
 
         ValueAnimator.ofFloat(0f, 1f).apply {
@@ -427,6 +493,8 @@ class MainActivity : AppCompatActivity() {
                 maskedSnapshot.invalidateOutline()
                 snapshotImage.x = source.left.toFloat() - x
                 snapshotImage.y = source.top.toFloat() - y
+                snapshotMask.x = source.left.toFloat() - x
+                snapshotMask.y = source.top.toFloat() - y
             }
             doOnEnd {
                 maskedSnapshot.setLayerType(View.LAYER_TYPE_NONE, null)
@@ -448,19 +516,56 @@ class MainActivity : AppCompatActivity() {
                 if (!isBottomInteractionArea(ev.rawY)) {
                     gestureDownX = Float.NaN
                     gestureDownY = Float.NaN
+                    miniGestureFromCard = false
+                    miniHorizontalSwitchTriggered = false
                     return
                 }
                 gestureDownX = ev.rawX
                 gestureDownY = ev.rawY
+                miniGestureFromCard = isTouchInsideView(ev.rawX, ev.rawY, miniPlayerBinding.miniPlayerCard)
+                miniHorizontalSwitchTriggered = false
+            }
+
+            MotionEvent.ACTION_MOVE -> {
+                if (miniProgressUserSeeking || !latestPlaybackState.hasMedia || gestureDownX.isNaN()) {
+                    return
+                }
+                if (!miniGestureFromCard || miniHorizontalSwitchTriggered) {
+                    return
+                }
+                val dx = ev.rawX - gestureDownX
+                val dy = ev.rawY - gestureDownY
+                val horizontalThreshold = 30f * resources.displayMetrics.density
+                if (abs(dx) > horizontalThreshold && abs(dx) > abs(dy) * 1.1f) {
+                    miniHorizontalSwitchTriggered = true
+                    suppressMiniCardClickOnce = true
+                    animateMiniPlayerTrackSwitch(next = dx < 0f)
+                }
             }
 
             MotionEvent.ACTION_UP -> {
                 if (miniProgressUserSeeking || !latestPlaybackState.hasMedia || gestureDownX.isNaN()) {
                     return
                 }
+                if (miniHorizontalSwitchTriggered) {
+                    miniHorizontalSwitchTriggered = false
+                    miniGestureFromCard = false
+                    gestureDownX = Float.NaN
+                    gestureDownY = Float.NaN
+                    return
+                }
                 val dx = ev.rawX - gestureDownX
                 val dy = ev.rawY - gestureDownY
                 val threshold = 56f * resources.displayMetrics.density
+                val horizontalThreshold = 36f * resources.displayMetrics.density
+                if (miniGestureFromCard && abs(dx) > horizontalThreshold && abs(dx) > abs(dy) * 1.15f) {
+                    suppressMiniCardClickOnce = true
+                    animateMiniPlayerTrackSwitch(next = dx < 0f)
+                    gestureDownX = Float.NaN
+                    gestureDownY = Float.NaN
+                    miniGestureFromCard = false
+                    return
+                }
                 if (abs(dy) < threshold || abs(dy) < abs(dx) * 1.2f) {
                     return
                 }
@@ -469,8 +574,26 @@ class MainActivity : AppCompatActivity() {
                 } else {
                     setMiniCollapsedByGesture(collapsed = false, animated = true)
                 }
+                miniGestureFromCard = false
+            }
+
+            MotionEvent.ACTION_CANCEL -> {
+                gestureDownX = Float.NaN
+                gestureDownY = Float.NaN
+                miniGestureFromCard = false
+                miniHorizontalSwitchTriggered = false
             }
         }
+    }
+
+    private fun isTouchInsideView(rawX: Float, rawY: Float, view: View): Boolean {
+        if (view.visibility != View.VISIBLE || view.width <= 0 || view.height <= 0) {
+            return false
+        }
+        val loc = IntArray(2)
+        view.getLocationOnScreen(loc)
+        return rawX >= loc[0] && rawX <= loc[0] + view.width &&
+            rawY >= loc[1] && rawY <= loc[1] + view.height
     }
 
     private fun isBottomInteractionArea(rawY: Float): Boolean {

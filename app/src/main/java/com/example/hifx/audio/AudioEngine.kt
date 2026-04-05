@@ -1,4 +1,4 @@
-package com.example.hifx.audio
+﻿package com.example.hifx.audio
 
 import android.content.ContentUris
 import android.content.Context
@@ -19,9 +19,11 @@ import android.os.SystemClock
 import android.provider.DocumentsContract
 import android.provider.MediaStore
 import android.provider.OpenableColumns
+import android.text.format.DateFormat
 import androidx.appcompat.app.AppCompatDelegate
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
+import androidx.media3.common.Format
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
 import androidx.media3.common.PlaybackException
@@ -30,6 +32,7 @@ import androidx.media3.exoplayer.Renderer
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.analytics.AnalyticsListener
 import androidx.media3.exoplayer.audio.AudioSink
 import androidx.media3.exoplayer.audio.DefaultAudioSink
 import androidx.media3.exoplayer.mediacodec.MediaCodecSelector
@@ -62,7 +65,9 @@ data class LibraryTrack(
     val album: String,
     val durationMs: Long,
     val albumId: Long,
-    val artworkUri: Uri?
+    val artworkUri: Uri?,
+    val discNumber: Int = 1,
+    val trackNumber: Int = 0
 )
 
 data class TrackSection(
@@ -80,8 +85,8 @@ data class MediaLibraryUiState(
 )
 
 data class PlaybackUiState(
-    val title: String = "未选择音频",
-    val subtitle: String = "支持 FLAC / WAV / MP3 / AAC",
+    val title: String = "鏈€夋嫨闊抽",
+    val subtitle: String = "鏀寔 FLAC / WAV / MP3 / AAC",
     val mediaUri: Uri? = null,
     val artworkUri: Uri? = null,
     val hasMedia: Boolean = false,
@@ -151,7 +156,7 @@ data class EffectsUiState(
     val convolutionEnabled: Boolean = false,
     val convolutionWetPercent: Int = 35,
     val convolutionIrUri: String? = null,
-    val convolutionIrName: String = "未导入 IRS",
+    val convolutionIrName: String = "鏈鍏?IRS",
     val realtimeReverbMeterPercent: Int = 0,
     val derivedDistanceMeters: Float = 1f,
     val derivedGainDb: Float = 0f
@@ -161,13 +166,18 @@ data class SettingsUiState(
     val hiFiMode: Boolean = true,
     val hiResApiEnabled: Boolean = true,
     val preferredBitDepth: Int = 32,
+    val preferredOutputSampleRateHz: Int? = null,
     val preferredMaxBitrateKbps: Int? = null,
     val preferredUsbDeviceId: Int? = null,
+    val usbExclusiveModeEnabled: Boolean = false,
+    val usbExclusiveSupported: Boolean = false,
+    val usbExclusiveActive: Boolean = false,
     val usbOutputOptions: List<UsbOutputOption> = emptyList(),
-    val activeOutputRouteLabel: String = "系统默认",
+    val activeOutputRouteLabel: String = "绯荤粺榛樿",
     val outputSampleRateHz: Int? = null,
     val outputFramesPerBuffer: Int? = null,
     val offloadSupported: Boolean = false,
+    val audioPipelineDetails: String = "",
     val scanFolderUri: Uri? = null,
     val scanFolderLabel: String = "全部媒体库",
     val themeMode: Int = AppCompatDelegate.MODE_NIGHT_FOLLOW_SYSTEM
@@ -201,8 +211,10 @@ object AudioEngine {
     private const val KEY_HIFI_MODE = "key_hifi_mode"
     private const val KEY_HIRES_API_ENABLED = "key_hires_api_enabled"
     private const val KEY_PREFERRED_BIT_DEPTH = "key_preferred_bit_depth"
+    private const val KEY_PREFERRED_OUTPUT_SAMPLE_RATE_HZ = "key_preferred_output_sample_rate_hz"
     private const val KEY_MAX_AUDIO_BITRATE_KBPS = "key_max_audio_bitrate_kbps"
     private const val KEY_PREFERRED_USB_DEVICE_ID = "key_preferred_usb_device_id"
+    private const val KEY_USB_EXCLUSIVE_MODE = "key_usb_exclusive_mode"
     private const val KEY_EFFECT_ENABLED = "key_effect_enabled"
     private const val KEY_BASS_STRENGTH = "key_bass_strength"
     private const val KEY_VIRTUALIZER_STRENGTH = "key_virtualizer_strength"
@@ -283,6 +295,7 @@ object AudioEngine {
     private const val HRTF_MAX_SOURCE_DISTANCE_METERS = 4f
     private const val BIT_DEPTH_16 = 16
     private const val BIT_DEPTH_32_FLOAT = 32
+    private val OUTPUT_SAMPLE_RATE_OPTIONS_HZ = intArrayOf(44_100, 48_000, 88_200, 96_000, 176_400, 192_000)
     private const val MAX_AUDIO_BITRATE_MIN_KBPS = 64
     private const val MAX_AUDIO_BITRATE_MAX_KBPS = 9216
 
@@ -299,6 +312,10 @@ object AudioEngine {
     private var playbackServiceStarted = false
 
     private var currentAudioSessionId: Int = C.AUDIO_SESSION_ID_UNSET
+    private var usbExclusiveSupportedCached: Boolean = false
+    private var usbExclusiveActiveCached: Boolean = false
+    private var lastAudioDecoderName: String? = null
+    private var lastAudioDecoderInitDurationMs: Long? = null
     private var equalizer: Equalizer? = null
     private var bassBoost: BassBoost? = null
     private var virtualizer: Virtualizer? = null
@@ -341,10 +358,11 @@ object AudioEngine {
 
         override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
             syncPlaybackState()
+            refreshOutputInfo()
         }
 
         override fun onPlayerError(error: PlaybackException) {
-            syncPlaybackState(error.message ?: "播放失败")
+            syncPlaybackState(error.message ?: "鎾斁澶辫触")
         }
 
         override fun onEvents(player: Player, events: Player.Events) {
@@ -353,6 +371,21 @@ object AudioEngine {
                 attachAudioEffects(sessionId)
             }
             syncPlaybackState()
+            if (events.contains(Player.EVENT_TRACKS_CHANGED) || events.contains(Player.EVENT_MEDIA_ITEM_TRANSITION)) {
+                refreshOutputInfo()
+            }
+        }
+    }
+
+    private val analyticsListener = object : AnalyticsListener {
+        override fun onAudioDecoderInitialized(
+            eventTime: AnalyticsListener.EventTime,
+            decoderName: String,
+            initializedTimestampMs: Long,
+            initializationDurationMs: Long
+        ) {
+            lastAudioDecoderName = decoderName
+            lastAudioDecoderInitDurationMs = initializationDurationMs
         }
     }
 
@@ -447,13 +480,16 @@ object AudioEngine {
             convolutionEnabled = prefs.getBoolean(KEY_CONVOLUTION_ENABLED, false),
             convolutionWetPercent = prefs.getInt(KEY_CONVOLUTION_WET_PERCENT, 35).coerceIn(0, 100),
             convolutionIrUri = prefs.getString(KEY_CONVOLUTION_IR_URI, null),
-            convolutionIrName = prefs.getString(KEY_CONVOLUTION_IR_NAME, "未导入 IRS")
-                ?: "未导入 IRS"
+            convolutionIrName = prefs.getString(KEY_CONVOLUTION_IR_NAME, "鏈鍏?IRS")
+                ?: "鏈鍏?IRS"
         )
         _effectsState.value = withSpatialDerived(storedEffects)
         persistSpatialPosition(_effectsState.value)
         val preferredBitDepth = normalizeBitDepth(
             prefs.getInt(KEY_PREFERRED_BIT_DEPTH, BIT_DEPTH_32_FLOAT)
+        )
+        val preferredOutputSampleRateHz = normalizeOutputSampleRate(
+            prefs.getInt(KEY_PREFERRED_OUTPUT_SAMPLE_RATE_HZ, -1).takeIf { it > 0 }
         )
         val preferredMaxBitrate = prefs.getInt(KEY_MAX_AUDIO_BITRATE_KBPS, -1)
             .takeIf { it in MAX_AUDIO_BITRATE_MIN_KBPS..MAX_AUDIO_BITRATE_MAX_KBPS }
@@ -462,8 +498,10 @@ object AudioEngine {
             hiFiMode = prefs.getBoolean(KEY_HIFI_MODE, true),
             hiResApiEnabled = prefs.getBoolean(KEY_HIRES_API_ENABLED, true),
             preferredBitDepth = preferredBitDepth,
+            preferredOutputSampleRateHz = preferredOutputSampleRateHz,
             preferredMaxBitrateKbps = preferredMaxBitrate,
             preferredUsbDeviceId = preferredUsbDeviceId,
+            usbExclusiveModeEnabled = prefs.getBoolean(KEY_USB_EXCLUSIVE_MODE, false),
             scanFolderUri = scanUri,
             scanFolderLabel = buildScanFolderLabel(scanUri),
             themeMode = themeMode
@@ -495,7 +533,7 @@ object AudioEngine {
             }
             val tracks = result.getOrDefault(emptyList())
             val albums = tracks
-                .groupBy { it.album.ifBlank { "未知专辑" } }
+                .groupBy { it.album.ifBlank { "鏈煡涓撹緫" } }
                 .toList()
                 .sortedBy { it.first.lowercase() }
                 .map { (name, groupedTracks) ->
@@ -551,7 +589,9 @@ object AudioEngine {
                 album = "未知专辑",
                 durationMs = 0L,
                 albumId = 0L,
-                artworkUri = null
+                artworkUri = null,
+                discNumber = 1,
+                trackNumber = 0
             )
         )
     }
@@ -740,6 +780,24 @@ object AudioEngine {
         refreshOutputInfo()
     }
 
+    fun setPreferredOutputSampleRateHz(sampleRateHz: Int?) {
+        val normalized = normalizeOutputSampleRate(sampleRateHz)
+        val current = _settingsState.value
+        if (current.preferredOutputSampleRateHz == normalized) {
+            return
+        }
+        _settingsState.value = current.copy(preferredOutputSampleRateHz = normalized)
+        val editor = prefs.edit()
+        if (normalized == null) {
+            editor.remove(KEY_PREFERRED_OUTPUT_SAMPLE_RATE_HZ)
+        } else {
+            editor.putInt(KEY_PREFERRED_OUTPUT_SAMPLE_RATE_HZ, normalized)
+        }
+        editor.apply()
+        applyPreferredOutputDevice()
+        refreshOutputInfo()
+    }
+
     fun setPreferredMaxAudioBitrateKbps(kbps: Int?) {
         val normalized = kbps?.coerceIn(MAX_AUDIO_BITRATE_MIN_KBPS, MAX_AUDIO_BITRATE_MAX_KBPS)
         val current = _settingsState.value
@@ -770,6 +828,17 @@ object AudioEngine {
             editor.putInt(KEY_PREFERRED_USB_DEVICE_ID, deviceId)
         }
         editor.apply()
+        applyPreferredOutputDevice()
+        refreshOutputInfo()
+    }
+
+    fun setUsbExclusiveModeEnabled(enabled: Boolean) {
+        val current = _settingsState.value
+        if (current.usbExclusiveModeEnabled == enabled) {
+            return
+        }
+        _settingsState.value = current.copy(usbExclusiveModeEnabled = enabled)
+        prefs.edit().putBoolean(KEY_USB_EXCLUSIVE_MODE, enabled).apply()
         applyPreferredOutputDevice()
         refreshOutputInfo()
     }
@@ -1274,7 +1343,7 @@ object AudioEngine {
                 _effectsState.value = withSpatialDerived(
                     _effectsState.value.copy(
                         convolutionIrUri = null,
-                        convolutionIrName = "IRS 导入失败"
+                        convolutionIrName = "IRS 瀵煎叆澶辫触"
                     )
                 )
             }
@@ -1286,7 +1355,7 @@ object AudioEngine {
         _effectsState.value = withSpatialDerived(
             _effectsState.value.copy(
                 convolutionIrUri = null,
-                convolutionIrName = "未导入 IRS",
+                convolutionIrName = "鏈鍏?IRS",
                 convolutionEnabled = false
             )
         )
@@ -1311,6 +1380,8 @@ object AudioEngine {
         if (!initialized) {
             return
         }
+        // Re-apply routing/exclusive before reading status, so UI reflects actual active state.
+        applyPreferredOutputDevice()
         val audioManager = appContext.getSystemService(AudioManager::class.java)
         val sampleRate = audioManager
             ?.getProperty(AudioManager.PROPERTY_OUTPUT_SAMPLE_RATE)
@@ -1332,32 +1403,224 @@ object AudioEngine {
         } else {
             false
         }
-        val usbOptions = audioManager
+        val usbDevices = audioManager
             ?.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
             ?.filter { it.isUsbOutputDevice() }
             ?.sortedBy { it.productName?.toString().orEmpty().lowercase() }
-            ?.map { UsbOutputOption(id = it.id, label = buildUsbDeviceLabel(it)) }
             .orEmpty()
+        val usbOptions = usbDevices.map { UsbOutputOption(id = it.id, label = buildUsbDeviceLabel(it)) }
         val preferredUsbDevice = _settingsState.value.preferredUsbDeviceId
             ?.takeIf { id -> usbOptions.any { it.id == id } }
+        val preferredUsbDeviceInfo = preferredUsbDevice?.let { id ->
+            usbDevices.firstOrNull { it.id == id }
+        }
         val activeRoute = preferredUsbDevice
             ?.let { id -> usbOptions.firstOrNull { it.id == id }?.label }
             ?: "系统默认"
+        val usbExclusiveSupported = if (audioManager != null && preferredUsbDeviceInfo != null) {
+            queryUsbExclusiveSupport(audioManager, preferredUsbDeviceInfo)
+        } else {
+            false
+        }
+        val usbExclusiveActive = _settingsState.value.usbExclusiveModeEnabled &&
+            preferredUsbDeviceInfo != null &&
+            usbExclusiveSupported &&
+            usbExclusiveActiveCached
+        val pipelineDetails = buildAudioPipelineDetails(
+            audioManager = audioManager,
+            preferredUsbDeviceInfo = preferredUsbDeviceInfo,
+            systemOutputSampleRateHz = sampleRate,
+            systemOutputFramesPerBuffer = frames,
+            offloadSupported = offload
+        )
+
         _settingsState.value = _settingsState.value.copy(
             outputSampleRateHz = sampleRate,
             outputFramesPerBuffer = frames,
             offloadSupported = offload,
             usbOutputOptions = usbOptions,
             preferredUsbDeviceId = preferredUsbDevice,
-            activeOutputRouteLabel = activeRoute
+            activeOutputRouteLabel = activeRoute,
+            usbExclusiveSupported = usbExclusiveSupported,
+            usbExclusiveActive = usbExclusiveActive,
+            audioPipelineDetails = pipelineDetails
         )
     }
 
-    fun release() {
+    private fun buildAudioPipelineDetails(
+        audioManager: AudioManager?,
+        preferredUsbDeviceInfo: AudioDeviceInfo?,
+        systemOutputSampleRateHz: Int?,
+        systemOutputFramesPerBuffer: Int?,
+        offloadSupported: Boolean
+    ): String {
+        val currentPlayer = player
+        val settings = _settingsState.value
+        val effects = _effectsState.value
+        val playback = _playbackState.value
+        val now = DateFormat.format("yyyy-MM-dd HH:mm:ss", System.currentTimeMillis()).toString()
+        val selectedAudioFormat = resolveSelectedAudioFormat(currentPlayer)
+        val tracksSummary = resolveSelectedTrackSummary(currentPlayer)
+        val outputDevices = audioManager
+            ?.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
+            ?.toList()
+            .orEmpty()
+
+        return buildString {
+            appendLine("更新时间: $now")
+            appendLine("播放状态: ${if (playback.isPlaying) "Playing" else "Paused/Idle"}  position=${playback.positionMs}ms/${playback.durationMs}ms  sessionId=${playback.audioSessionId}")
+            appendLine("当前媒体: title=${playback.title}  subtitle=${playback.subtitle}  uri=${playback.mediaUri ?: "N/A"}")
+            appendLine()
+            appendLine("[音轨与解码]")
+            appendLine("选中音轨: ${tracksSummary.ifBlank { "N/A" }}")
+            appendLine("编码器MIME: ${selectedAudioFormat?.sampleMimeType ?: "N/A"}")
+            appendLine("编码器codecs: ${selectedAudioFormat?.codecs ?: "N/A"}")
+            appendLine("音轨采样率: ${selectedAudioFormat?.sampleRate?.takeIf { it > 0 } ?: "N/A"} Hz")
+            appendLine("音轨声道数: ${selectedAudioFormat?.channelCount?.takeIf { it > 0 } ?: "N/A"}")
+            appendLine("音轨码率: ${selectedAudioFormat?.bitrate?.takeIf { it > 0 } ?: "N/A"} bps")
+            appendLine("音轨PCM编码: ${encodingToString(selectedAudioFormat?.pcmEncoding ?: Format.NO_VALUE)}")
+            appendLine("解码器: ${lastAudioDecoderName ?: "N/A"}")
+            appendLine("解码器初始化耗时: ${lastAudioDecoderInitDurationMs?.let { "${it}ms" } ?: "N/A"}")
+            appendLine()
+            appendLine("[处理与采样]")
+            appendLine("HiFi: ${settings.hiFiMode}  Hi-Res API: ${settings.hiResApiEnabled}")
+            appendLine("目标位深: ${settings.preferredBitDepth}-bit")
+            appendLine("目标输出采样率: ${settings.preferredOutputSampleRateHz?.let { "${it}Hz" } ?: "Auto"}")
+            appendLine("系统输出采样率: ${systemOutputSampleRateHz?.let { "${it}Hz" } ?: "N/A"}")
+            appendLine("输出缓冲帧: ${systemOutputFramesPerBuffer ?: "N/A"}")
+            appendLine("硬件Offload支持: $offloadSupported")
+            appendLine("最大音频码率限制: ${settings.preferredMaxBitrateKbps?.let { "${it}kbps" } ?: "Unlimited"}")
+            appendLine()
+            appendLine("[信号处理链路]")
+            appendLine("Equalizer: enabled=${effects.enabled} bands=${effects.eqBandLevelsMb.joinToString(prefix = "[", postfix = "]")}")
+            appendLine("BassBoost=${effects.bassStrength}  Virtualizer=${effects.virtualizerStrength}  Loudness=${effects.loudnessGainMb}mB")
+            appendLine("Spatial=${effects.spatialEnabled}  HRTF=${effects.hrtfEnabled} (db=${effects.hrtfUseDatabase}, blend=${effects.hrtfBlendPercent}%, crossfeed=${effects.hrtfCrossfeedPercent}%, externalization=${effects.hrtfExternalizationPercent}%)")
+            appendLine("Convolution=${effects.convolutionEnabled}  IR=${effects.convolutionIrName}  Wet=${effects.convolutionWetPercent}%")
+            appendLine()
+            appendLine("[输出路由与API]")
+            appendLine("播放引擎: Media3 ExoPlayer + DefaultAudioSink(AudioTrack)")
+            appendLine("首选USB设备ID: ${settings.preferredUsbDeviceId ?: "Auto"}  当前路由: ${settings.activeOutputRouteLabel}")
+            appendLine("USB独占开关: ${settings.usbExclusiveModeEnabled}  支持: ${settings.usbExclusiveSupported}  激活: ${settings.usbExclusiveActive}")
+            appendLine("安卓版本: API ${Build.VERSION.SDK_INT}")
+            appendLine()
+            appendLine("[音频设备清单]")
+            if (outputDevices.isEmpty()) {
+                appendLine("无可用输出设备")
+            } else {
+                outputDevices.forEach { device ->
+                    val rates = device.sampleRates.takeIf { it.isNotEmpty() }?.joinToString() ?: "N/A"
+                    val channels = device.channelCounts.takeIf { it.isNotEmpty() }?.joinToString() ?: "N/A"
+                    val enc = device.encodings.takeIf { it.isNotEmpty() }?.joinToString { encodingToString(it) } ?: "N/A"
+                    appendLine(
+                        "id=${device.id} type=${deviceTypeToString(device.type)} product=${device.productName ?: "N/A"} " +
+                            "sink=${device.isSink} src=${device.isSource} rates=[$rates] channels=[$channels] enc=[$enc]"
+                    )
+                }
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE && audioManager != null && preferredUsbDeviceInfo != null) {
+                appendLine()
+                appendLine("[USB MixerAttributes]")
+                val attrs = runCatching { audioManager.getSupportedMixerAttributes(preferredUsbDeviceInfo) }.getOrDefault(emptyList())
+                if (attrs.isEmpty()) {
+                    appendLine("无可用MixerAttributes")
+                } else {
+                    attrs.forEach { attr ->
+                        appendLine(
+                            "behavior=${mixerBehaviorToString(attr.mixerBehavior)} " +
+                                "sampleRate=${attr.format.sampleRate} " +
+                                "encoding=${encodingToString(attr.format.encoding)} " +
+                                "channelMask=${attr.format.channelMask}"
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    private fun resolveSelectedAudioFormat(currentPlayer: ExoPlayer?): Format? {
+        val tracks = currentPlayer?.currentTracks ?: return null
+        tracks.groups.forEach { group ->
+            if (group.type != C.TRACK_TYPE_AUDIO) return@forEach
+            for (trackIndex in 0 until group.length) {
+                if (group.isTrackSelected(trackIndex)) {
+                    return group.getTrackFormat(trackIndex)
+                }
+            }
+        }
+        return null
+    }
+
+    private fun resolveSelectedTrackSummary(currentPlayer: ExoPlayer?): String {
+        val tracks = currentPlayer?.currentTracks ?: return ""
+        tracks.groups.forEach { group ->
+            if (group.type != C.TRACK_TYPE_AUDIO) return@forEach
+            for (trackIndex in 0 until group.length) {
+                if (group.isTrackSelected(trackIndex)) {
+                    val format = group.getTrackFormat(trackIndex)
+                    val label = format.label?.takeIf { it.isNotBlank() } ?: "track#$trackIndex"
+                    val language = format.language?.takeIf { it.isNotBlank() } ?: "und"
+                    return "$label  lang=$language  roleFlags=${format.roleFlags}"
+                }
+            }
+        }
+        return ""
+    }
+
+    private fun mixerBehaviorToString(value: Int): String {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            return value.toString()
+        }
+        return when (value) {
+            android.media.AudioMixerAttributes.MIXER_BEHAVIOR_DEFAULT -> "DEFAULT"
+            android.media.AudioMixerAttributes.MIXER_BEHAVIOR_BIT_PERFECT -> "BIT_PERFECT"
+            else -> value.toString()
+        }
+    }
+
+    private fun deviceTypeToString(type: Int): String {
+        return when (type) {
+            AudioDeviceInfo.TYPE_BUILTIN_EARPIECE -> "BUILTIN_EARPIECE"
+            AudioDeviceInfo.TYPE_BUILTIN_SPEAKER -> "BUILTIN_SPEAKER"
+            AudioDeviceInfo.TYPE_WIRED_HEADSET -> "WIRED_HEADSET"
+            AudioDeviceInfo.TYPE_WIRED_HEADPHONES -> "WIRED_HEADPHONES"
+            AudioDeviceInfo.TYPE_BLUETOOTH_SCO -> "BT_SCO"
+            AudioDeviceInfo.TYPE_BLUETOOTH_A2DP -> "BT_A2DP"
+            AudioDeviceInfo.TYPE_HDMI -> "HDMI"
+            AudioDeviceInfo.TYPE_USB_DEVICE -> "USB_DEVICE"
+            AudioDeviceInfo.TYPE_USB_ACCESSORY -> "USB_ACCESSORY"
+            AudioDeviceInfo.TYPE_USB_HEADSET -> "USB_HEADSET"
+            else -> "TYPE_$type"
+        }
+    }
+
+    private fun encodingToString(encoding: Int): String {
+        return when (encoding) {
+            AudioFormat.ENCODING_PCM_8BIT -> "PCM_8BIT"
+            AudioFormat.ENCODING_PCM_16BIT -> "PCM_16BIT"
+            AudioFormat.ENCODING_PCM_24BIT_PACKED -> "PCM_24BIT_PACKED"
+            AudioFormat.ENCODING_PCM_32BIT -> "PCM_32BIT"
+            AudioFormat.ENCODING_PCM_FLOAT -> "PCM_FLOAT"
+            AudioFormat.ENCODING_MP3 -> "MP3"
+            AudioFormat.ENCODING_AAC_LC -> "AAC_LC"
+            AudioFormat.ENCODING_AAC_HE_V1 -> "AAC_HE_V1"
+            AudioFormat.ENCODING_AAC_HE_V2 -> "AAC_HE_V2"
+            AudioFormat.ENCODING_AAC_ELD -> "AAC_ELD"
+            AudioFormat.ENCODING_AC3 -> "AC3"
+            AudioFormat.ENCODING_E_AC3 -> "E_AC3"
+            AudioFormat.ENCODING_DTS -> "DTS"
+            AudioFormat.ENCODING_DTS_HD -> "DTS_HD"
+            AudioFormat.ENCODING_INVALID -> "INVALID"
+            else -> encoding.toString()
+        }
+    }
+fun release() {
         mainHandler.removeCallbacks(progressTicker)
         player?.removeListener(playerListener)
+        player?.removeAnalyticsListener(analyticsListener)
         player?.release()
         player = null
+        lastAudioDecoderName = null
+        lastAudioDecoderInitDurationMs = null
         playbackQueue.clear()
         sleepTimerEndElapsedMs = null
         hrtfBinauralProcessor = null
@@ -1423,6 +1686,7 @@ object AudioEngine {
                         }
                     }
                 addListener(playerListener)
+                addAnalyticsListener(analyticsListener)
             }
         applyTrackSelectionPreferences()
         applyHiFiMode(_settingsState.value.hiFiMode)
@@ -1468,6 +1732,58 @@ object AudioEngine {
         }
         runCatching {
             routeMethod?.invoke(currentPlayer, preferredDevice)
+        }
+        applyUsbExclusiveMode(audioManager, preferredDevice)
+    }
+
+    private fun queryUsbExclusiveSupport(audioManager: AudioManager, device: AudioDeviceInfo): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            return false
+        }
+        val supported = runCatching { audioManager.getSupportedMixerAttributes(device) }.getOrDefault(emptyList())
+        return supported.any { it.mixerBehavior == android.media.AudioMixerAttributes.MIXER_BEHAVIOR_BIT_PERFECT }
+    }
+
+    private fun applyUsbExclusiveMode(audioManager: AudioManager, preferredDevice: AudioDeviceInfo?) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            usbExclusiveSupportedCached = false
+            usbExclusiveActiveCached = false
+            return
+        }
+        val attrs = android.media.AudioAttributes.Builder()
+            .setUsage(android.media.AudioAttributes.USAGE_MEDIA)
+            .setContentType(android.media.AudioAttributes.CONTENT_TYPE_MUSIC)
+            .build()
+        val usbDevices = audioManager.getDevices(AudioManager.GET_DEVICES_OUTPUTS).filter { it.isUsbOutputDevice() }
+        val enabled = _settingsState.value.usbExclusiveModeEnabled
+        usbExclusiveSupportedCached = false
+        usbExclusiveActiveCached = false
+
+        usbDevices.forEach { device ->
+            runCatching { audioManager.clearPreferredMixerAttributes(attrs, device) }
+        }
+        if (!enabled || preferredDevice == null) {
+            return
+        }
+
+        val supported = runCatching { audioManager.getSupportedMixerAttributes(preferredDevice) }.getOrDefault(emptyList())
+        val bitPerfectCandidates = supported.filter {
+            it.mixerBehavior == android.media.AudioMixerAttributes.MIXER_BEHAVIOR_BIT_PERFECT
+        }
+        val preferredSampleRate = _settingsState.value.preferredOutputSampleRateHz
+        val bitPerfect = if (preferredSampleRate != null) {
+            bitPerfectCandidates.firstOrNull { candidate ->
+                candidate.format.sampleRate == preferredSampleRate
+            } ?: bitPerfectCandidates.firstOrNull()
+        } else {
+            bitPerfectCandidates.firstOrNull()
+        }
+        usbExclusiveSupportedCached = bitPerfectCandidates.isNotEmpty()
+        if (bitPerfect != null) {
+            usbExclusiveActiveCached = runCatching {
+                audioManager.setPreferredMixerAttributes(attrs, preferredDevice, bitPerfect)
+                true
+            }.getOrDefault(false)
         }
     }
 
@@ -1516,6 +1832,13 @@ object AudioEngine {
 
     private fun normalizeBitDepth(value: Int): Int {
         return if (value == BIT_DEPTH_16) BIT_DEPTH_16 else BIT_DEPTH_32_FLOAT
+    }
+
+    private fun normalizeOutputSampleRate(value: Int?): Int? {
+        if (value == null) {
+            return null
+        }
+        return value.takeIf { candidate -> OUTPUT_SAMPLE_RATE_OPTIONS_HZ.contains(candidate) }
     }
 
     private fun AudioDeviceInfo.isUsbOutputDevice(): Boolean {
@@ -2093,7 +2416,7 @@ object AudioEngine {
                 _effectsState.value = withSpatialDerived(
                     _effectsState.value.copy(
                         convolutionEnabled = false,
-                        convolutionIrName = "IRS 加载失败"
+                        convolutionIrName = "IRS 鍔犺浇澶辫触"
                     )
                 )
                 prefs.edit().putBoolean(KEY_CONVOLUTION_ENABLED, false).apply()
@@ -2112,7 +2435,7 @@ object AudioEngine {
             ?: "IRS"
 
         if (!displayName.endsWith(".irs", ignoreCase = true)) {
-            throw IllegalArgumentException("仅支持 .irs 文件")
+            throw IllegalArgumentException("浠呮敮鎸?.irs 鏂囦欢")
         }
 
         val bytes = resolver.openInputStream(uri)?.use { input ->
@@ -2123,18 +2446,18 @@ object AudioEngine {
             while (read > 0) {
                 total += read
                 if (total > 8 * 1024 * 1024) {
-                    throw IllegalArgumentException("IRS 文件过大")
+                    throw IllegalArgumentException("IRS 鏂囦欢杩囧ぇ")
                 }
                 out.write(buffer, 0, read)
                 read = input.read(buffer)
             }
             out.toByteArray()
-        } ?: throw IllegalArgumentException("无法读取 IRS 文件")
+        } ?: throw IllegalArgumentException("鏃犳硶璇诲彇 IRS 鏂囦欢")
 
         val rawImpulse = parseWavImpulse(bytes) ?: parseRawPcmImpulse(bytes)
         val prepared = prepareImpulse(rawImpulse)
         if (prepared.isEmpty()) {
-            throw IllegalArgumentException("IRS 数据为空")
+            throw IllegalArgumentException("IRS 鏁版嵁涓虹┖")
         }
         return ImpulseResponseAsset(
             name = displayName,
@@ -2345,11 +2668,11 @@ object AudioEngine {
             (end - SystemClock.elapsedRealtime()).coerceAtLeast(0L)
         } ?: 0L
         val metadata = currentPlayer.currentMediaItem?.mediaMetadata
-        val title = metadata?.title?.toString()?.takeIf { it.isNotBlank() } ?: "未选择音频"
+        val title = metadata?.title?.toString()?.takeIf { it.isNotBlank() } ?: "鏈€夋嫨闊抽"
         val artist = metadata?.artist?.toString().orEmpty()
         val album = metadata?.albumTitle?.toString().orEmpty()
         val subtitle = when {
-            !hasMedia -> "支持 FLAC / WAV / MP3 / AAC"
+            !hasMedia -> "鏀寔 FLAC / WAV / MP3 / AAC"
             artist.isNotBlank() || album.isNotBlank() -> {
                 listOf(artist, album).filter { it.isNotBlank() }.joinToString(" · ")
             }
@@ -2405,6 +2728,7 @@ object AudioEngine {
             MediaStore.Audio.Media.ALBUM,
             MediaStore.Audio.Media.DURATION,
             MediaStore.Audio.Media.ALBUM_ID,
+            MediaStore.Audio.Media.TRACK,
             MediaStore.Audio.Media.RELATIVE_PATH
         )
         val selection = "${MediaStore.Audio.Media.IS_MUSIC} != 0 AND ${MediaStore.Audio.Media.DURATION} > 10000"
@@ -2420,6 +2744,7 @@ object AudioEngine {
             val albumIndex = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.ALBUM)
             val durationIndex = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.DURATION)
             val albumIdIndex = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.ALBUM_ID)
+            val trackIndex = cursor.getColumnIndex(MediaStore.Audio.Media.TRACK)
             val relativePathIndex = cursor.getColumnIndex(MediaStore.Audio.Media.RELATIVE_PATH)
 
             while (cursor.moveToNext()) {
@@ -2432,6 +2757,15 @@ object AudioEngine {
 
                 val id = cursor.getLong(idIndex)
                 val albumId = cursor.getLong(albumIdIndex)
+                val trackRaw = if (trackIndex >= 0) cursor.getInt(trackIndex) else 0
+                val discNumber = when {
+                    trackRaw >= 1000 -> (trackRaw / 1000).coerceAtLeast(1)
+                    else -> 1
+                }
+                val trackNumber = when {
+                    trackRaw >= 1000 -> (trackRaw % 1000).coerceAtLeast(0)
+                    else -> trackRaw.coerceAtLeast(0)
+                }
                 val contentUri = ContentUris.withAppendedId(uri, id)
                 val artworkUri = if (albumId > 0) {
                     ContentUris.withAppendedId(albumArtBaseUri, albumId)
@@ -2446,7 +2780,9 @@ object AudioEngine {
                     album = cursor.getString(albumIndex).orEmpty().ifBlank { "未知专辑" },
                     durationMs = cursor.getLong(durationIndex),
                     albumId = albumId,
-                    artworkUri = artworkUri
+                    artworkUri = artworkUri,
+                    discNumber = discNumber,
+                    trackNumber = trackNumber
                 )
             }
         }
@@ -2474,3 +2810,5 @@ object AudioEngine {
         return if (relative.isBlank()) null else "$relative/"
     }
 }
+
+

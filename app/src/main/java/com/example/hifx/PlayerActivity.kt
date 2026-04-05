@@ -16,6 +16,8 @@ import android.os.Build
 import android.os.Bundle
 import android.provider.MediaStore
 import android.util.Log
+import android.view.GestureDetector
+import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
 import android.view.ViewOutlineProvider
@@ -70,7 +72,12 @@ class PlayerActivity : AppCompatActivity() {
     private var collapsing = false
     private var entering = false
     private var hasRenderedStateAtLeastOnce = false
-    private var pendingEnterReveal = false
+    private var pendingEnterMaskRelease = false
+    private var activeEnterMaskOverlay: EnterMaskOverlay? = null
+    private var enterMaskFadeOutInProgress = false
+    private var latestArtworkRequestKey: String? = null
+    private var enterMaskReadyAtUptimeMs: Long = 0L
+    private var trackSwipeAnimating = false
     private val standardInterpolator = FastOutSlowInInterpolator()
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -80,6 +87,7 @@ class PlayerActivity : AppCompatActivity() {
 
         setupImmersiveUi()
         setupControls()
+        setupAlbumGestures()
         setupBackgroundEffects()
         applyPrewarmedStateIfAvailable()
         observePlaybackState()
@@ -168,6 +176,136 @@ class PlayerActivity : AppCompatActivity() {
         }
     }
 
+    private fun setupAlbumGestures() {
+        val gestureDetector = GestureDetector(
+            this,
+            object : GestureDetector.SimpleOnGestureListener() {
+                override fun onDown(e: MotionEvent): Boolean = true
+
+                override fun onFling(
+                    e1: MotionEvent?,
+                    e2: MotionEvent,
+                    velocityX: Float,
+                    velocityY: Float
+                ): Boolean {
+                    val start = e1 ?: return false
+                    val dx = e2.x - start.x
+                    val dy = e2.y - start.y
+                    val absDx = abs(dx)
+                    val absDy = abs(dy)
+                    val density = resources.displayMetrics.density
+                    val horizontalDistance = 42f * density
+                    val verticalDistance = 58f * density
+                    val velocityThreshold = 520f
+
+                    if (absDy > absDx * 1.2f && dy > verticalDistance && abs(velocityY) > velocityThreshold) {
+                        animateAlbumCardDismissDown()
+                        return true
+                    }
+                    if (absDx > absDy * 1.15f && absDx > horizontalDistance && abs(velocityX) > velocityThreshold) {
+                        val next = dx < 0f
+                        animateAlbumCardTrackSwitch(next = next)
+                        return true
+                    }
+                    return false
+                }
+            }
+        )
+
+        val albumCard = (binding.imageCover.parent as? View) ?: binding.imageCover
+        val touchListener = View.OnTouchListener { _, event ->
+            gestureDetector.onTouchEvent(event)
+        }
+        albumCard.setOnTouchListener(touchListener)
+        binding.imageCover.setOnTouchListener(touchListener)
+    }
+
+    private fun animateAlbumCardDismissDown() {
+        if (collapsing) {
+            return
+        }
+        val albumCard = (binding.imageCover.parent as? View) ?: binding.imageCover
+        albumCard.animate().cancel()
+        albumCard.animate()
+            .translationY(dp(56f).toFloat())
+            .alpha(0.8f)
+            .setInterpolator(standardInterpolator)
+            .setDuration(120L)
+            .withEndAction {
+                albumCard.translationY = 0f
+                albumCard.alpha = 1f
+                animateCollapseToMiniPlayerAndFinish()
+            }
+            .start()
+    }
+
+    private fun animateAlbumCardTrackSwitch(next: Boolean) {
+        if (trackSwipeAnimating) {
+            return
+        }
+        val canSwitch = if (next) binding.buttonNextTrack.isEnabled else binding.buttonPreviousTrack.isEnabled
+        if (!canSwitch) {
+            val nudge = if (next) -dp(22f).toFloat() else dp(22f).toFloat()
+            val albumCard = (binding.imageCover.parent as? View) ?: binding.imageCover
+            albumCard.animate().cancel()
+            albumCard.animate()
+                .translationX(nudge)
+                .setDuration(80L)
+                .setInterpolator(standardInterpolator)
+                .withEndAction {
+                    albumCard.animate()
+                        .translationX(0f)
+                        .setDuration(100L)
+                        .setInterpolator(standardInterpolator)
+                        .start()
+                }
+                .start()
+            return
+        }
+        trackSwipeAnimating = true
+        val direction = if (next) -1f else 1f
+        val shift = max(dp(110f).toFloat(), binding.imageCover.width * 0.42f)
+        val albumCard = (binding.imageCover.parent as? View) ?: binding.imageCover
+        val title = binding.textTrackTitle
+        val subtitle = binding.textTrackSubtitle
+
+        fun animateGroupOut(onEnd: () -> Unit) {
+            albumCard.animate().translationX(direction * shift).alpha(0.5f)
+                .setInterpolator(standardInterpolator).setDuration(130L).withEndAction(onEnd).start()
+            title.animate().translationX(direction * shift * 0.72f).alpha(0.5f)
+                .setInterpolator(standardInterpolator).setDuration(130L).start()
+            subtitle.animate().translationX(direction * shift * 0.72f).alpha(0.5f)
+                .setInterpolator(standardInterpolator).setDuration(130L).start()
+        }
+
+        fun animateGroupIn() {
+            albumCard.translationX = -direction * shift * 0.62f
+            albumCard.alpha = 0.55f
+            title.translationX = -direction * shift * 0.42f
+            title.alpha = 0.55f
+            subtitle.translationX = -direction * shift * 0.42f
+            subtitle.alpha = 0.55f
+
+            albumCard.animate().translationX(0f).alpha(1f)
+                .setInterpolator(standardInterpolator).setDuration(180L).start()
+            title.animate().translationX(0f).alpha(1f)
+                .setInterpolator(standardInterpolator).setDuration(180L).start()
+            subtitle.animate().translationX(0f).alpha(1f)
+                .setInterpolator(standardInterpolator).setDuration(180L)
+                .withEndAction { trackSwipeAnimating = false }
+                .start()
+        }
+
+        animateGroupOut {
+            if (next) {
+                AudioEngine.skipToNextTrack()
+            } else {
+                AudioEngine.skipToPreviousTrack()
+            }
+            animateGroupIn()
+        }
+    }
+
     override fun onPause() {
         userSeeking = false
         hideWaveformPreview()
@@ -177,11 +315,13 @@ class PlayerActivity : AppCompatActivity() {
     override fun onDestroy() {
         waveformJob?.cancel()
         lyricJob?.cancel()
+        releaseEnterMaskOverlay(immediate = true)
         super.onDestroy()
     }
 
     private fun renderState(state: PlaybackUiState) {
         hasRenderedStateAtLeastOnce = true
+        latestArtworkRequestKey = state.artworkUri?.toString()
         binding.imageCover.loadArtworkOrDefault(state.artworkUri)
         val artworkKey = state.artworkUri?.toString()
         if (artworkKey != lastArtworkKey) {
@@ -249,8 +389,8 @@ class PlayerActivity : AppCompatActivity() {
             }.coerceIn(0L, duration)
             showWaveformPreview(previewPositionMs, duration)
         }
-        if (pendingEnterReveal) {
-            revealPlayerContentAfterEnter()
+        if (pendingEnterMaskRelease && isReadyToReleaseEnterMask()) {
+            releaseEnterMaskOverlay(immediate = false)
         }
     }
 
@@ -768,50 +908,24 @@ class PlayerActivity : AppCompatActivity() {
                 return@post
             }
 
-            val snapshot = runCatching {
-                Bitmap.createBitmap(endRect.width(), endRect.height(), Bitmap.Config.ARGB_8888).also { bitmap ->
-                    val canvas = Canvas(bitmap)
-                    binding.root.draw(canvas)
-                }
-            }.getOrNull() ?: run {
-                entering = false
-                binding.root.alpha = 1f
-                return@post
-            }
-
             val duration = 300L
             val startCorner = dp(20f).toFloat()
             val endCorner = dp(2f).toFloat()
             var currentCorner = startCorner
-            var clipWidth = startRect.width()
-            var clipHeight = startRect.height()
-            val clipRect = Rect(0, 0, clipWidth, clipHeight)
-
-            val maskedSnapshot = FrameLayout(this).apply {
-                x = startRect.left.toFloat()
-                y = startRect.top.toFloat()
-                layoutParams = FrameLayout.LayoutParams(endRect.width(), endRect.height())
-                setLayerType(View.LAYER_TYPE_HARDWARE, null)
-                clipToOutline = true
-                outlineProvider = object : ViewOutlineProvider() {
-                    override fun getOutline(view: View, outline: Outline) {
-                        outline.setRoundRect(0, 0, clipWidth, clipHeight, currentCorner)
-                    }
+            val rootStartLeft = (startRect.left - endRect.left).coerceIn(0, endRect.width())
+            val rootStartTop = (startRect.top - endRect.top).coerceIn(0, endRect.height())
+            val rootStartRight = (rootStartLeft + startRect.width()).coerceIn(1, endRect.width())
+            val rootStartBottom = (rootStartTop + startRect.height()).coerceIn(1, endRect.height())
+            var liveClipRect = Rect(rootStartLeft, rootStartTop, rootStartRight, rootStartBottom)
+            binding.root.setLayerType(View.LAYER_TYPE_HARDWARE, null)
+            binding.root.clipToOutline = true
+            binding.root.outlineProvider = object : ViewOutlineProvider() {
+                override fun getOutline(view: View, outline: Outline) {
+                    outline.setRoundRect(liveClipRect, currentCorner)
                 }
             }
-            val snapshotImage = ImageView(this).apply {
-                setImageBitmap(snapshot)
-                scaleType = ImageView.ScaleType.FIT_XY
-                layoutParams = FrameLayout.LayoutParams(
-                    endRect.width(),
-                    endRect.height()
-                )
-                x = endRect.left.toFloat() - startRect.left.toFloat()
-                y = endRect.top.toFloat() - startRect.top.toFloat()
-            }
-            maskedSnapshot.addView(snapshotImage)
-            overlayHost.addView(maskedSnapshot)
-            binding.root.alpha = 0f
+            binding.root.clipBounds = Rect(liveClipRect)
+            binding.root.invalidateOutline()
 
             ValueAnimator.ofFloat(0f, 1f).apply {
                 this.duration = duration
@@ -824,47 +938,88 @@ class PlayerActivity : AppCompatActivity() {
                     val y = startRect.top + (endRect.top - startRect.top) * t
 
                     currentCorner = startCorner + (endCorner - startCorner) * t
-                    clipWidth = w
-                    clipHeight = h
-                    clipRect.right = clipWidth
-                    clipRect.bottom = clipHeight
-                    maskedSnapshot.x = x
-                    maskedSnapshot.y = y
-                    maskedSnapshot.clipBounds = clipRect
-                    maskedSnapshot.invalidateOutline()
-                    snapshotImage.x = endRect.left.toFloat() - x
-                    snapshotImage.y = endRect.top.toFloat() - y
+                    val localLeft = (x - endRect.left).toInt().coerceIn(0, endRect.width() - 1)
+                    val localTop = (y - endRect.top).toInt().coerceIn(0, endRect.height() - 1)
+                    val localRight = (localLeft + w).coerceIn(localLeft + 1, endRect.width())
+                    val localBottom = (localTop + h).coerceIn(localTop + 1, endRect.height())
+                    liveClipRect = Rect(localLeft, localTop, localRight, localBottom)
+                    binding.root.clipBounds = Rect(liveClipRect)
+                    binding.root.invalidateOutline()
                 }
                 doOnEnd {
-                    maskedSnapshot.setLayerType(View.LAYER_TYPE_NONE, null)
-                    overlayHost.removeView(maskedSnapshot)
-                    snapshot.recycle()
-                    // Wait one frame so blur/card layers are ready before reveal.
-                    binding.root.postOnAnimation {
-                        if (!hasRenderedStateAtLeastOnce) {
-                            pendingEnterReveal = true
-                            return@postOnAnimation
-                        }
-                        revealPlayerContentAfterEnter()
-                    }
+                    binding.root.clipBounds = null
+                    binding.root.clipToOutline = false
+                    binding.root.outlineProvider = ViewOutlineProvider.BOUNDS
+                    binding.root.setLayerType(View.LAYER_TYPE_NONE, null)
+                    entering = false
                 }
                 start()
             }
         }
     }
 
-    private fun revealPlayerContentAfterEnter() {
-        pendingEnterReveal = false
-        binding.root.animate()
-            .alpha(1f)
-            .setDuration(90L)
-            .setInterpolator(standardInterpolator)
-            .withEndAction { entering = false }
-            .start()
+    private fun isReadyToReleaseEnterMask(): Boolean {
+        if (!hasRenderedStateAtLeastOnce) {
+            return false
+        }
+        val artworkKey = latestArtworkRequestKey
+        if (artworkKey.isNullOrBlank()) {
+            return true
+        }
+
+        val coverApplied = binding.imageCover.getTag(R.id.tag_artwork_applied_uri) as? String
+        val bgApplied = binding.imagePlayerBg.getTag(R.id.tag_artwork_applied_uri) as? String
+        if (coverApplied == artworkKey && bgApplied == artworkKey) {
+            return true
+        }
+
+        val waited = android.os.SystemClock.uptimeMillis() - enterMaskReadyAtUptimeMs
+        return waited >= 320L
+    }
+
+    private fun releaseEnterMaskOverlay(immediate: Boolean) {
+        pendingEnterMaskRelease = false
+        val overlay = activeEnterMaskOverlay ?: run {
+            entering = false
+            return
+        }
+        if (!immediate && !enterMaskFadeOutInProgress) {
+            enterMaskFadeOutInProgress = true
+            overlay.maskView.animate()
+                .alpha(0f)
+                .setDuration(110L)
+                .setInterpolator(standardInterpolator)
+                .withEndAction {
+                    val current = activeEnterMaskOverlay
+                    if (current != null && current.maskView === overlay.maskView) {
+                        current.maskView.setLayerType(View.LAYER_TYPE_NONE, null)
+                        current.host.removeView(current.maskView)
+                        current.snapshot.recycle()
+                        activeEnterMaskOverlay = null
+                    }
+                    enterMaskFadeOutInProgress = false
+                    entering = false
+                }
+                .start()
+            return
+        }
+        overlay.maskView.animate().cancel()
+        overlay.maskView.setLayerType(View.LAYER_TYPE_NONE, null)
+        overlay.host.removeView(overlay.maskView)
+        overlay.snapshot.recycle()
+        activeEnterMaskOverlay = null
+        enterMaskFadeOutInProgress = false
+        entering = false
     }
 
     private fun applyPrewarmedStateIfAvailable() {
         val prewarmed = PlayerTransitionState.consumePrewarmedPlaybackState() ?: return
         renderState(prewarmed)
     }
+
+    private data class EnterMaskOverlay(
+        val host: ViewGroup,
+        val maskView: FrameLayout,
+        val snapshot: Bitmap
+    )
 }

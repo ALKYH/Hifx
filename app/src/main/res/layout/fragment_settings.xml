@@ -160,6 +160,19 @@
                     android:textAppearance="?attr/textAppearanceBodyMedium" />
 
                 <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:text="@string/settings_output_sample_rate_title"
+                    android:textAppearance="?attr/textAppearanceLabelLarge" />
+
+                <Spinner
+                    android:id="@+id/spinner_output_sample_rate"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="6dp" />
+
+                <TextView
                     android:id="@+id/text_frames_per_buffer"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
@@ -214,12 +227,27 @@
                     android:layout_height="wrap_content"
                     android:layout_marginTop="6dp" />
 
+                <com.google.android.material.materialswitch.MaterialSwitch
+                    android:id="@+id/switch_usb_exclusive"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:text="@string/settings_usb_exclusive_switch" />
+
                 <TextView
                     android:id="@+id/text_active_route"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:layout_marginTop="6dp"
                     android:text="@string/settings_active_route_default"
+                    android:textAppearance="?attr/textAppearanceBodySmall" />
+
+                <TextView
+                    android:id="@+id/text_usb_exclusive_state"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="4dp"
+                    android:text="@string/settings_usb_exclusive_state_default"
                     android:textAppearance="?attr/textAppearanceBodySmall" />
 
                 <com.google.android.material.button.MaterialButton
@@ -230,6 +258,15 @@
                     android:layout_marginTop="10dp"
                     android:text="@string/action_refresh_device_info"
                     app:icon="@android:drawable/ic_popup_sync" />
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/button_show_audio_pipeline_details"
+                    style="@style/Widget.Material3.Button.OutlinedButton"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="10dp"
+                    android:text="@string/settings_pipeline_details_button"
+                    app:icon="@android:drawable/ic_menu_info_details" />
             </LinearLayout>
         </com.google.android.material.card.MaterialCardView>
 

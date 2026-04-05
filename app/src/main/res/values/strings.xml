@@ -31,6 +31,7 @@
     <string name="library_empty">没有可播放的曲目</string>
     <string name="library_permission_required">请先授权音频读取权限</string>
     <string name="library_empty_with_error">媒体库为空：%1$s</string>
+    <string name="library_entity_count">%1$d 首歌曲</string>
     <string name="track_subtitle_format">%1$s · %2$s</string>
 
     <string name="effects_master_switch">启用音效处理</string>
@@ -192,10 +193,23 @@
     <string name="effects_head_contour_hint">灰色轮廓为基于 HRTF 头部半径的人头示意（鼻尖朝上为正前方）。</string>
     <string name="settings_hires_api_switch">启用 Hi-Res API</string>
     <string name="settings_bit_depth_title">输出位深</string>
+    <string name="settings_output_sample_rate_title">目标输出采样率（USB 独占）</string>
     <string name="settings_bitrate_title">最大音频码率</string>
     <string name="settings_usb_route_title">USB DAC 输出路由</string>
+    <string name="settings_usb_exclusive_switch">USB DAC 独占模式（Bit-Perfect）</string>
     <string name="settings_route_auto">系统默认 (Auto)</string>
     <string name="settings_bitrate_unlimited">不限制</string>
+    <string name="settings_output_sample_rate_auto">自动 (Auto)</string>
     <string name="settings_active_route_default">当前路由：系统默认</string>
     <string name="settings_active_route_value">当前路由：%1$s</string>
+    <string name="settings_usb_exclusive_state_default">独占状态：未启用</string>
+    <string name="settings_usb_exclusive_state_no_device">独占状态：请先选择 USB DAC</string>
+    <string name="settings_usb_exclusive_state_not_supported">独占状态：当前设备不支持</string>
+    <string name="settings_usb_exclusive_state_active">独占状态：已启用</string>
+    <string name="settings_usb_exclusive_state_inactive">独占状态：已开启但未激活</string>
+    <string name="settings_pipeline_details_empty">暂无数据，点击“刷新设备输出信息”获取。</string>
+    <string name="settings_pipeline_details_button">查看音频链路详情</string>
+    <string name="settings_pipeline_dialog_title">音频链路详情</string>
+    <string name="settings_pipeline_explain_header">信息解释（基于当前设备与轨道）</string>
+    <string name="settings_pipeline_raw_header">原始信息</string>
 </resources>
