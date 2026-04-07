@@ -143,6 +143,20 @@
                     android:layout_marginTop="8dp"
                     android:text="@string/settings_hires_api_switch" />
 
+                <com.google.android.material.materialswitch.MaterialSwitch
+                    android:id="@+id/switch_remember_playback"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:text="@string/settings_remember_playback_switch" />
+
+                <com.google.android.material.materialswitch.MaterialSwitch
+                    android:id="@+id/switch_haptic_feedback"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:text="@string/settings_haptic_feedback_switch" />
+
                 <TextView
                     android:id="@+id/text_hi_fi_hint"
                     android:layout_width="match_parent"

@@ -20,6 +20,7 @@ import androidx.recyclerview.widget.LinearLayoutManager
 import com.example.hifx.audio.AudioEngine
 import com.example.hifx.audio.MediaLibraryUiState
 import com.example.hifx.databinding.FragmentPlaybackBinding
+import com.example.hifx.util.AppHaptics
 import com.google.android.material.tabs.TabLayout
 import kotlinx.coroutines.launch
 
@@ -60,6 +61,7 @@ class PlaybackFragment : Fragment() {
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         adapter = MusicLibraryAdapter(
             onTrackClick = { track ->
+                AppHaptics.click(requireContext())
                 val startIndex = currentPlayableTracks.indexOfFirst { it.id == track.id }
                 if (startIndex >= 0) {
                     AudioEngine.playTrackList(currentPlayableTracks, startIndex)
@@ -69,6 +71,7 @@ class PlaybackFragment : Fragment() {
                 startActivity(Intent(requireContext(), PlayerActivity::class.java))
             },
             onEntityClick = { row ->
+                AppHaptics.click(requireContext())
                 when (row.entityType) {
                     LibraryEntityType.ALBUM -> {
                         parentFragmentManager.beginTransaction()
@@ -97,7 +100,10 @@ class PlaybackFragment : Fragment() {
             searchQuery = editable?.toString().orEmpty()
             renderRows(AudioEngine.libraryState.value)
         }
-        binding.buttonRequestPermission.setOnClickListener { requestReadAudioPermission() }
+        binding.buttonRequestPermission.setOnClickListener {
+            AppHaptics.click(it)
+            requestReadAudioPermission()
+        }
         observeLibraryState()
         renderPermissionState()
     }
@@ -118,6 +124,7 @@ class PlaybackFragment : Fragment() {
     private fun setupTabs() {
         binding.tabLibrary.addOnTabSelectedListener(object : TabLayout.OnTabSelectedListener {
             override fun onTabSelected(tab: TabLayout.Tab?) {
+                AppHaptics.click(requireContext())
                 selectedTab = when (tab?.position ?: 0) {
                     1 -> LibraryTab.ALBUM
                     2 -> LibraryTab.ARTIST

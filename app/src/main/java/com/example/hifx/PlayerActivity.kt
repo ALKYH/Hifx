@@ -39,6 +39,7 @@ import com.example.hifx.audio.AudioEngine
 import com.example.hifx.audio.PlaybackUiState
 import com.example.hifx.databinding.ActivityPlayerBinding
 import com.example.hifx.ui.PlayerTransitionState
+import com.example.hifx.util.AppHaptics
 import com.example.hifx.util.loadArtworkOrDefault
 import com.example.hifx.util.toTimeString
 import com.example.hifx.util.WaveformAnalyzer
@@ -99,22 +100,44 @@ class PlayerActivity : AppCompatActivity() {
 
     private fun setupControls() {
         binding.buttonPlayPause.setOnClickListener {
+            AppHaptics.click(it)
             AudioEngine.togglePlayPause()
         }
         binding.buttonPreviousTrack.setOnClickListener {
+            AppHaptics.click(it)
             AudioEngine.skipToPreviousTrack()
         }
         binding.buttonNextTrack.setOnClickListener {
+            AppHaptics.click(it)
             AudioEngine.skipToNextTrack()
         }
         binding.buttonShuffle.setOnClickListener {
+            AppHaptics.click(it)
             AudioEngine.toggleShuffleEnabled()
         }
         binding.buttonRepeatMode.setOnClickListener {
+            AppHaptics.click(it)
             AudioEngine.cycleRepeatMode()
         }
         binding.buttonSleepTimer.setOnClickListener {
+            AppHaptics.click(it)
             showSleepTimerDialog()
+        }
+        binding.textTrackSubtitle.setOnClickListener {
+            if (!binding.textTrackSubtitle.isEnabled) return@setOnClickListener
+            val artistName = binding.textTrackSubtitle.text?.toString().orEmpty().trim()
+            if (artistName.isNotBlank()) {
+                AppHaptics.click(it)
+                openArtistDetail(artistName)
+            }
+        }
+        binding.textTrackAlbum.setOnClickListener {
+            if (!binding.textTrackAlbum.isEnabled) return@setOnClickListener
+            val albumName = binding.textTrackAlbum.text?.toString().orEmpty().trim()
+            if (albumName.isNotBlank()) {
+                AppHaptics.click(it)
+                openAlbumDetail(albumName)
+            }
         }
         binding.waveformPreviewView.onScrub = { ratio ->
             val duration = latestDurationMs.coerceAtLeast(1L)
@@ -268,6 +291,7 @@ class PlayerActivity : AppCompatActivity() {
         val albumCard = (binding.imageCover.parent as? View) ?: binding.imageCover
         val title = binding.textTrackTitle
         val subtitle = binding.textTrackSubtitle
+        val album = binding.textTrackAlbum
 
         fun animateGroupOut(onEnd: () -> Unit) {
             albumCard.animate().translationX(direction * shift).alpha(0.5f)
@@ -275,6 +299,8 @@ class PlayerActivity : AppCompatActivity() {
             title.animate().translationX(direction * shift * 0.72f).alpha(0.5f)
                 .setInterpolator(standardInterpolator).setDuration(130L).start()
             subtitle.animate().translationX(direction * shift * 0.72f).alpha(0.5f)
+                .setInterpolator(standardInterpolator).setDuration(130L).start()
+            album.animate().translationX(direction * shift * 0.72f).alpha(0.5f)
                 .setInterpolator(standardInterpolator).setDuration(130L).start()
         }
 
@@ -285,12 +311,16 @@ class PlayerActivity : AppCompatActivity() {
             title.alpha = 0.55f
             subtitle.translationX = -direction * shift * 0.42f
             subtitle.alpha = 0.55f
+            album.translationX = -direction * shift * 0.42f
+            album.alpha = 0.55f
 
             albumCard.animate().translationX(0f).alpha(1f)
                 .setInterpolator(standardInterpolator).setDuration(180L).start()
             title.animate().translationX(0f).alpha(1f)
                 .setInterpolator(standardInterpolator).setDuration(180L).start()
             subtitle.animate().translationX(0f).alpha(1f)
+                .setInterpolator(standardInterpolator).setDuration(180L).start()
+            album.animate().translationX(0f).alpha(1f)
                 .setInterpolator(standardInterpolator).setDuration(180L)
                 .withEndAction { trackSwipeAnimating = false }
                 .start()
@@ -349,7 +379,13 @@ class PlayerActivity : AppCompatActivity() {
             lastArtworkKey = artworkKey
         }
         binding.textTrackTitle.text = state.title
-        binding.textTrackSubtitle.text = state.subtitle
+        val artistText = state.artist.ifBlank { state.subtitle }
+        binding.textTrackSubtitle.text = artistText
+        binding.textTrackSubtitle.visibility = if (artistText.isBlank()) View.GONE else View.VISIBLE
+        binding.textTrackSubtitle.isEnabled = state.artist.isNotBlank()
+        binding.textTrackAlbum.text = state.album
+        binding.textTrackAlbum.visibility = if (state.album.isBlank()) View.GONE else View.VISIBLE
+        binding.textTrackAlbum.isEnabled = state.album.isNotBlank()
         binding.buttonPreviousTrack.isEnabled = state.hasPrevious
         binding.buttonNextTrack.isEnabled = state.hasNext
         binding.buttonPlayPause.setImageResource(
@@ -412,6 +448,7 @@ class PlayerActivity : AppCompatActivity() {
         AlertDialog.Builder(this)
             .setTitle(R.string.action_sleep_timer)
             .setItems(options) { _, which ->
+                AppHaptics.click(this)
                 val value = durationMs.getOrNull(which) ?: 0L
                 if (value <= 0L) {
                     AudioEngine.cancelSleepTimer()
@@ -421,6 +458,20 @@ class PlayerActivity : AppCompatActivity() {
             }
             .setNegativeButton(android.R.string.cancel, null)
             .show()
+    }
+
+    private fun openArtistDetail(artistName: String) {
+        startActivity(MainActivity.createOpenArtistIntent(this, artistName))
+        if (!isFinishing) {
+            finish()
+        }
+    }
+
+    private fun openAlbumDetail(albumName: String) {
+        startActivity(MainActivity.createOpenAlbumIntent(this, albumName))
+        if (!isFinishing) {
+            finish()
+        }
     }
 
     private fun updateProgressSliderRange(durationMs: Long) {

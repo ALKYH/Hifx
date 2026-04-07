@@ -17,6 +17,7 @@ import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.example.hifx.audio.AudioEngine
 import com.example.hifx.audio.SettingsUiState
 import com.example.hifx.databinding.FragmentSettingsBinding
+import com.example.hifx.util.AppHaptics
 import kotlinx.coroutines.launch
 
 class SettingsFragment : Fragment() {
@@ -73,42 +74,76 @@ class SettingsFragment : Fragment() {
     }
 
     private fun setupMenuActions() {
-        binding.buttonMenuLibrary.setOnClickListener { renderSection(SettingsSection.LIBRARY) }
-        binding.buttonMenuAudio.setOnClickListener { renderSection(SettingsSection.AUDIO) }
-        binding.buttonMenuTheme.setOnClickListener { renderSection(SettingsSection.THEME) }
-        binding.buttonMenuAbout.setOnClickListener { renderSection(SettingsSection.ABOUT) }
+        binding.buttonMenuLibrary.setOnClickListener {
+            AppHaptics.click(it)
+            renderSection(SettingsSection.LIBRARY)
+        }
+        binding.buttonMenuAudio.setOnClickListener {
+            AppHaptics.click(it)
+            renderSection(SettingsSection.AUDIO)
+        }
+        binding.buttonMenuTheme.setOnClickListener {
+            AppHaptics.click(it)
+            renderSection(SettingsSection.THEME)
+        }
+        binding.buttonMenuAbout.setOnClickListener {
+            AppHaptics.click(it)
+            renderSection(SettingsSection.ABOUT)
+        }
     }
 
     private fun setupSettingActions() {
         binding.buttonSelectScanFolder.setOnClickListener {
+            AppHaptics.click(it)
             openTreeLauncher.launch(null)
         }
         binding.buttonClearScanFolder.setOnClickListener {
+            AppHaptics.click(it)
             AudioEngine.setScanFolderUri(null)
         }
         binding.buttonRescanLibrary.setOnClickListener {
+            AppHaptics.click(it)
             AudioEngine.refreshLibrary()
         }
         binding.switchHiFi.setOnCheckedChangeListener { _, isChecked ->
             if (!internalUpdating) {
+                AppHaptics.click(requireContext())
                 AudioEngine.setHiFiMode(isChecked)
             }
         }
         binding.switchHiResApi.setOnCheckedChangeListener { _, isChecked ->
             if (!internalUpdating) {
+                AppHaptics.click(requireContext())
                 AudioEngine.setHiResApiEnabled(isChecked)
+            }
+        }
+        binding.switchRememberPlayback.setOnCheckedChangeListener { _, isChecked ->
+            if (!internalUpdating) {
+                AppHaptics.click(requireContext())
+                AudioEngine.setRememberPlaybackSessionEnabled(isChecked)
+            }
+        }
+        binding.switchHapticFeedback.setOnCheckedChangeListener { _, isChecked ->
+            if (!internalUpdating) {
+                AudioEngine.setHapticFeedbackEnabled(isChecked)
+                if (isChecked) {
+                    AppHaptics.click(requireContext())
+                }
             }
         }
         binding.switchUsbExclusive.setOnCheckedChangeListener { _, isChecked ->
             if (!internalUpdating) {
+                AppHaptics.click(requireContext())
                 AudioEngine.setUsbExclusiveModeEnabled(isChecked)
             }
         }
         setupAudioSelectionControls()
         binding.buttonRefreshDeviceInfo.setOnClickListener {
+            AppHaptics.click(it)
             AudioEngine.refreshOutputInfo()
         }
         binding.buttonShowAudioPipelineDetails.setOnClickListener {
+            AppHaptics.click(it)
             showAudioPipelineDetailsDialog()
         }
         binding.groupThemeMode.setOnCheckedChangeListener { _, checkedId ->
@@ -205,6 +240,8 @@ class SettingsFragment : Fragment() {
         binding.textScanFolder.text = state.scanFolderLabel
         binding.switchHiFi.isChecked = state.hiFiMode
         binding.switchHiResApi.isChecked = state.hiResApiEnabled
+        binding.switchRememberPlayback.isChecked = state.rememberPlaybackSessionEnabled
+        binding.switchHapticFeedback.isChecked = state.hapticFeedbackEnabled
         binding.textSampleRate.text = getString(
             R.string.settings_sample_rate_value,
             state.outputSampleRateHz?.toString() ?: getString(R.string.unknown_value)
@@ -230,12 +267,20 @@ class SettingsFragment : Fragment() {
         )
         binding.switchUsbExclusive.isChecked = state.usbExclusiveModeEnabled
         val hasSelectedUsb = state.preferredUsbDeviceId != null
-        val canToggleExclusive = (hasSelectedUsb && state.usbExclusiveSupported) || state.usbExclusiveModeEnabled
+        val canToggleExclusive = hasSelectedUsb
         binding.switchUsbExclusive.isEnabled = canToggleExclusive
         binding.textUsbExclusiveState.text = when {
             !hasSelectedUsb -> getString(R.string.settings_usb_exclusive_state_no_device)
+            state.usbExclusiveActive && state.usbSrcBypassGuaranteed ->
+                getString(R.string.settings_usb_exclusive_state_active)
+            state.usbExclusiveActive ->
+                getString(R.string.settings_usb_exclusive_state_active_unverified)
+            state.usbCompatibilityActive -> getString(
+                R.string.settings_usb_exclusive_state_compat_active,
+                state.usbResolvedSampleRateHz?.toString() ?: getString(R.string.unknown_value),
+                state.usbResolvedBitDepth?.toString() ?: getString(R.string.unknown_value)
+            )
             !state.usbExclusiveSupported -> getString(R.string.settings_usb_exclusive_state_not_supported)
-            state.usbExclusiveActive -> getString(R.string.settings_usb_exclusive_state_active)
             state.usbExclusiveModeEnabled -> getString(R.string.settings_usb_exclusive_state_inactive)
             else -> getString(R.string.settings_usb_exclusive_state_default)
         }
@@ -300,6 +345,7 @@ class SettingsFragment : Fragment() {
                 line.contains("系统输出采样率") -> points += "系统输出采样率：当前实际输出参数。"
                 line.contains("Offload") -> points += "Offload支持：设备能力，非当前路径的绝对证明。"
                 line.contains("USB独占开关") -> points += "USB独占：需同时看开关/支持/激活，激活=true 才表示已生效。"
+                line.contains("USB兼容直通") -> points += "USB兼容直通：用于不支持独占的外置小尾巴，表示已锁定USB路由并按设备能力协商格式。"
                 line.startsWith("Equalizer:") -> points += "EQ链路：展示是否启用及各频段增益。"
                 line.startsWith("Convolution=") -> points += "卷积链路：展示 IR 与湿度参数，确认卷积是否生效。"
                 line.startsWith("id=") -> points += "设备清单：系统枚举到的输出设备能力原始数据。"

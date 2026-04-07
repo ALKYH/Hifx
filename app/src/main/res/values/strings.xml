@@ -192,6 +192,8 @@
     <string name="effects_channel_spacing_value_cm">左右声道间距：%1$d cm</string>
     <string name="effects_head_contour_hint">灰色轮廓为基于 HRTF 头部半径的人头示意（鼻尖朝上为正前方）。</string>
     <string name="settings_hires_api_switch">启用 Hi-Res API</string>
+    <string name="settings_remember_playback_switch">退出后记忆播放音轨与进度</string>
+    <string name="settings_haptic_feedback_switch">点击交互触感反馈（线性马达）</string>
     <string name="settings_bit_depth_title">输出位深</string>
     <string name="settings_output_sample_rate_title">目标输出采样率（USB 独占）</string>
     <string name="settings_bitrate_title">最大音频码率</string>
@@ -206,7 +208,9 @@
     <string name="settings_usb_exclusive_state_no_device">独占状态：请先选择 USB DAC</string>
     <string name="settings_usb_exclusive_state_not_supported">独占状态：当前设备不支持</string>
     <string name="settings_usb_exclusive_state_active">独占状态：已启用</string>
+    <string name="settings_usb_exclusive_state_active_unverified">独占状态：已启用（未验证 SRC 旁路）</string>
     <string name="settings_usb_exclusive_state_inactive">独占状态：已开启但未激活</string>
+    <string name="settings_usb_exclusive_state_compat_active">兼容直通：已启用（%1$s Hz / %2$s-bit，非 Bit-Perfect）</string>
     <string name="settings_pipeline_details_empty">暂无数据，点击“刷新设备输出信息”获取。</string>
     <string name="settings_pipeline_details_button">查看音频链路详情</string>
     <string name="settings_pipeline_dialog_title">音频链路详情</string>

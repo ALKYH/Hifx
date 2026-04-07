@@ -24,6 +24,7 @@ import com.example.hifx.audio.PlaybackUiState
 import com.example.hifx.databinding.ActivityMainBinding
 import com.example.hifx.databinding.LayoutMiniPlayerBinding
 import com.example.hifx.ui.PlayerTransitionState
+import com.example.hifx.util.AppHaptics
 import com.example.hifx.util.loadArtworkOrDefault
 import com.google.android.material.color.MaterialColors
 import com.google.android.material.slider.Slider
@@ -32,6 +33,26 @@ import kotlin.math.abs
 import kotlin.math.roundToInt
 
 class MainActivity : AppCompatActivity() {
+    companion object {
+        private const val EXTRA_OPEN_TARGET = "extra_open_target"
+        private const val EXTRA_TARGET_NAME = "extra_target_name"
+        private const val TARGET_ARTIST = "artist"
+        private const val TARGET_ALBUM = "album"
+
+        fun createOpenArtistIntent(context: android.content.Context, artistName: String): Intent {
+            return Intent(context, MainActivity::class.java)
+                .putExtra(EXTRA_OPEN_TARGET, TARGET_ARTIST)
+                .putExtra(EXTRA_TARGET_NAME, artistName)
+                .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+        }
+
+        fun createOpenAlbumIntent(context: android.content.Context, albumName: String): Intent {
+            return Intent(context, MainActivity::class.java)
+                .putExtra(EXTRA_OPEN_TARGET, TARGET_ALBUM)
+                .putExtra(EXTRA_TARGET_NAME, albumName)
+                .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+        }
+    }
 
     private lateinit var binding: ActivityMainBinding
     private lateinit var miniPlayerBinding: LayoutMiniPlayerBinding
@@ -71,12 +92,24 @@ class MainActivity : AppCompatActivity() {
 
         if (savedInstanceState == null) {
             binding.bottomNav.menu.findItem(R.id.navigation_playback).isChecked = true
-            navigateByItem(R.id.navigation_playback)
+            if (!handleExternalNavigationIntent(intent)) {
+                navigateByItem(R.id.navigation_playback)
+            }
+        }
+    }
+
+    override fun onNewIntent(intent: Intent?) {
+        super.onNewIntent(intent)
+        if (intent != null) {
+            setIntent(intent)
+            handleExternalNavigationIntent(intent)
         }
     }
 
     override fun onResume() {
         super.onResume()
+        AudioEngine.refreshPlaybackStateNow()
+        AudioEngine.requestExternalDacExclusiveAccess(this)
         if (PlayerTransitionState.consumeMainUiWarmupRequest()) {
             prewarmHomeUiForPlayerExit()
         }
@@ -91,6 +124,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun setupBottomNavigation() {
         binding.bottomNav.setOnItemSelectedListener { item ->
+            AppHaptics.click(binding.bottomNav)
             navigateByItem(item.itemId)
         }
     }
@@ -101,12 +135,15 @@ class MainActivity : AppCompatActivity() {
                 suppressMiniCardClickOnce = false
                 return@setOnClickListener
             }
+            AppHaptics.click(it)
             openPlayerDetailWithAnimation()
         }
         miniPlayerBinding.viewMiniHandle.setOnClickListener {
+            AppHaptics.click(it)
             setMiniCollapsedByGesture(collapsed = false, animated = true)
         }
         miniPlayerBinding.buttonMiniPlayPause.setOnClickListener {
+            AppHaptics.click(it)
             AudioEngine.togglePlayPause()
         }
         miniPlayerBinding.progressMini.addOnSliderTouchListener(object : Slider.OnSliderTouchListener {
@@ -656,5 +693,36 @@ class MainActivity : AppCompatActivity() {
             .setReorderingAllowed(true)
             .replace(R.id.fragment_container, fragment)
             .commit()
+    }
+
+    private fun handleExternalNavigationIntent(intent: Intent): Boolean {
+        val target = intent.getStringExtra(EXTRA_OPEN_TARGET).orEmpty()
+        val name = intent.getStringExtra(EXTRA_TARGET_NAME).orEmpty()
+        if (name.isBlank()) {
+            return false
+        }
+        return when (target) {
+            TARGET_ARTIST -> {
+                supportActionBar?.title = name
+                supportFragmentManager.beginTransaction()
+                    .setReorderingAllowed(true)
+                    .replace(R.id.fragment_container, ArtistDetailFragment.newInstance(name))
+                    .addToBackStack(null)
+                    .commit()
+                true
+            }
+
+            TARGET_ALBUM -> {
+                supportActionBar?.title = name
+                supportFragmentManager.beginTransaction()
+                    .setReorderingAllowed(true)
+                    .replace(R.id.fragment_container, AlbumDetailFragment.newInstance(name))
+                    .addToBackStack(null)
+                    .commit()
+                true
+            }
+
+            else -> false
+        }
     }
 }
