@@ -5,6 +5,7 @@ import android.os.Build
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
+import android.view.HapticFeedbackConstants
 import android.view.View
 import com.example.hifx.audio.AudioEngine
 
@@ -37,6 +38,19 @@ object AppHaptics {
                     vibrator.vibrate(12L)
                 }
             }
+        }
+    }
+
+    fun scrubTick(view: View?) {
+        val target = view ?: return
+        if (!AudioEngine.isHapticFeedbackEnabled()) {
+            return
+        }
+        val performed = runCatching {
+            target.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
+        }.getOrDefault(false)
+        if (!performed) {
+            click(target.context)
         }
     }
 

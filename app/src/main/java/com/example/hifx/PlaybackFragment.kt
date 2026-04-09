@@ -8,6 +8,7 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
+import android.os.SystemClock
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
@@ -51,12 +52,15 @@ class PlaybackFragment : Fragment() {
     private var miniPlayerCardView: View? = null
     private var miniPlayerHandleView: View? = null
     private var imeVisible = false
+    private var lastIndexHapticLetter: String? = null
+    private var lastIndexHapticUptimeMs: Long = 0L
     private val indexLetters: List<String> = buildList {
         for (code in 'A'.code..'Z'.code) add(code.toChar().toString())
         add("#")
     }
     private val panelExpandInterpolator = PathInterpolatorCompat.create(0.18f, 0.9f, 0.2f, 1f)
     private val panelCollapseInterpolator = PathInterpolatorCompat.create(0.32f, 0f, 0.67f, 0f)
+    private val indexHapticMinIntervalMs = 24L
 
     private val permissionLauncher =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
@@ -537,13 +541,20 @@ class PlaybackFragment : Fragment() {
         binding.viewAlphaIndex.onLetterTouch = { letter, touching ->
             if (letterToPosition.isEmpty()) {
                 binding.textIndexHint.visibility = View.GONE
+                if (!touching) {
+                    lastIndexHapticLetter = null
+                }
             } else {
                 val targetPosition = resolveIndexTargetPosition(letter)
                 if (targetPosition >= 0) {
                     layoutManager.scrollToPositionWithOffset(targetPosition, 0)
+                    maybeTriggerIndexScrubHaptic(letter, touching)
                 }
                 binding.textIndexHint.text = letter
                 binding.textIndexHint.visibility = if (touching) View.VISIBLE else View.GONE
+                if (!touching) {
+                    lastIndexHapticLetter = null
+                }
             }
         }
         binding.recyclerLibrary.addOnScrollListener(object : RecyclerView.OnScrollListener() {
@@ -587,6 +598,22 @@ class PlaybackFragment : Fragment() {
             if (fallback != null) return fallback
         }
         return -1
+    }
+
+    private fun maybeTriggerIndexScrubHaptic(letter: String, touching: Boolean) {
+        if (!touching) {
+            return
+        }
+        if (letter == lastIndexHapticLetter) {
+            return
+        }
+        val now = SystemClock.uptimeMillis()
+        if (now - lastIndexHapticUptimeMs < indexHapticMinIntervalMs) {
+            return
+        }
+        lastIndexHapticLetter = letter
+        lastIndexHapticUptimeMs = now
+        AppHaptics.scrubTick(binding.viewAlphaIndex)
     }
 
     private fun String.toAlphabetIndexKey(): String {
