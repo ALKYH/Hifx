@@ -15,6 +15,7 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.core.animation.doOnEnd
 import androidx.core.view.updatePadding
 import androidx.fragment.app.Fragment
+import androidx.fragment.app.FragmentManager
 import androidx.interpolator.view.animation.FastOutSlowInInterpolator
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
@@ -70,6 +71,7 @@ class MainActivity : AppCompatActivity() {
     private var miniGestureFromCard = false
     private var suppressMiniCardClickOnce = false
     private var miniHorizontalSwitchTriggered = false
+    private var bottomNavHiddenForKeyboard = false
     private val standardInterpolator = FastOutSlowInInterpolator()
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -81,6 +83,7 @@ class MainActivity : AppCompatActivity() {
         )
 
         setSupportActionBar(binding.toolbar)
+        supportActionBar?.hide()
         setupBottomNavigation()
         setupMiniPlayerActions()
         attachPlayerExitWarmupBridge()
@@ -127,6 +130,14 @@ class MainActivity : AppCompatActivity() {
             AppHaptics.click(binding.bottomNav)
             navigateByItem(item.itemId)
         }
+    }
+
+    fun setBottomNavHiddenForKeyboard(hidden: Boolean) {
+        if (bottomNavHiddenForKeyboard == hidden) return
+        bottomNavHiddenForKeyboard = hidden
+        binding.bottomNav.visibility = if (hidden) View.GONE else View.VISIBLE
+        updateMiniPlayerBottomSpacing()
+        updateFragmentBottomInset(animated = false)
     }
 
     private fun setupMiniPlayerActions() {
@@ -363,9 +374,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun updateFragmentBottomInset(animated: Boolean) {
         updateMiniPlayerBottomSpacing()
-        val navHeight = binding.bottomNav.height.takeIf { it > 0 }
-            ?: binding.bottomNav.measuredHeight.takeIf { it > 0 }
-            ?: 0
+        val navHeight = resolveBottomNavHeight()
 
         val navInset = navHeight + dp(8f)
         // Keep content layout stable: mini player is an overlay and should not consume content space.
@@ -392,9 +401,8 @@ class MainActivity : AppCompatActivity() {
     private fun dp(value: Float): Int = (value * resources.displayMetrics.density).roundToInt()
 
     private fun updateMiniPlayerBottomSpacing() {
-        val navHeight = binding.bottomNav.height.takeIf { it > 0 }
-            ?: binding.bottomNav.measuredHeight.takeIf { it > 0 }
-            ?: return
+        val navHeight = resolveBottomNavHeight()
+        if (binding.bottomNav.visibility == View.VISIBLE && navHeight <= 0) return
 
         val cardLp = miniPlayerBinding.miniPlayerCard.layoutParams as? FrameLayout.LayoutParams ?: return
         if (miniCardBaseBottomMargin < 0) {
@@ -415,6 +423,15 @@ class MainActivity : AppCompatActivity() {
             handleLp.bottomMargin = targetHandleBottom
             miniPlayerBinding.viewMiniHandle.layoutParams = handleLp
         }
+    }
+
+    private fun resolveBottomNavHeight(): Int {
+        if (binding.bottomNav.visibility != View.VISIBLE) {
+            return 0
+        }
+        return binding.bottomNav.height.takeIf { it > 0 }
+            ?: binding.bottomNav.measuredHeight.takeIf { it > 0 }
+            ?: 0
     }
 
     private fun attachPlayerExitWarmupBridge() {
@@ -634,7 +651,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun isBottomInteractionArea(rawY: Float): Boolean {
-        val navHeight = binding.bottomNav.height.takeIf { it > 0 } ?: binding.bottomNav.measuredHeight
+        val navHeight = resolveBottomNavHeight()
         val boundary = binding.root.height - navHeight - dp(120f)
         return rawY >= boundary
     }
@@ -693,6 +710,7 @@ class MainActivity : AppCompatActivity() {
             .setReorderingAllowed(true)
             .replace(R.id.fragment_container, fragment)
             .commit()
+        setBottomNavHiddenForKeyboard(false)
     }
 
     private fun handleExternalNavigationIntent(intent: Intent): Boolean {
@@ -703,26 +721,36 @@ class MainActivity : AppCompatActivity() {
         }
         return when (target) {
             TARGET_ARTIST -> {
-                supportActionBar?.title = name
-                supportFragmentManager.beginTransaction()
-                    .setReorderingAllowed(true)
-                    .replace(R.id.fragment_container, ArtistDetailFragment.newInstance(name))
-                    .addToBackStack(null)
-                    .commit()
+                openExternalDetailFromPlaybackRoot(ArtistDetailFragment.newInstance(name), name)
                 true
             }
 
             TARGET_ALBUM -> {
-                supportActionBar?.title = name
-                supportFragmentManager.beginTransaction()
-                    .setReorderingAllowed(true)
-                    .replace(R.id.fragment_container, AlbumDetailFragment.newInstance(name))
-                    .addToBackStack(null)
-                    .commit()
+                openExternalDetailFromPlaybackRoot(AlbumDetailFragment.newInstance(name), name)
                 true
             }
 
             else -> false
         }
+    }
+
+    private fun openExternalDetailFromPlaybackRoot(detailFragment: Fragment, title: String) {
+        val fm = supportFragmentManager
+        fm.popBackStack(null, FragmentManager.POP_BACK_STACK_INCLUSIVE)
+        if (fm.findFragmentById(R.id.fragment_container) !is PlaybackFragment) {
+            fm.beginTransaction()
+                .setReorderingAllowed(true)
+                .replace(R.id.fragment_container, PlaybackFragment())
+                .commit()
+            fm.executePendingTransactions()
+        }
+        binding.bottomNav.menu.findItem(R.id.navigation_playback).isChecked = true
+        supportActionBar?.title = title
+        fm.beginTransaction()
+            .setReorderingAllowed(true)
+            .replace(R.id.fragment_container, detailFragment)
+            .addToBackStack(null)
+            .commit()
+        setBottomNavHiddenForKeyboard(false)
     }
 }

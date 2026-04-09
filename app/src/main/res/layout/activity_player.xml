@@ -32,6 +32,7 @@
         android:paddingBottom="24dp">
 
             <com.google.android.material.card.MaterialCardView
+                android:id="@+id/card_album"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:layout_marginBottom="16dp"
@@ -41,12 +42,14 @@
                 app:strokeWidth="0dp">
 
                 <LinearLayout
+                    android:id="@+id/layout_album_content"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:orientation="vertical"
                     android:padding="18dp">
 
                     <com.google.android.material.card.MaterialCardView
+                        android:id="@+id/card_cover"
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
                         app:cardCornerRadius="22dp"
@@ -56,208 +59,256 @@
                         <ImageView
                             android:id="@+id/image_cover"
                             android:layout_width="match_parent"
-                            android:layout_height="wrap_content"
-                            android:adjustViewBounds="true"
+                            android:layout_height="300dp"
                             android:contentDescription="@string/music_cover_placeholder"
-                            android:scaleType="fitCenter"
+                            android:scaleType="centerCrop"
                             android:src="@drawable/ic_music_note" />
                     </com.google.android.material.card.MaterialCardView>
 
-                    <TextView
-                        android:id="@+id/text_track_title"
+                    <LinearLayout
+                        android:id="@+id/layout_track_info"
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
                         android:layout_marginTop="14dp"
-                        android:ellipsize="end"
-                        android:maxLines="1"
-                        android:text="@string/default_track_title"
-                        android:textAppearance="?attr/textAppearanceHeadlineSmall" />
+                        android:orientation="vertical">
 
-                    <TextView
-                        android:id="@+id/text_track_subtitle"
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:layout_marginTop="4dp"
-                        android:ellipsize="end"
-                        android:maxLines="1"
-                        android:text="@string/default_track_subtitle"
-                        android:textAppearance="?attr/textAppearanceBodyMedium"
-                        android:textColor="?attr/colorPrimary"
-                        android:textStyle="bold" />
-
-                    <TextView
-                        android:id="@+id/text_track_album"
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:layout_marginTop="2dp"
-                        android:ellipsize="end"
-                        android:maxLines="1"
-                        android:textAppearance="?attr/textAppearanceBodyMedium"
-                        android:textColor="?attr/colorPrimary"
-                        android:textStyle="bold" />
-                </LinearLayout>
-            </com.google.android.material.card.MaterialCardView>
-
-            <LinearLayout
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginBottom="12dp"
-                android:gravity="center"
-                android:orientation="horizontal">
-
-                <androidx.appcompat.widget.AppCompatImageButton
-                    android:id="@+id/button_previous_track"
-                    android:layout_width="84dp"
-                    android:layout_height="84dp"
-                    android:layout_marginEnd="16dp"
-                    android:background="@android:color/transparent"
-                    android:contentDescription="@string/action_previous_track"
-                    android:src="@android:drawable/ic_media_previous"
-                    android:tint="?attr/colorOnSurface" />
-
-                <androidx.appcompat.widget.AppCompatImageButton
-                    android:id="@+id/button_play_pause"
-                    android:layout_width="112dp"
-                    android:layout_height="112dp"
-                    android:background="@android:color/transparent"
-                    android:contentDescription="@string/action_play"
-                    android:src="@android:drawable/ic_media_play"
-                    android:tint="?attr/colorOnSurface" />
-
-                <androidx.appcompat.widget.AppCompatImageButton
-                    android:id="@+id/button_next_track"
-                    android:layout_width="84dp"
-                    android:layout_height="84dp"
-                    android:layout_marginStart="16dp"
-                    android:background="@android:color/transparent"
-                    android:contentDescription="@string/action_next_track"
-                    android:src="@android:drawable/ic_media_next"
-                    android:tint="?attr/colorOnSurface" />
-            </LinearLayout>
-
-            <com.google.android.material.card.MaterialCardView
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginBottom="16dp"
-                app:cardBackgroundColor="@android:color/transparent"
-                app:cardCornerRadius="24dp"
-                app:cardElevation="0dp"
-                app:strokeColor="@android:color/transparent"
-                app:strokeWidth="0dp">
-
-                <LinearLayout
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:orientation="vertical"
-                    android:paddingHorizontal="16dp"
-                    android:paddingTop="14dp"
-                    android:paddingBottom="12dp">
-
-                    <LinearLayout
-                        android:id="@+id/layout_lyrics"
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:layout_marginBottom="8dp"
-                        android:orientation="vertical"
-                        android:visibility="gone">
-
-                        <com.example.hifx.ui.LyricMaskTextView
-                            android:id="@+id/text_lyric_current"
+                        <TextView
+                            android:id="@+id/text_track_title"
                             android:layout_width="match_parent"
                             android:layout_height="wrap_content"
                             android:ellipsize="end"
                             android:maxLines="1"
-                            android:textAppearance="?attr/textAppearanceBodyLarge" />
+                            android:text="@string/default_track_title"
+                            android:textAppearance="?attr/textAppearanceHeadlineSmall" />
 
-                        <com.example.hifx.ui.LyricMaskTextView
-                            android:id="@+id/text_lyric_next"
+                        <TextView
+                            android:id="@+id/text_track_subtitle"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="4dp"
+                            android:ellipsize="end"
+                            android:maxLines="1"
+                            android:text="@string/default_track_subtitle"
+                            android:textAppearance="?attr/textAppearanceBodyMedium"
+                            android:textColor="?attr/colorPrimary"
+                            android:textStyle="bold" />
+
+                        <TextView
+                            android:id="@+id/text_track_album"
                             android:layout_width="match_parent"
                             android:layout_height="wrap_content"
                             android:layout_marginTop="2dp"
                             android:ellipsize="end"
                             android:maxLines="1"
-                            android:textAppearance="?attr/textAppearanceBodyMedium" />
-                    </LinearLayout>
-
-                    <com.google.android.material.slider.Slider
-                        android:id="@+id/progress_slider"
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:stepSize="0"
-                        android:valueFrom="0"
-                        android:valueTo="1"
-                        app:haloRadius="0dp"
-                        app:thumbRadius="0dp"
-                        app:trackColorInactive="?attr/colorOutlineVariant" />
-
-                    <LinearLayout
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:orientation="horizontal">
-
-                        <TextView
-                            android:id="@+id/text_current_time"
-                            android:layout_width="0dp"
-                            android:layout_height="wrap_content"
-                            android:layout_weight="1"
-                            android:text="00:00"
-                            android:textAppearance="?attr/textAppearanceLabelMedium" />
-
-                        <TextView
-                            android:id="@+id/text_duration"
-                            android:layout_width="wrap_content"
-                            android:layout_height="wrap_content"
-                            android:text="00:00"
-                            android:textAppearance="?attr/textAppearanceLabelMedium" />
+                            android:textAppearance="?attr/textAppearanceBodyMedium"
+                            android:textColor="?attr/colorPrimary"
+                            android:textStyle="bold" />
                     </LinearLayout>
                 </LinearLayout>
             </com.google.android.material.card.MaterialCardView>
 
-            <LinearLayout
+            <com.google.android.material.card.MaterialCardView
+                android:id="@+id/card_lyrics"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:layout_marginBottom="12dp"
-                android:gravity="center_vertical"
-                android:orientation="horizontal">
+                app:cardBackgroundColor="#55333333"
+                app:cardCornerRadius="22dp"
+                app:cardElevation="0dp"
+                app:strokeColor="@android:color/transparent"
+                app:strokeWidth="0dp">
 
-                <com.google.android.material.button.MaterialButton
-                    android:id="@+id/button_shuffle"
-                    style="@style/Widget.Material3.Button.IconButton"
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="1"
-                    android:contentDescription="@string/action_shuffle"
-                    app:icon="@android:drawable/ic_menu_sort_by_size"
-                    app:rippleColor="@android:color/transparent" />
+                <FrameLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content">
 
-                <com.google.android.material.button.MaterialButton
-                    android:id="@+id/button_repeat_mode"
-                    style="@style/Widget.Material3.Button.IconButton"
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="1"
-                    android:contentDescription="@string/action_repeat_mode"
-                    app:icon="@android:drawable/ic_menu_rotate"
-                    app:rippleColor="@android:color/transparent" />
+                    <FrameLayout
+                        android:id="@+id/layout_lyrics"
+                        android:layout_width="match_parent"
+                        android:layout_height="65dp"
+                        android:minHeight="60dp"
+                        android:paddingStart="16dp"
+                        android:paddingTop="10dp"
+                        android:paddingEnd="16dp"
+                        android:paddingBottom="10dp">
 
-                <com.google.android.material.button.MaterialButton
-                    android:id="@+id/button_sleep_timer"
-                    style="@style/Widget.Material3.Button.IconButton"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:contentDescription="@string/action_sleep_timer"
-                    app:icon="@android:drawable/ic_menu_recent_history"
-                    app:rippleColor="@android:color/transparent" />
-            </LinearLayout>
+                        <androidx.recyclerview.widget.RecyclerView
+                            android:id="@+id/recycler_lyrics"
+                            android:layout_width="match_parent"
+                            android:layout_height="match_parent"
+                            android:clipToPadding="false"
+                            android:overScrollMode="never" />
+                    </FrameLayout>
 
-            <TextView
-                android:id="@+id/text_sleep_timer"
+                    <View
+                        android:id="@+id/view_lyrics_fade_top"
+                        android:layout_width="match_parent"
+                        android:layout_height="30dp"
+                        android:background="@drawable/bg_lyrics_fade_top" />
+
+                    <View
+                        android:id="@+id/view_lyrics_fade_bottom"
+                        android:layout_width="match_parent"
+                        android:layout_height="34dp"
+                        android:layout_gravity="bottom"
+                        android:background="@drawable/bg_lyrics_fade_bottom" />
+
+                    <androidx.appcompat.widget.AppCompatImageButton
+                        android:id="@+id/button_lyrics_collapse"
+                        android:layout_width="34dp"
+                        android:layout_height="34dp"
+                        android:layout_gravity="top|end"
+                        android:layout_marginTop="8dp"
+                        android:layout_marginEnd="8dp"
+                        android:background="@android:color/transparent"
+                        android:contentDescription="@string/action_collapse"
+                        android:src="@android:drawable/ic_menu_close_clear_cancel"
+                        android:tint="?attr/colorOnSurface"
+                        android:visibility="gone" />
+                </FrameLayout>
+            </com.google.android.material.card.MaterialCardView>
+
+            <LinearLayout
+                android:id="@+id/layout_bottom_controls"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_marginBottom="10dp"
-                android:gravity="center"
-                android:text="@string/player_sleep_timer_off"
-                android:textAppearance="?attr/textAppearanceLabelMedium" />
+                android:orientation="vertical">
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginBottom="12dp"
+                    android:gravity="center"
+                    android:orientation="horizontal">
+
+                    <androidx.appcompat.widget.AppCompatImageButton
+                        android:id="@+id/button_previous_track"
+                        android:layout_width="84dp"
+                        android:layout_height="54dp"
+                        android:layout_marginEnd="16dp"
+                        android:background="@android:color/transparent"
+                        android:contentDescription="@string/action_previous_track"
+                        android:src="@android:drawable/ic_media_previous"
+                        android:tint="?attr/colorOnSurface" />
+
+                    <androidx.appcompat.widget.AppCompatImageButton
+                        android:id="@+id/button_play_pause"
+                        android:layout_width="112dp"
+                        android:layout_height="72dp"
+                        android:background="@android:color/transparent"
+                        android:contentDescription="@string/action_play"
+                        android:src="@android:drawable/ic_media_play"
+                        android:tint="?attr/colorOnSurface" />
+
+                    <androidx.appcompat.widget.AppCompatImageButton
+                        android:id="@+id/button_next_track"
+                        android:layout_width="84dp"
+                        android:layout_height="54dp"
+                        android:layout_marginStart="16dp"
+                        android:background="@android:color/transparent"
+                        android:contentDescription="@string/action_next_track"
+                        android:src="@android:drawable/ic_media_next"
+                        android:tint="?attr/colorOnSurface" />
+                </LinearLayout>
+
+                <com.google.android.material.card.MaterialCardView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginBottom="16dp"
+                    app:cardBackgroundColor="@android:color/transparent"
+                    app:cardCornerRadius="24dp"
+                    app:cardElevation="0dp"
+                    app:strokeColor="@android:color/transparent"
+                    app:strokeWidth="0dp">
+
+                    <LinearLayout
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:orientation="vertical"
+                        android:paddingHorizontal="16dp"
+                        android:paddingTop="14dp"
+                        android:paddingBottom="12dp">
+
+                        <com.google.android.material.slider.Slider
+                            android:id="@+id/progress_slider"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:stepSize="0"
+                            android:valueFrom="0"
+                            android:valueTo="1"
+                            app:haloRadius="0dp"
+                            app:thumbRadius="0dp"
+                            app:trackColorInactive="?attr/colorOutlineVariant" />
+
+                        <LinearLayout
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:orientation="horizontal">
+
+                            <TextView
+                                android:id="@+id/text_current_time"
+                                android:layout_width="0dp"
+                                android:layout_height="wrap_content"
+                                android:layout_weight="1"
+                                android:text="00:00"
+                                android:textAppearance="?attr/textAppearanceLabelMedium" />
+
+                            <TextView
+                                android:id="@+id/text_duration"
+                                android:layout_width="wrap_content"
+                                android:layout_height="wrap_content"
+                                android:text="00:00"
+                                android:textAppearance="?attr/textAppearanceLabelMedium" />
+                        </LinearLayout>
+                    </LinearLayout>
+                </com.google.android.material.card.MaterialCardView>
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginBottom="12dp"
+                    android:gravity="center_vertical"
+                    android:orientation="horizontal">
+
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/button_shuffle"
+                        style="@style/Widget.Material3.Button.IconButton"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:contentDescription="@string/action_shuffle"
+                        app:icon="@android:drawable/ic_menu_sort_by_size"
+                        app:rippleColor="@android:color/transparent" />
+
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/button_repeat_mode"
+                        style="@style/Widget.Material3.Button.IconButton"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:contentDescription="@string/action_repeat_mode"
+                        app:icon="@android:drawable/ic_menu_rotate"
+                        app:rippleColor="@android:color/transparent" />
+
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/button_sleep_timer"
+                        style="@style/Widget.Material3.Button.IconButton"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:contentDescription="@string/action_sleep_timer"
+                        app:icon="@android:drawable/ic_menu_recent_history"
+                        app:rippleColor="@android:color/transparent" />
+                </LinearLayout>
+
+                <TextView
+                    android:id="@+id/text_sleep_timer"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginBottom="10dp"
+                    android:gravity="center"
+                    android:text="@string/player_sleep_timer_off"
+                    android:textAppearance="?attr/textAppearanceLabelMedium" />
+            </LinearLayout>
     </LinearLayout>
 
     <com.google.android.material.card.MaterialCardView

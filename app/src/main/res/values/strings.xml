@@ -28,6 +28,10 @@
     <string name="library_tab_all">全部</string>
     <string name="library_tab_album">专辑</string>
     <string name="library_tab_artist">艺术家</string>
+    <string name="library_toggle_search_expand">展开搜索框</string>
+    <string name="library_toggle_search_collapse">收起搜索框</string>
+    <string name="library_toggle_tabs_expand">展开分类标签</string>
+    <string name="library_toggle_tabs_collapse">收起分类标签</string>
     <string name="library_empty">没有可播放的曲目</string>
     <string name="library_permission_required">请先授权音频读取权限</string>
     <string name="library_empty_with_error">媒体库为空：%1$s</string>
@@ -157,6 +161,7 @@
     <string name="action_shuffle">随机</string>
     <string name="action_repeat_mode">循环</string>
     <string name="action_sleep_timer">定时停止</string>
+    <string name="action_collapse">折叠歌词</string>
     <string name="player_shuffle_on">随机：开</string>
     <string name="player_shuffle_off">随机：关</string>
     <string name="player_repeat_off">循环：关</string>
@@ -169,6 +174,7 @@
     <string name="player_sleep_option_30">30 分钟后停止</string>
     <string name="player_sleep_option_45">45 分钟后停止</string>
     <string name="player_sleep_option_60">60 分钟后停止</string>
+    <string name="player_lyrics_empty">暂无歌词</string>
     <string name="effects_surround_gain_expand">展开声道增益调节</string>
     <string name="effects_surround_gain_collapse">收起声道增益调节</string>
     <string name="effects_surround_gain_hint">可按当前模式分别调整各声道增益（0% - 200%）。</string>

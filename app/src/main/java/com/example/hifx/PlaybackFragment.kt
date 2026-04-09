@@ -1,6 +1,9 @@
 package com.example.hifx
 
 import android.Manifest
+import android.animation.Animator
+import android.animation.AnimatorListenerAdapter
+import android.animation.ValueAnimator
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
@@ -8,9 +11,14 @@ import android.os.Bundle
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
+import android.view.ViewTreeObserver
+import android.widget.FrameLayout
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.ContextCompat
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsCompat
 import androidx.core.widget.doAfterTextChanged
+import androidx.core.view.animation.PathInterpolatorCompat
 import androidx.fragment.app.Fragment
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
@@ -34,15 +42,26 @@ class PlaybackFragment : Fragment() {
     private var searchQuery: String = ""
     private var currentPlayableTracks: List<com.example.hifx.audio.LibraryTrack> = emptyList()
     private var letterToPosition: Map<String, Int> = emptyMap()
+    private var searchPanelExpanded = false
+    private var tabsPanelExpanded = false
+    private var searchPanelAnimator: ValueAnimator? = null
+    private var tabsPanelAnimator: ValueAnimator? = null
+    private var miniPlayerLayoutChangeListener: View.OnLayoutChangeListener? = null
+    private var miniPlayerPreDrawListener: ViewTreeObserver.OnPreDrawListener? = null
+    private var miniPlayerCardView: View? = null
+    private var miniPlayerHandleView: View? = null
+    private var imeVisible = false
     private val indexLetters: List<String> = buildList {
         for (code in 'A'.code..'Z'.code) add(code.toChar().toString())
         add("#")
     }
+    private val panelExpandInterpolator = PathInterpolatorCompat.create(0.18f, 0.9f, 0.2f, 1f)
+    private val panelCollapseInterpolator = PathInterpolatorCompat.create(0.32f, 0f, 0.67f, 0f)
 
     private val permissionLauncher =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
             if (granted) {
-                binding.buttonRequestPermission.visibility = View.GONE
+                _binding?.buttonRequestPermission?.visibility = View.GONE
                 AudioEngine.refreshLibrary()
             } else {
                 renderPermissionState()
@@ -94,6 +113,9 @@ class PlaybackFragment : Fragment() {
         layoutManager = LinearLayoutManager(requireContext())
         binding.recyclerLibrary.layoutManager = layoutManager
         binding.recyclerLibrary.adapter = adapter
+        setupTopCollapsibleControls()
+        setupKeyboardBottomNavSync()
+        attachMiniPlayerAnchorTracking()
         setupAlphabetIndex()
         setupTabs()
         binding.editLibrarySearch.doAfterTextChanged { editable ->
@@ -117,9 +139,270 @@ class PlaybackFragment : Fragment() {
     }
 
     override fun onDestroyView() {
+        searchPanelAnimator?.cancel()
+        tabsPanelAnimator?.cancel()
+        detachMiniPlayerAnchorTracking()
+        (activity as? MainActivity)?.setBottomNavHiddenForKeyboard(false)
+        searchPanelAnimator = null
+        tabsPanelAnimator = null
         super.onDestroyView()
         _binding = null
     }
+
+    private fun setupTopCollapsibleControls() {
+        applyPanelState(binding.layoutSearchPanel, expanded = false)
+        applyPanelState(binding.layoutTabsPanel, expanded = false)
+        searchPanelExpanded = false
+        tabsPanelExpanded = false
+        updateTopControlButtons()
+
+        binding.buttonToggleSearch.setOnClickListener {
+            AppHaptics.click(it)
+            searchPanelExpanded = !searchPanelExpanded
+            animatePanel(
+                panel = binding.layoutSearchPanel,
+                expanding = searchPanelExpanded,
+                previousAnimator = searchPanelAnimator,
+                onAnimatorChanged = { searchPanelAnimator = it }
+            )
+            if (!searchPanelExpanded) {
+                binding.editLibrarySearch.clearFocus()
+            } else {
+                binding.editLibrarySearch.requestFocus()
+            }
+            syncBottomNavWithKeyboard()
+            updateTopControlButtons()
+        }
+        binding.buttonToggleTabs.setOnClickListener {
+            AppHaptics.click(it)
+            tabsPanelExpanded = !tabsPanelExpanded
+            animatePanel(
+                panel = binding.layoutTabsPanel,
+                expanding = tabsPanelExpanded,
+                previousAnimator = tabsPanelAnimator,
+                onAnimatorChanged = { tabsPanelAnimator = it }
+            )
+            updateTopControlButtons()
+        }
+        binding.editLibrarySearch.setOnFocusChangeListener { _, _ ->
+            syncBottomNavWithKeyboard()
+        }
+    }
+
+    private fun setupKeyboardBottomNavSync() {
+        ViewCompat.setOnApplyWindowInsetsListener(binding.root) { _, insets ->
+            imeVisible = insets.isVisible(WindowInsetsCompat.Type.ime())
+            syncBottomNavWithKeyboard()
+            insets
+        }
+        binding.root.post { ViewCompat.requestApplyInsets(binding.root) }
+    }
+
+    private fun syncBottomNavWithKeyboard() {
+        val hide = searchPanelExpanded && imeVisible
+        (activity as? MainActivity)?.setBottomNavHiddenForKeyboard(hide)
+    }
+
+    private fun attachMiniPlayerAnchorTracking() {
+        val hostActivity = activity ?: return
+        val card = hostActivity.findViewById<View>(R.id.mini_player_card)
+        val handle = hostActivity.findViewById<View>(R.id.view_mini_handle)
+        miniPlayerCardView = card
+        miniPlayerHandleView = handle
+        val listener = View.OnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
+            updateFloatingControlsBottomSpacing()
+        }
+        miniPlayerLayoutChangeListener = listener
+        binding.root.addOnLayoutChangeListener(listener)
+        card?.addOnLayoutChangeListener(listener)
+        handle?.addOnLayoutChangeListener(listener)
+        val preDrawListener = ViewTreeObserver.OnPreDrawListener {
+            updateFloatingControlsBottomSpacing()
+            true
+        }
+        miniPlayerPreDrawListener = preDrawListener
+        binding.root.viewTreeObserver.addOnPreDrawListener(preDrawListener)
+        binding.layoutFloatingTopControls.post { updateFloatingControlsBottomSpacing() }
+    }
+
+    private fun detachMiniPlayerAnchorTracking() {
+        val currentBinding = _binding
+        miniPlayerLayoutChangeListener?.let { listener ->
+            currentBinding?.root?.removeOnLayoutChangeListener(listener)
+            miniPlayerCardView?.removeOnLayoutChangeListener(listener)
+            miniPlayerHandleView?.removeOnLayoutChangeListener(listener)
+        }
+        miniPlayerPreDrawListener?.let { preDraw ->
+            val observer = currentBinding?.root?.viewTreeObserver
+            if (observer?.isAlive == true) {
+                observer.removeOnPreDrawListener(preDraw)
+            }
+        }
+        miniPlayerLayoutChangeListener = null
+        miniPlayerPreDrawListener = null
+        miniPlayerCardView = null
+        miniPlayerHandleView = null
+    }
+
+    private fun updateFloatingControlsBottomSpacing() {
+        val currentBinding = _binding ?: return
+        val controls = currentBinding.layoutFloatingTopControls
+        val parent = controls.parent as? View ?: return
+        val lp = controls.layoutParams as? FrameLayout.LayoutParams ?: return
+        val anchor = when {
+            miniPlayerCardView?.visibility == View.VISIBLE -> miniPlayerCardView
+            miniPlayerHandleView?.visibility == View.VISIBLE -> miniPlayerHandleView
+            else -> null
+        }
+        val baseBottom = dp(12f)
+        val nextBottom = if (anchor == null || !anchor.isShown || parent.height <= 0) {
+            baseBottom
+        } else {
+            val anchorLoc = IntArray(2)
+            val parentLoc = IntArray(2)
+            anchor.getLocationOnScreen(anchorLoc)
+            parent.getLocationOnScreen(parentLoc)
+            val anchorTopInParent = anchorLoc[1] - parentLoc[1]
+            (parent.height - anchorTopInParent + dp(8f)).coerceAtLeast(baseBottom)
+        }
+        if (lp.bottomMargin != nextBottom) {
+            lp.bottomMargin = nextBottom
+            controls.layoutParams = lp
+        }
+    }
+
+    private fun updateTopControlButtons() {
+        binding.buttonToggleSearch.alpha = if (searchPanelExpanded) 1f else 0.72f
+        binding.buttonToggleTabs.alpha = if (tabsPanelExpanded) 1f else 0.72f
+        binding.buttonToggleSearch.contentDescription = if (searchPanelExpanded) {
+            getString(R.string.library_toggle_search_collapse)
+        } else {
+            getString(R.string.library_toggle_search_expand)
+        }
+        binding.buttonToggleTabs.contentDescription = if (tabsPanelExpanded) {
+            getString(R.string.library_toggle_tabs_collapse)
+        } else {
+            getString(R.string.library_toggle_tabs_expand)
+        }
+    }
+
+    private fun animatePanel(
+        panel: View,
+        expanding: Boolean,
+        previousAnimator: ValueAnimator?,
+        onAnimatorChanged: (ValueAnimator?) -> Unit
+    ) {
+        previousAnimator?.cancel()
+        if (expanding) {
+            val targetHeight = measureExpandedHeight(panel)
+            panel.pivotY = 0f
+            panel.pivotX = panel.width * 0.5f
+            panel.visibility = View.VISIBLE
+            panel.alpha = 0f
+            panel.scaleY = 0.86f
+            panel.translationY = -dp(12f).toFloat()
+            panel.layoutParams = panel.layoutParams.apply { height = 0 }
+            val animator = ValueAnimator.ofInt(0, targetHeight).apply {
+                duration = 320L
+                interpolator = panelExpandInterpolator
+                addUpdateListener { valueAnimator ->
+                    panel.layoutParams = panel.layoutParams.apply {
+                        height = valueAnimator.animatedValue as Int
+                    }
+                }
+                addListener(object : AnimatorListenerAdapter() {
+                    private var canceled = false
+
+                    override fun onAnimationCancel(animation: Animator) {
+                        canceled = true
+                    }
+
+                    override fun onAnimationEnd(animation: Animator) {
+                        onAnimatorChanged(null)
+                        if (!canceled) {
+                            panel.layoutParams = panel.layoutParams.apply {
+                                height = ViewGroup.LayoutParams.WRAP_CONTENT
+                            }
+                            panel.alpha = 1f
+                            panel.scaleY = 1f
+                            panel.translationY = 0f
+                        }
+                    }
+                })
+            }
+            onAnimatorChanged(animator)
+            panel.animate()
+                .alpha(1f)
+                .scaleY(1f)
+                .translationY(0f)
+                .setInterpolator(panelExpandInterpolator)
+                .setDuration(300L)
+                .start()
+            animator.start()
+            return
+        }
+
+        if (panel.visibility != View.VISIBLE) {
+            onAnimatorChanged(null)
+            return
+        }
+        val startHeight = panel.height.takeIf { it > 0 } ?: measureExpandedHeight(panel)
+        panel.pivotY = 0f
+        panel.pivotX = panel.width * 0.5f
+        panel.layoutParams = panel.layoutParams.apply { height = startHeight }
+        val animator = ValueAnimator.ofInt(startHeight, 0).apply {
+            duration = 260L
+            interpolator = panelCollapseInterpolator
+            addUpdateListener { valueAnimator ->
+                panel.layoutParams = panel.layoutParams.apply {
+                    height = valueAnimator.animatedValue as Int
+                }
+            }
+            addListener(object : AnimatorListenerAdapter() {
+                override fun onAnimationEnd(animation: Animator) {
+                    onAnimatorChanged(null)
+                    panel.visibility = View.GONE
+                    panel.layoutParams = panel.layoutParams.apply {
+                        height = ViewGroup.LayoutParams.WRAP_CONTENT
+                    }
+                    panel.alpha = 1f
+                    panel.scaleY = 1f
+                    panel.translationY = 0f
+                }
+            })
+        }
+        onAnimatorChanged(animator)
+        panel.animate()
+            .alpha(0f)
+            .scaleY(0.92f)
+            .translationY(-dp(10f).toFloat())
+            .setInterpolator(panelCollapseInterpolator)
+            .setDuration(220L)
+            .start()
+        animator.start()
+    }
+
+    private fun applyPanelState(panel: View, expanded: Boolean) {
+        panel.visibility = if (expanded) View.VISIBLE else View.GONE
+        panel.layoutParams = panel.layoutParams.apply {
+            height = ViewGroup.LayoutParams.WRAP_CONTENT
+        }
+        panel.alpha = 1f
+        panel.scaleY = 1f
+        panel.translationY = 0f
+    }
+
+    private fun measureExpandedHeight(panel: View): Int {
+        val parent = panel.parent as? View
+        val parentWidth = parent?.width?.takeIf { it > 0 } ?: binding.root.width
+        val width = (parentWidth - (parent?.paddingLeft ?: 0) - (parent?.paddingRight ?: 0)).coerceAtLeast(1)
+        val widthSpec = View.MeasureSpec.makeMeasureSpec(width, View.MeasureSpec.EXACTLY)
+        val heightSpec = View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED)
+        panel.measure(widthSpec, heightSpec)
+        return panel.measuredHeight.coerceAtLeast(1)
+    }
+
+    private fun dp(value: Float): Int = (value * resources.displayMetrics.density).toInt()
 
     private fun setupTabs() {
         binding.tabLibrary.addOnTabSelectedListener(object : TabLayout.OnTabSelectedListener {
@@ -236,15 +519,16 @@ class PlaybackFragment : Fragment() {
     }
 
     private fun renderPermissionState() {
+        val currentBinding = _binding ?: return
         val granted = hasReadAudioPermission()
-        binding.buttonRequestPermission.visibility = if (granted) View.GONE else View.VISIBLE
+        currentBinding.buttonRequestPermission.visibility = if (granted) View.GONE else View.VISIBLE
         if (granted) {
             AudioEngine.refreshLibrary()
         } else {
-            binding.layoutEmpty.visibility = View.VISIBLE
-            binding.textEmpty.text = getString(R.string.library_permission_required)
-            binding.viewAlphaIndex.visibility = View.GONE
-            binding.textIndexHint.visibility = View.GONE
+            currentBinding.layoutEmpty.visibility = View.VISIBLE
+            currentBinding.textEmpty.text = getString(R.string.library_permission_required)
+            currentBinding.viewAlphaIndex.visibility = View.GONE
+            currentBinding.textIndexHint.visibility = View.GONE
         }
     }
 
