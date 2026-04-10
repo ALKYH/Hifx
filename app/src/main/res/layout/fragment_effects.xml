@@ -113,6 +113,57 @@
                         android:text="@string/effects_eq_hint"
                         android:textAppearance="?attr/textAppearanceBodySmall" />
 
+                    <com.google.android.material.materialswitch.MaterialSwitch
+                        android:id="@+id/switch_eq_enabled"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="8dp"
+                        android:text="@string/effects_eq_enabled" />
+
+                    <LinearLayout
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="8dp"
+                        android:gravity="center_vertical"
+                        android:orientation="horizontal">
+
+                        <com.google.android.material.textfield.TextInputLayout
+                            android:layout_width="0dp"
+                            android:layout_height="wrap_content"
+                            android:layout_weight="1"
+                            android:hint="@string/effects_eq_preset_hint"
+                            app:endIconMode="dropdown_menu">
+
+                            <com.google.android.material.textfield.MaterialAutoCompleteTextView
+                                android:id="@+id/input_eq_preset_name"
+                                android:layout_width="match_parent"
+                                android:layout_height="wrap_content"
+                                android:singleLine="true" />
+                        </com.google.android.material.textfield.TextInputLayout>
+
+                        <com.google.android.material.button.MaterialButton
+                            android:id="@+id/button_eq_load_preset"
+                            style="@style/Widget.Material3.Button.TextButton"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:layout_marginStart="8dp"
+                            android:text="@string/effects_eq_preset_load" />
+
+                        <com.google.android.material.button.MaterialButton
+                            android:id="@+id/button_eq_save_preset"
+                            style="@style/Widget.Material3.Button.TextButton"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:text="@string/effects_eq_preset_save" />
+                    </LinearLayout>
+
+                    <com.example.hifx.ui.EqCurveView
+                        android:id="@+id/eq_curve_view"
+                        android:layout_width="match_parent"
+                        android:layout_height="220dp"
+                        android:layout_marginTop="12dp"
+                        android:background="?attr/colorSurface" />
+
                     <HorizontalScrollView
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
@@ -125,39 +176,98 @@
                             android:layout_height="wrap_content"
                             android:orientation="horizontal">
 
-                            <include
-                                android:id="@+id/band_1"
-                                layout="@layout/item_eq_band_vertical" />
+                            <com.google.android.material.button.MaterialButton
+                                android:id="@+id/button_eq_add_point"
+                                style="@style/Widget.Material3.Button.OutlinedButton"
+                                android:layout_width="40dp"
+                                android:layout_height="40dp"
+                                android:insetTop="0dp"
+                                android:insetBottom="0dp"
+                                android:minWidth="40dp"
+                                android:text="+" />
 
-                            <include
-                                android:id="@+id/band_2"
-                                layout="@layout/item_eq_band_vertical" />
-
-                            <include
-                                android:id="@+id/band_3"
-                                layout="@layout/item_eq_band_vertical" />
-
-                            <include
-                                android:id="@+id/band_4"
-                                layout="@layout/item_eq_band_vertical" />
-
-                            <include
-                                android:id="@+id/band_5"
-                                layout="@layout/item_eq_band_vertical" />
-
-                            <include
-                                android:id="@+id/band_6"
-                                layout="@layout/item_eq_band_vertical" />
-
-                            <include
-                                android:id="@+id/band_7"
-                                layout="@layout/item_eq_band_vertical" />
-
-                            <include
-                                android:id="@+id/band_8"
-                                layout="@layout/item_eq_band_vertical" />
+                            <LinearLayout
+                                android:id="@+id/layout_eq_point_dots"
+                                android:layout_width="wrap_content"
+                                android:layout_height="wrap_content"
+                                android:layout_marginStart="10dp"
+                                android:orientation="horizontal" />
                         </LinearLayout>
                     </HorizontalScrollView>
+
+                    <com.google.android.material.card.MaterialCardView
+                        android:id="@+id/card_eq_params"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="12dp"
+                        app:cardBackgroundColor="?attr/colorSurfaceVariant"
+                        app:cardCornerRadius="14dp"
+                        app:strokeColor="?attr/colorOutlineVariant"
+                        app:strokeWidth="1dp">
+
+                        <LinearLayout
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:orientation="vertical"
+                            android:padding="12dp">
+
+                            <TextView
+                                android:id="@+id/text_eq_selected_point"
+                                android:layout_width="match_parent"
+                                android:layout_height="wrap_content"
+                                android:textAppearance="?attr/textAppearanceLabelLarge" />
+
+                            <TextView
+                                android:id="@+id/text_eq_freq_value"
+                                android:layout_width="match_parent"
+                                android:layout_height="wrap_content"
+                                android:layout_marginTop="8dp"
+                                android:textAppearance="?attr/textAppearanceLabelSmall" />
+
+                            <com.google.android.material.slider.Slider
+                                android:id="@+id/slider_eq_freq"
+                                android:layout_width="match_parent"
+                                android:layout_height="wrap_content"
+                                android:valueFrom="20"
+                                android:valueTo="20000" />
+
+                            <TextView
+                                android:id="@+id/text_eq_q_value"
+                                android:layout_width="match_parent"
+                                android:layout_height="wrap_content"
+                                android:layout_marginTop="4dp"
+                                android:textAppearance="?attr/textAppearanceLabelSmall" />
+
+                            <com.google.android.material.slider.Slider
+                                android:id="@+id/slider_eq_q"
+                                android:layout_width="match_parent"
+                                android:layout_height="wrap_content"
+                                android:valueFrom="20"
+                                android:valueTo="1200" />
+
+                            <TextView
+                                android:id="@+id/text_eq_gain_value"
+                                android:layout_width="match_parent"
+                                android:layout_height="wrap_content"
+                                android:layout_marginTop="4dp"
+                                android:textAppearance="?attr/textAppearanceLabelSmall" />
+
+                            <com.google.android.material.slider.Slider
+                                android:id="@+id/slider_eq_gain"
+                                android:layout_width="match_parent"
+                                android:layout_height="wrap_content"
+                                android:valueFrom="-1200"
+                                android:valueTo="1200" />
+
+                            <com.google.android.material.button.MaterialButton
+                                android:id="@+id/button_eq_delete_point"
+                                style="@style/Widget.Material3.Button.TextButton"
+                                android:layout_width="wrap_content"
+                                android:layout_height="wrap_content"
+                                android:layout_marginTop="6dp"
+                                android:text="@string/effects_eq_delete_point" />
+                        </LinearLayout>
+                    </com.google.android.material.card.MaterialCardView>
                 </LinearLayout>
 
                 <LinearLayout

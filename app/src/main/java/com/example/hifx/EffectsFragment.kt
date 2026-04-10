@@ -1,14 +1,20 @@
 package com.example.hifx
 
 import android.content.Intent
+import android.graphics.Color
+import android.graphics.drawable.GradientDrawable
 import android.net.Uri
 import android.os.Bundle
 import android.provider.OpenableColumns
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
+import android.widget.ArrayAdapter
+import android.widget.ImageView
+import android.widget.LinearLayout
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.content.ContextCompat
 import androidx.core.view.isVisible
 import androidx.fragment.app.Fragment
 import androidx.lifecycle.Lifecycle
@@ -17,7 +23,7 @@ import androidx.lifecycle.repeatOnLifecycle
 import com.example.hifx.audio.AudioEngine
 import com.example.hifx.audio.EffectsUiState
 import com.example.hifx.databinding.FragmentEffectsBinding
-import com.example.hifx.databinding.ItemEqBandVerticalBinding
+import com.example.hifx.ui.EqCurveView
 import com.example.hifx.ui.SpatialPadView
 import com.google.android.material.button.MaterialButton
 import com.google.android.material.slider.Slider
@@ -34,7 +40,17 @@ class EffectsFragment : Fragment() {
     private var channelPanelExpanded = false
     private var surroundGainPanelExpanded = false
     private var selectedHandle: SpatialPadView.Handle = SpatialPadView.Handle.LEFT
-    private lateinit var eqBandBindings: List<ItemEqBandVerticalBinding>
+    private var selectedEqBandIndex: Int = 0
+    private val eqPointColors by lazy {
+        listOf(
+            Color.parseColor("#43A047"),
+            Color.parseColor("#1E88E5"),
+            Color.parseColor("#F4511E"),
+            Color.parseColor("#8E24AA"),
+            Color.parseColor("#00897B"),
+            Color.parseColor("#EF5350")
+        )
+    }
 
     private val irPickerLauncher =
         registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
@@ -63,16 +79,6 @@ class EffectsFragment : Fragment() {
     }
 
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
-        eqBandBindings = listOf(
-            binding.band1,
-            binding.band2,
-            binding.band3,
-            binding.band4,
-            binding.band5,
-            binding.band6,
-            binding.band7,
-            binding.band8
-        )
         setupControls()
         setupTabs()
         observeEffectState()
@@ -95,6 +101,11 @@ class EffectsFragment : Fragment() {
                     AudioEngine.setSurroundMode(AudioEngine.SURROUND_MODE_STEREO)
                 }
                 AudioEngine.setSpatialEnabled(isChecked)
+            }
+        }
+        binding.switchEqEnabled.setOnCheckedChangeListener { _, isChecked ->
+            if (!internalUpdating) {
+                AudioEngine.setEqEnabled(isChecked)
             }
         }
         binding.switchSurroundEnabled.setOnCheckedChangeListener { _, isChecked ->
@@ -209,14 +220,57 @@ class EffectsFragment : Fragment() {
             }
         }
 
-        eqBandBindings.forEachIndexed { index, bandBinding ->
-            val slider = bandBinding.seekEq
-            slider.addOnChangeListener { _, value, fromUser ->
-                if (fromUser && !internalUpdating) {
-                    val state = AudioEngine.effectsState.value
-                    val mb = progressToMb(value.roundToInt(), state)
-                    AudioEngine.setEqBandLevel(index, mb)
-                }
+        binding.eqCurveView.onPointClick = { index ->
+            if (!internalUpdating) {
+                selectedEqBandIndex = index
+                renderEqControls(AudioEngine.effectsState.value)
+            }
+        }
+        binding.buttonEqAddPoint.setOnClickListener {
+            if (internalUpdating) return@setOnClickListener
+            val state = AudioEngine.effectsState.value
+            val nextFreq = if (state.eqBandFrequenciesHz.isEmpty()) {
+                1000
+            } else {
+                (state.eqBandFrequenciesHz.maxOrNull() ?: 1000) + 500
+            }.coerceIn(20, 20_000)
+            AudioEngine.addEqBandPoint(frequencyHz = nextFreq, qTimes100 = 100, levelMb = 0)
+            selectedEqBandIndex = AudioEngine.effectsState.value.eqBandFrequenciesHz.lastIndex
+        }
+        binding.buttonEqDeletePoint.setOnClickListener {
+            if (internalUpdating) return@setOnClickListener
+            AudioEngine.removeEqBandPoint(selectedEqBandIndex)
+            selectedEqBandIndex = selectedEqBandIndex.coerceAtMost(AudioEngine.effectsState.value.eqBandFrequenciesHz.lastIndex)
+        }
+        binding.buttonEqLoadPreset.setOnClickListener {
+            if (internalUpdating) return@setOnClickListener
+            val presetName = binding.inputEqPresetName.text?.toString().orEmpty().trim()
+            if (presetName.isNotBlank()) {
+                AudioEngine.applyEqPreset(presetName)
+            }
+        }
+        binding.buttonEqSavePreset.setOnClickListener {
+            if (internalUpdating) return@setOnClickListener
+            val presetName = binding.inputEqPresetName.text?.toString().orEmpty().trim()
+            if (presetName.isNotBlank()) {
+                AudioEngine.saveCurrentEqAsPreset(presetName)
+            } else {
+                Toast.makeText(requireContext(), getString(R.string.effects_eq_preset_hint), Toast.LENGTH_SHORT).show()
+            }
+        }
+        binding.sliderEqFreq.addOnChangeListener { _, value, fromUser ->
+            if (fromUser && !internalUpdating) {
+                AudioEngine.setEqBandFrequency(selectedEqBandIndex, value.roundToInt())
+            }
+        }
+        binding.sliderEqQ.addOnChangeListener { _, value, fromUser ->
+            if (fromUser && !internalUpdating) {
+                AudioEngine.setEqBandQ(selectedEqBandIndex, value.roundToInt())
+            }
+        }
+        binding.sliderEqGain.addOnChangeListener { _, value, fromUser ->
+            if (fromUser && !internalUpdating) {
+                AudioEngine.setEqBandLevel(selectedEqBandIndex, value.roundToInt())
             }
         }
     }
@@ -254,6 +308,7 @@ class EffectsFragment : Fragment() {
 
         binding.switchEffectsEnabled.isChecked = state.enabled
         binding.effectsContainer.alpha = if (state.enabled) 1f else 0.45f
+        binding.switchEqEnabled.isChecked = state.eqEnabled
         binding.switchSpatialEnabled.isChecked = state.spatialEnabled
         val surroundEnabled = state.surroundMode != AudioEngine.SURROUND_MODE_STEREO
         binding.switchSurroundEnabled.isChecked = surroundEnabled
@@ -301,31 +356,98 @@ class EffectsFragment : Fragment() {
         renderSurroundChannelGains(state)
         renderChannelPanel(state)
 
-        eqBandBindings.forEachIndexed { index, bandBinding ->
-            val slider = bandBinding.seekEq
-            val gainView = bandBinding.textEqGain
-            val freqView = bandBinding.textEqFreq
-
-            val level = state.eqBandLevelsMb.getOrElse(index) { 0 }
-            val maxProgress = state.eqBandLevelMaxMb - state.eqBandLevelMinMb
-            if (slider.valueFrom != 0f) {
-                slider.valueFrom = 0f
-            }
-            if (slider.valueTo != maxProgress.toFloat()) {
-                slider.valueTo = maxProgress.toFloat()
-            }
-            slider.value = mbToProgress(level, state).toFloat()
-
-            gainView.text = getString(R.string.effects_gain_db_value, level / 100f)
-            val freq = state.eqBandFrequenciesHz.getOrElse(index) { 0 }
-            freqView.text = if (freq >= 1000) {
-                getString(R.string.effects_freq_khz_value, freq / 1000f)
-            } else {
-                getString(R.string.effects_freq_hz_value, freq)
-            }
-        }
+        renderEqControls(state)
 
         internalUpdating = false
+    }
+
+    private fun renderEqControls(state: EffectsUiState) {
+        val eqInteractive = state.enabled && state.eqEnabled
+        binding.eqCurveView.alpha = if (eqInteractive) 1f else 0.55f
+        binding.cardEqParams.alpha = if (eqInteractive) 1f else 0.65f
+        binding.buttonEqAddPoint.isEnabled = eqInteractive
+        binding.buttonEqLoadPreset.isEnabled = eqInteractive
+        binding.buttonEqSavePreset.isEnabled = eqInteractive
+        binding.inputEqPresetName.isEnabled = eqInteractive
+        if (state.eqBandFrequenciesHz.isEmpty()) {
+            binding.cardEqParams.isVisible = false
+            binding.layoutEqPointDots.removeAllViews()
+            binding.eqCurveView.setData(emptyList(), -1)
+            return
+        }
+        if (selectedEqBandIndex !in state.eqBandFrequenciesHz.indices) {
+            selectedEqBandIndex = state.eqBandFrequenciesHz.lastIndex.coerceAtLeast(0)
+        }
+        binding.cardEqParams.isVisible = true
+        binding.buttonEqDeletePoint.isEnabled = state.eqBandFrequenciesHz.size > 1
+        val presetAdapter = ArrayAdapter(requireContext(), android.R.layout.simple_list_item_1, state.eqPresetNames)
+        binding.inputEqPresetName.setAdapter(presetAdapter)
+        val currentPresetText = binding.inputEqPresetName.text?.toString().orEmpty()
+        if (currentPresetText != state.eqActivePresetName) {
+            binding.inputEqPresetName.setText(state.eqActivePresetName, false)
+        }
+
+        val points = state.eqBandFrequenciesHz.indices.map { index ->
+            EqCurveView.EqPoint(
+                frequencyHz = state.eqBandFrequenciesHz.getOrElse(index) { 1000 },
+                gainMb = state.eqBandLevelsMb.getOrElse(index) { 0 },
+                qTimes100 = state.eqBandQTimes100.getOrElse(index) { 100 },
+                color = eqPointColors[index % eqPointColors.size]
+            )
+        }
+        binding.eqCurveView.setData(points, selectedEqBandIndex)
+        rebuildEqPointDots(state)
+
+        val freq = state.eqBandFrequenciesHz[selectedEqBandIndex]
+        val gainMb = state.eqBandLevelsMb.getOrElse(selectedEqBandIndex) { 0 }
+        val q100 = state.eqBandQTimes100.getOrElse(selectedEqBandIndex) { 100 }
+        binding.textEqSelectedPoint.text = getString(R.string.effects_eq_selected_point, selectedEqBandIndex + 1)
+        binding.textEqFreqValue.text = if (freq >= 1000) {
+            getString(R.string.effects_eq_frequency_value_khz, freq / 1000f)
+        } else {
+            getString(R.string.effects_eq_frequency_value_hz, freq)
+        }
+        binding.textEqQValue.text = getString(R.string.effects_eq_q_value, q100 / 100f)
+        binding.textEqGainValue.text = getString(R.string.effects_eq_gain_db_value, gainMb / 100f)
+
+        if (binding.sliderEqGain.valueFrom != state.eqBandLevelMinMb.toFloat()) {
+            binding.sliderEqGain.valueFrom = state.eqBandLevelMinMb.toFloat()
+        }
+        if (binding.sliderEqGain.valueTo != state.eqBandLevelMaxMb.toFloat()) {
+            binding.sliderEqGain.valueTo = state.eqBandLevelMaxMb.toFloat()
+        }
+        binding.sliderEqFreq.value = freq.toFloat()
+        binding.sliderEqQ.value = q100.toFloat()
+        binding.sliderEqGain.value = gainMb.toFloat()
+    }
+
+    private fun rebuildEqPointDots(state: EffectsUiState) {
+        val container = binding.layoutEqPointDots
+        container.removeAllViews()
+        state.eqBandFrequenciesHz.indices.forEach { index ->
+            val dot = ImageView(requireContext()).apply {
+                val size = dp(20f)
+                layoutParams = LinearLayout.LayoutParams(size, size).also { lp ->
+                    lp.marginEnd = dp(8f)
+                }
+                background = GradientDrawable().apply {
+                    shape = GradientDrawable.OVAL
+                    setColor(eqPointColors[index % eqPointColors.size])
+                    if (index == selectedEqBandIndex) {
+                        setStroke(dp(2f), ContextCompat.getColor(requireContext(), android.R.color.white))
+                    } else {
+                        setStroke(dp(1f), ContextCompat.getColor(requireContext(), android.R.color.transparent))
+                    }
+                }
+                setOnClickListener {
+                    if (selectedEqBandIndex != index) {
+                        selectedEqBandIndex = index
+                        renderEqControls(AudioEngine.effectsState.value)
+                    }
+                }
+            }
+            container.addView(dot)
+        }
     }
 
     private fun renderSurroundMode(mode: Int) {
@@ -668,14 +790,6 @@ class EffectsFragment : Fragment() {
         }
     }
 
-    private fun mbToProgress(valueMb: Int, state: EffectsUiState): Int {
-        return (valueMb - state.eqBandLevelMinMb).coerceIn(0, state.eqBandLevelMaxMb - state.eqBandLevelMinMb)
-    }
-
-    private fun progressToMb(progress: Int, state: EffectsUiState): Int {
-        return (state.eqBandLevelMinMb + progress).coerceIn(state.eqBandLevelMinMb, state.eqBandLevelMaxMb)
-    }
-
     private fun bindSlider(slider: Slider, onUserChange: (Int) -> Unit) {
         slider.addOnChangeListener { _, value, fromUser ->
             if (fromUser && !internalUpdating) {
@@ -696,4 +810,6 @@ class EffectsFragment : Fragment() {
         val fileName = nameFromResolver ?: fallback ?: return false
         return fileName.endsWith(".irs", ignoreCase = true)
     }
+
+    private fun dp(value: Float): Int = (value * resources.displayMetrics.density).roundToInt()
 }

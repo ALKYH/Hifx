@@ -118,13 +118,21 @@ data class PlaybackUiState(
     val sleepTimerRemainingMs: Long = 0L
 )
 
+private val DEFAULT_EQ_BAND_FREQUENCIES_HZ = listOf(32, 64, 125, 250, 500, 1000, 4000, 8000)
+private val DEFAULT_EQ_BAND_Q_TIMES100 = List(DEFAULT_EQ_BAND_FREQUENCIES_HZ.size) { 100 }
+private const val EQ_PRESET_CUSTOM_NAME = "自定义"
+
 data class EffectsUiState(
     val enabled: Boolean = true,
+    val eqEnabled: Boolean = true,
     val bassStrength: Int = 400,
     val virtualizerStrength: Int = 300,
     val loudnessGainMb: Int = 0,
-    val eqBandFrequenciesHz: List<Int> = listOf(32, 64, 125, 250, 500, 1000, 4000, 8000),
-    val eqBandLevelsMb: List<Int> = List(8) { 0 },
+    val eqBandFrequenciesHz: List<Int> = DEFAULT_EQ_BAND_FREQUENCIES_HZ,
+    val eqBandLevelsMb: List<Int> = List(DEFAULT_EQ_BAND_FREQUENCIES_HZ.size) { 0 },
+    val eqBandQTimes100: List<Int> = DEFAULT_EQ_BAND_Q_TIMES100,
+    val eqPresetNames: List<String> = listOf("Flat", "Bass Boost", "Vocal", "Treble Boost", "V Shape"),
+    val eqActivePresetName: String = "Flat",
     val eqBandLevelMinMb: Int = -1200,
     val eqBandLevelMaxMb: Int = 1200,
     val spatialEnabled: Boolean = false,
@@ -227,6 +235,18 @@ private data class SpatialModel(
     val diffusion: Int
 )
 
+private data class EqBandConfig(
+    val frequenciesHz: List<Int>,
+    val levelsMb: List<Int>,
+    val qTimes100: List<Int>
+)
+
+private data class EqPreset(
+    val name: String,
+    val config: EqBandConfig,
+    val builtIn: Boolean
+)
+
 private data class UsbHostCapability(
     val supported: Boolean,
     val reason: String
@@ -248,7 +268,11 @@ object AudioEngine {
     private const val KEY_BASS_STRENGTH = "key_bass_strength"
     private const val KEY_VIRTUALIZER_STRENGTH = "key_virtualizer_strength"
     private const val KEY_LOUDNESS_GAIN_MB = "key_loudness_gain_mb"
+    private const val KEY_EQ_ENABLED = "key_eq_enabled"
     private const val KEY_EQ_BAND_LEVEL_PREFIX = "key_band_level_"
+    private const val KEY_EQ_BAND_CONFIG_JSON = "key_eq_band_config_json"
+    private const val KEY_EQ_CUSTOM_PRESETS_JSON = "key_eq_custom_presets_json"
+    private const val KEY_EQ_ACTIVE_PRESET_NAME = "key_eq_active_preset_name"
     private const val KEY_SPATIAL_ENABLED = "key_spatial_enabled"
     private const val KEY_CHANNEL_SEPARATED = "key_channel_separated"
     private const val KEY_SPATIAL_X = "key_spatial_x"
@@ -373,6 +397,7 @@ object AudioEngine {
     private var usbPermissionReceiver: BroadcastReceiver? = null
     private var usbPermissionReceiverRegistered = false
     private var bitPerfectBypassActive: Boolean = false
+    private var eqCustomPresets: MutableList<EqPreset> = mutableListOf()
     private var lastPersistSignature: String? = null
     private var lastPersistPositionMs: Long = -1L
     private var lastPersistElapsedRealtimeMs: Long = 0L
@@ -459,14 +484,31 @@ object AudioEngine {
         val legacySpatialY = prefs.getInt(KEY_SPATIAL_Y, 0).coerceIn(SPATIAL_COORD_MIN_CM, SPATIAL_COORD_MAX_CM)
         val legacySpatialZ = prefs.getInt(KEY_SPATIAL_Z, 0).coerceIn(SPATIAL_COORD_MIN_CM, SPATIAL_COORD_MAX_CM)
 
+        val legacyEqLevels = List(DEFAULT_EQ_BAND_FREQUENCIES_HZ.size) { index ->
+            prefs.getInt("$KEY_EQ_BAND_LEVEL_PREFIX$index", 0).coerceIn(-1200, 1200)
+        }
+        val parsedEq = parseEqBandConfig(
+            prefs.getString(KEY_EQ_BAND_CONFIG_JSON, null),
+            legacyEqLevels
+        )
+        eqCustomPresets = parseCustomEqPresets(prefs.getString(KEY_EQ_CUSTOM_PRESETS_JSON, null)).toMutableList()
+        val presetNames = buildEqPresetNames(eqCustomPresets)
+        val savedActivePreset = prefs.getString(KEY_EQ_ACTIVE_PRESET_NAME, null)
+            ?.takeIf { it.isNotBlank() }
+            ?.takeIf { it in presetNames }
+            ?: presetNames.firstOrNull().orEmpty()
+
         val storedEffects = EffectsUiState(
             enabled = prefs.getBoolean(KEY_EFFECT_ENABLED, true),
+            eqEnabled = prefs.getBoolean(KEY_EQ_ENABLED, true),
             bassStrength = prefs.getInt(KEY_BASS_STRENGTH, 400).coerceIn(0, 1000),
             virtualizerStrength = prefs.getInt(KEY_VIRTUALIZER_STRENGTH, 300).coerceIn(0, 1000),
             loudnessGainMb = prefs.getInt(KEY_LOUDNESS_GAIN_MB, 0).coerceIn(0, 2000),
-            eqBandLevelsMb = List(8) { index ->
-                prefs.getInt("$KEY_EQ_BAND_LEVEL_PREFIX$index", 0).coerceIn(-1200, 1200)
-            },
+            eqBandFrequenciesHz = parsedEq.frequenciesHz,
+            eqBandLevelsMb = parsedEq.levelsMb,
+            eqBandQTimes100 = parsedEq.qTimes100,
+            eqPresetNames = presetNames,
+            eqActivePresetName = savedActivePreset,
             spatialEnabled = prefs.getBoolean(KEY_SPATIAL_ENABLED, false),
             channelSeparated = prefs.getBoolean(KEY_CHANNEL_SEPARATED, false),
             spatialLeftX = prefs.getInt(KEY_SPATIAL_LEFT_X, legacySpatialX)
@@ -1129,6 +1171,16 @@ object AudioEngine {
         applyEffectState()
     }
 
+    fun setEqEnabled(enabled: Boolean) {
+        val current = _effectsState.value
+        if (current.eqEnabled == enabled) {
+            return
+        }
+        _effectsState.value = withSpatialDerived(current.copy(eqEnabled = enabled))
+        prefs.edit().putBoolean(KEY_EQ_ENABLED, enabled).apply()
+        applyEffectState()
+    }
+
     fun setEqBandLevel(index: Int, levelMb: Int) {
         val current = _effectsState.value
         if (index !in current.eqBandLevelsMb.indices) {
@@ -1137,13 +1189,132 @@ object AudioEngine {
         val clamped = levelMb.coerceIn(current.eqBandLevelMinMb, current.eqBandLevelMaxMb)
         val updated = current.eqBandLevelsMb.toMutableList()
         updated[index] = clamped
-        _effectsState.value = withSpatialDerived(current.copy(eqBandLevelsMb = updated))
+        val next = withSpatialDerived(markEqPresetAsCustom(current.copy(eqBandLevelsMb = updated)))
+        _effectsState.value = next
         prefs.edit().putInt("$KEY_EQ_BAND_LEVEL_PREFIX$index", clamped).apply()
+        persistEqBandConfig(next)
         applyEffectState()
     }
 
     fun setBandLevel(index: Int, level: Int) {
         setEqBandLevel(index, level)
+    }
+
+    fun setEqBandFrequency(index: Int, frequencyHz: Int) {
+        val current = _effectsState.value
+        if (index !in current.eqBandFrequenciesHz.indices) {
+            return
+        }
+        val clamped = frequencyHz.coerceIn(20, 20_000)
+        val updated = current.eqBandFrequenciesHz.toMutableList()
+        updated[index] = clamped
+        val next = withSpatialDerived(markEqPresetAsCustom(current.copy(eqBandFrequenciesHz = updated)))
+        _effectsState.value = next
+        persistEqBandConfig(next)
+        applyEffectState()
+    }
+
+    fun setEqBandQ(index: Int, qTimes100: Int) {
+        val current = _effectsState.value
+        if (index !in current.eqBandQTimes100.indices) {
+            return
+        }
+        val clamped = qTimes100.coerceIn(20, 1200)
+        val updated = current.eqBandQTimes100.toMutableList()
+        updated[index] = clamped
+        val next = withSpatialDerived(markEqPresetAsCustom(current.copy(eqBandQTimes100 = updated)))
+        _effectsState.value = next
+        persistEqBandConfig(next)
+        applyEffectState()
+    }
+
+    fun addEqBandPoint(
+        frequencyHz: Int = 1000,
+        qTimes100: Int = 100,
+        levelMb: Int = 0
+    ) {
+        val current = _effectsState.value
+        if (current.eqBandFrequenciesHz.size >= 16) {
+            return
+        }
+        val frequencies = current.eqBandFrequenciesHz.toMutableList()
+        val levels = current.eqBandLevelsMb.toMutableList()
+        val qs = current.eqBandQTimes100.toMutableList()
+        frequencies += frequencyHz.coerceIn(20, 20_000)
+        levels += levelMb.coerceIn(current.eqBandLevelMinMb, current.eqBandLevelMaxMb)
+        qs += qTimes100.coerceIn(20, 1200)
+        val next = withSpatialDerived(
+            markEqPresetAsCustom(current.copy(
+                eqBandFrequenciesHz = frequencies,
+                eqBandLevelsMb = levels,
+                eqBandQTimes100 = qs
+            ))
+        )
+        _effectsState.value = next
+        persistEqBandConfig(next)
+        applyEffectState()
+    }
+
+    fun removeEqBandPoint(index: Int) {
+        val current = _effectsState.value
+        if (current.eqBandFrequenciesHz.size <= 1 || index !in current.eqBandFrequenciesHz.indices) {
+            return
+        }
+        val frequencies = current.eqBandFrequenciesHz.toMutableList().also { it.removeAt(index) }
+        val levels = current.eqBandLevelsMb.toMutableList().also { it.removeAt(index) }
+        val qs = current.eqBandQTimes100.toMutableList().also { it.removeAt(index) }
+        val next = withSpatialDerived(
+            markEqPresetAsCustom(current.copy(
+                eqBandFrequenciesHz = frequencies,
+                eqBandLevelsMb = levels,
+                eqBandQTimes100 = qs
+            ))
+        )
+        _effectsState.value = next
+        persistEqBandConfig(next)
+        applyEffectState()
+    }
+
+    fun applyEqPreset(name: String) {
+        val preset = findEqPresetByName(name) ?: return
+        val current = _effectsState.value
+        val next = withSpatialDerived(
+            current.copy(
+                eqBandFrequenciesHz = preset.config.frequenciesHz,
+                eqBandLevelsMb = preset.config.levelsMb,
+                eqBandQTimes100 = preset.config.qTimes100,
+                eqActivePresetName = preset.name,
+                eqPresetNames = buildEqPresetNames(eqCustomPresets)
+            )
+        )
+        _effectsState.value = next
+        persistEqBandConfig(next)
+        prefs.edit().putString(KEY_EQ_ACTIVE_PRESET_NAME, preset.name).apply()
+        applyEffectState()
+    }
+
+    fun saveCurrentEqAsPreset(name: String) {
+        val normalized = name.trim().ifBlank { return }
+        val current = _effectsState.value
+        val config = EqBandConfig(
+            frequenciesHz = current.eqBandFrequenciesHz.map { it.coerceIn(20, 20_000) },
+            levelsMb = current.eqBandLevelsMb.map { it.coerceIn(current.eqBandLevelMinMb, current.eqBandLevelMaxMb) },
+            qTimes100 = current.eqBandQTimes100.map { it.coerceIn(20, 1200) }
+        )
+        val existing = eqCustomPresets.indexOfFirst { it.name.equals(normalized, ignoreCase = true) }
+        val preset = EqPreset(normalized, config, builtIn = false)
+        if (existing >= 0) {
+            eqCustomPresets[existing] = preset
+        } else {
+            eqCustomPresets.add(preset)
+        }
+        persistCustomEqPresets(eqCustomPresets)
+        val next = current.copy(
+            eqPresetNames = buildEqPresetNames(eqCustomPresets),
+            eqActivePresetName = normalized
+        )
+        _effectsState.value = withSpatialDerived(next)
+        prefs.edit().putString(KEY_EQ_ACTIVE_PRESET_NAME, normalized).apply()
     }
 
     fun setSpatialEnabled(enabled: Boolean) {
@@ -2611,12 +2782,17 @@ fun release() {
         }
 
         runCatching {
-            equalizer?.enabled = state.enabled
+            equalizer?.enabled = state.enabled && state.eqEnabled
             val eq = equalizer ?: return@runCatching
             val hardwareBandCount = eq.numberOfBands.toInt()
             for (hardwareBand in 0 until hardwareBandCount) {
                 val centerHz = eq.getCenterFreq(hardwareBand.toShort()).toFloat() / 1000f
-                val value = interpolateEqLevelMb(centerHz, state.eqBandFrequenciesHz, finalCurve)
+                val value = interpolateEqLevelMb(
+                    targetHz = centerHz,
+                    anchorFreqHz = state.eqBandFrequenciesHz,
+                    levelsMb = finalCurve,
+                    qTimes100 = state.eqBandQTimes100
+                )
                     .coerceIn(state.eqBandLevelMinMb, state.eqBandLevelMaxMb)
                 eq.setBandLevel(hardwareBand.toShort(), value.toShort())
             }
@@ -3308,23 +3484,24 @@ fun release() {
         state: EffectsUiState,
         model: SpatialModel
     ): List<Int> {
-        return state.eqBandFrequenciesHz.mapIndexed { index, freq ->
-            val base = state.eqBandLevelsMb.getOrNull(index) ?: 0
+        return state.eqBandLevelsMb.mapIndexed { index, baseLevel ->
+            val freq = state.eqBandFrequenciesHz.getOrElse(index) { 1000 }
             if (!state.spatialEnabled) {
-                return@mapIndexed base.coerceIn(state.eqBandLevelMinMb, state.eqBandLevelMaxMb)
+                return@mapIndexed baseLevel.coerceIn(state.eqBandLevelMinMb, state.eqBandLevelMaxMb)
             }
             val freqFloat = freq.toFloat().coerceAtLeast(20f)
             val lowWeight = 1f / (1f + (freqFloat / 380f).pow(1.6f))
             val highWeight = 1f / (1f + (2200f / freqFloat).pow(1.45f))
             val spatialMb = model.lowTiltMb * lowWeight + model.highTiltMb * highWeight
-            (base + spatialMb).toInt().coerceIn(state.eqBandLevelMinMb, state.eqBandLevelMaxMb)
+            (baseLevel + spatialMb).toInt().coerceIn(state.eqBandLevelMinMb, state.eqBandLevelMaxMb)
         }
     }
 
     private fun interpolateEqLevelMb(
         targetHz: Float,
         anchorFreqHz: List<Int>,
-        levelsMb: List<Int>
+        levelsMb: List<Int>,
+        qTimes100: List<Int>
     ): Int {
         if (anchorFreqHz.isEmpty() || levelsMb.isEmpty()) {
             return 0
@@ -3333,26 +3510,199 @@ fun release() {
         if (size == 1) {
             return levelsMb.first()
         }
-        val clampedHz = targetHz.coerceAtLeast(anchorFreqHz.first().toFloat())
-        if (clampedHz <= anchorFreqHz.first()) {
-            return levelsMb.first()
+        val clampedHz = targetHz.coerceIn(20f, 20_000f)
+        val ln2 = ln(2.0).toFloat()
+        var weightedSum = 0f
+        var weightTotal = 0f
+        var nearestValue = levelsMb.first()
+        var nearestDistance = Float.MAX_VALUE
+        for (index in 0 until size) {
+            val centerHz = anchorFreqHz[index].toFloat().coerceIn(20f, 20_000f)
+            val level = levelsMb[index]
+            val q = (qTimes100.getOrElse(index) { 100 } / 100f).coerceIn(0.2f, 12f)
+            val sigmaOct = (1.1f / q).coerceIn(0.08f, 1.8f)
+            val distanceOct = abs(ln(clampedHz / centerHz) / ln2)
+            if (distanceOct < nearestDistance) {
+                nearestDistance = distanceOct
+                nearestValue = level
+            }
+            val weight = kotlin.math.exp(-0.5f * (distanceOct / sigmaOct).pow(2))
+            weightedSum += level * weight
+            weightTotal += weight
         }
-        if (clampedHz >= anchorFreqHz[size - 1]) {
-            return levelsMb[size - 1]
+        if (weightTotal <= 0.0001f) {
+            return nearestValue
         }
-        for (index in 0 until size - 1) {
-            val left = anchorFreqHz[index].toFloat()
-            val right = anchorFreqHz[index + 1].toFloat()
-            if (clampedHz in left..right) {
-                val leftLog = ln(left)
-                val rightLog = ln(right)
-                val targetLog = ln(clampedHz)
-                val ratio = ((targetLog - leftLog) / (rightLog - leftLog)).coerceIn(0f, 1f)
-                val value = levelsMb[index] + (levelsMb[index + 1] - levelsMb[index]) * ratio
-                return value.toInt()
+        return (weightedSum / weightTotal).roundToInt()
+    }
+
+    private fun builtInEqPresets(): List<EqPreset> {
+        val freqs = DEFAULT_EQ_BAND_FREQUENCIES_HZ
+        val q = DEFAULT_EQ_BAND_Q_TIMES100
+        return listOf(
+            EqPreset(
+                name = "Flat",
+                config = EqBandConfig(freqs, List(freqs.size) { 0 }, q),
+                builtIn = true
+            ),
+            EqPreset(
+                name = "Bass Boost",
+                config = EqBandConfig(freqs, listOf(520, 450, 260, 120, 0, -60, -120, -160), q),
+                builtIn = true
+            ),
+            EqPreset(
+                name = "Vocal",
+                config = EqBandConfig(freqs, listOf(-220, -120, 80, 260, 340, 300, 90, -90), q),
+                builtIn = true
+            ),
+            EqPreset(
+                name = "Treble Boost",
+                config = EqBandConfig(freqs, listOf(-120, -80, -20, 40, 120, 220, 360, 500), q),
+                builtIn = true
+            ),
+            EqPreset(
+                name = "V Shape",
+                config = EqBandConfig(freqs, listOf(400, 320, 160, -80, -120, 80, 260, 380), q),
+                builtIn = true
+            )
+        )
+    }
+
+    private fun findEqPresetByName(name: String): EqPreset? {
+        val normalized = name.trim()
+        if (normalized.isBlank()) return null
+        return builtInEqPresets().firstOrNull { it.name.equals(normalized, ignoreCase = true) }
+            ?: eqCustomPresets.firstOrNull { it.name.equals(normalized, ignoreCase = true) }
+    }
+
+    private fun buildEqPresetNames(custom: List<EqPreset>): List<String> {
+        return buildInEqPresetNames() + custom.map { it.name }.sorted()
+    }
+
+    private fun buildInEqPresetNames(): List<String> = builtInEqPresets().map { it.name }
+
+    private fun parseCustomEqPresets(rawJson: String?): List<EqPreset> {
+        if (rawJson.isNullOrBlank()) return emptyList()
+        return runCatching {
+            val arr = JSONArray(rawJson)
+            buildList {
+                for (i in 0 until arr.length()) {
+                    val node = arr.optJSONObject(i) ?: continue
+                    val name = node.optString("name").trim()
+                    if (name.isBlank()) continue
+                    val bands = node.optJSONArray("bands") ?: continue
+                    val frequencies = mutableListOf<Int>()
+                    val levels = mutableListOf<Int>()
+                    val qs = mutableListOf<Int>()
+                    for (j in 0 until bands.length()) {
+                        val band = bands.optJSONObject(j) ?: continue
+                        val freq = band.optInt("freq", -1).coerceIn(20, 20_000)
+                        if (freq <= 0) continue
+                        frequencies += freq
+                        levels += band.optInt("gain", 0).coerceIn(-1200, 1200)
+                        qs += band.optInt("q", 100).coerceIn(20, 1200)
+                    }
+                    if (frequencies.isNotEmpty()) {
+                        add(EqPreset(name, EqBandConfig(frequencies, levels, qs), builtIn = false))
+                    }
+                }
+            }
+        }.getOrDefault(emptyList())
+    }
+
+    private fun persistCustomEqPresets(custom: List<EqPreset>) {
+        val arr = JSONArray()
+        custom.forEach { preset ->
+            val presetObj = JSONObject()
+            presetObj.put("name", preset.name)
+            val bandsArr = JSONArray()
+            val size = minOf(
+                preset.config.frequenciesHz.size,
+                preset.config.levelsMb.size,
+                preset.config.qTimes100.size
+            )
+            for (index in 0 until size) {
+                val band = JSONObject()
+                band.put("freq", preset.config.frequenciesHz[index].coerceIn(20, 20_000))
+                band.put("gain", preset.config.levelsMb[index].coerceIn(-1200, 1200))
+                band.put("q", preset.config.qTimes100[index].coerceIn(20, 1200))
+                bandsArr.put(band)
+            }
+            presetObj.put("bands", bandsArr)
+            arr.put(presetObj)
+        }
+        prefs.edit().putString(KEY_EQ_CUSTOM_PRESETS_JSON, arr.toString()).apply()
+    }
+
+    private fun markEqPresetAsCustom(state: EffectsUiState): EffectsUiState {
+        val names = buildEqPresetNames(eqCustomPresets)
+        return state.copy(eqActivePresetName = EQ_PRESET_CUSTOM_NAME, eqPresetNames = names)
+    }
+
+    private fun parseEqBandConfig(rawJson: String?, fallbackLevels: List<Int>): EqBandConfig {
+        if (!rawJson.isNullOrBlank()) {
+            val parsed = runCatching {
+                val arr = JSONArray(rawJson)
+                val frequencies = mutableListOf<Int>()
+                val levels = mutableListOf<Int>()
+                val qs = mutableListOf<Int>()
+                for (i in 0 until arr.length()) {
+                    val node = arr.optJSONObject(i) ?: continue
+                    val freq = node.optInt("freq", -1).coerceIn(20, 20_000)
+                    val gain = node.optInt("gain", 0).coerceIn(-1200, 1200)
+                    val q = node.optInt("q", 100).coerceIn(20, 1200)
+                    if (freq <= 0) continue
+                    frequencies += freq
+                    levels += gain
+                    qs += q
+                }
+                if (frequencies.isEmpty()) {
+                    null
+                } else {
+                    EqBandConfig(
+                        frequenciesHz = frequencies,
+                        levelsMb = levels,
+                        qTimes100 = qs
+                    )
+                }
+            }.getOrNull()
+            if (parsed != null) {
+                return parsed
             }
         }
-        return levelsMb[size - 1]
+        val normalizedLevels = fallbackLevels
+            .take(DEFAULT_EQ_BAND_FREQUENCIES_HZ.size)
+            .ifEmpty { List(DEFAULT_EQ_BAND_FREQUENCIES_HZ.size) { 0 } }
+            .map { it.coerceIn(-1200, 1200) }
+        return EqBandConfig(
+            frequenciesHz = DEFAULT_EQ_BAND_FREQUENCIES_HZ,
+            levelsMb = normalizedLevels,
+            qTimes100 = DEFAULT_EQ_BAND_Q_TIMES100
+        )
+    }
+
+    private fun persistEqBandConfig(state: EffectsUiState) {
+        val size = minOf(
+            state.eqBandFrequenciesHz.size,
+            state.eqBandLevelsMb.size,
+            state.eqBandQTimes100.size
+        )
+        val arr = JSONArray()
+        for (index in 0 until size) {
+            val node = JSONObject()
+            node.put("freq", state.eqBandFrequenciesHz[index].coerceIn(20, 20_000))
+            node.put("gain", state.eqBandLevelsMb[index].coerceIn(state.eqBandLevelMinMb, state.eqBandLevelMaxMb))
+            node.put("q", state.eqBandQTimes100[index].coerceIn(20, 1200))
+            arr.put(node)
+        }
+        val editor = prefs.edit()
+            .putString(KEY_EQ_BAND_CONFIG_JSON, arr.toString())
+            .putString(KEY_EQ_ACTIVE_PRESET_NAME, state.eqActivePresetName)
+        for (index in 0 until DEFAULT_EQ_BAND_FREQUENCIES_HZ.size) {
+            val level = state.eqBandLevelsMb.getOrElse(index) { 0 }
+            editor.putInt("$KEY_EQ_BAND_LEVEL_PREFIX$index", level.coerceIn(state.eqBandLevelMinMb, state.eqBandLevelMaxMb))
+        }
+        editor.apply()
     }
 
     private fun restoreLastPlaybackSession() {

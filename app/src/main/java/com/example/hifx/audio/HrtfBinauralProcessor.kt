@@ -149,6 +149,8 @@ internal class HrtfBinauralProcessor : BaseAudioProcessor() {
     private var surroundBandLowPassState = 0f
     private var rearHighPassState = 0f
     private var rearBandLowPassState = 0f
+    private var limiterGain = 1f
+    private var wetAutoGain = 1f
 
     fun updateConfig(newConfig: HrtfRenderConfig) {
         val previousConfig = config
@@ -211,6 +213,7 @@ internal class HrtfBinauralProcessor : BaseAudioProcessor() {
 
         if (pendingStateReset) {
             clearInternalState()
+            resetDynamicsState()
             pendingStateReset = false
             wasProcessing = false
         }
@@ -219,6 +222,7 @@ internal class HrtfBinauralProcessor : BaseAudioProcessor() {
         val shouldProcess = localConfig.enabled && localConfig.spatialEnabled && localConfig.blend > 0.001f
         if (shouldProcess != wasProcessing) {
             clearInternalState()
+            resetDynamicsState()
             wasProcessing = shouldProcess
         }
         if (!shouldProcess) {
@@ -308,6 +312,11 @@ internal class HrtfBinauralProcessor : BaseAudioProcessor() {
         val blend = localConfig.blend.coerceIn(0f, 1f)
         val wetSourceGain = 0.62f
         val headroom = (1f - 0.26f * blend).coerceIn(0.68f, 1f)
+        val limiterThreshold = 0.90f
+        val limiterRelease = 0.0042f
+        val wetLimiterThreshold = 0.72f
+        val wetLimiterAttack = 0.22f
+        val wetLimiterRelease = 0.0018f
         val sampleRate = inputAudioFormat.sampleRate
         val bassManagementCoeff = if (surroundMode != 0) onePoleCoefficient(90f, sampleRate) else 0f
         val centerHpCoeff = if (surroundMode != 0) onePoleCoefficient(140f, sampleRate) else 0f
@@ -411,10 +420,39 @@ internal class HrtfBinauralProcessor : BaseAudioProcessor() {
                 wetOutRight = accumulatorRight * wetSourceGain * modeCompensation
             }
 
+            val wetPeak = max(abs(wetOutLeft), abs(wetOutRight))
+            val wetTargetGain = if (wetPeak > wetLimiterThreshold) {
+                (wetLimiterThreshold / wetPeak).coerceIn(0.05f, 1f)
+            } else {
+                1f
+            }
+            wetAutoGain = if (wetTargetGain < wetAutoGain) {
+                wetAutoGain + (wetTargetGain - wetAutoGain) * wetLimiterAttack
+            } else {
+                wetAutoGain + (wetTargetGain - wetAutoGain) * wetLimiterRelease
+            }
+            wetOutLeft *= wetAutoGain
+            wetOutRight *= wetAutoGain
+
             val mixedLeft = (inLeft * (1f - blend) + wetOutLeft * blend) * headroom
             val mixedRight = (inRight * (1f - blend) + wetOutRight * blend) * headroom
-            val outLeft = softSaturate(mixedLeft)
-            val outRight = softSaturate(mixedRight)
+
+            val safeMixedLeft = sanitizeSample(mixedLeft)
+            val safeMixedRight = sanitizeSample(mixedRight)
+            val peak = max(abs(safeMixedLeft), abs(safeMixedRight))
+            val targetLimiterGain = if (peak > limiterThreshold) {
+                (limiterThreshold / peak).coerceIn(0.05f, 1f)
+            } else {
+                1f
+            }
+            limiterGain = if (targetLimiterGain < limiterGain) {
+                targetLimiterGain
+            } else {
+                limiterGain + (targetLimiterGain - limiterGain) * limiterRelease
+            }
+
+            val outLeft = softSaturate(safeMixedLeft * limiterGain)
+            val outRight = softSaturate(safeMixedRight * limiterGain)
 
             outputBuffer.putShort(floatToShort(outLeft))
             outputBuffer.putShort(floatToShort(outRight))
@@ -424,12 +462,14 @@ internal class HrtfBinauralProcessor : BaseAudioProcessor() {
 
     override fun onFlush() {
         clearInternalState()
+        resetDynamicsState()
         wasProcessing = false
         pendingStateReset = false
     }
 
     override fun onReset() {
         clearInternalState()
+        resetDynamicsState()
         wasProcessing = false
         pendingStateReset = false
     }
@@ -453,6 +493,11 @@ internal class HrtfBinauralProcessor : BaseAudioProcessor() {
         surroundBandLowPassState = 0f
         rearHighPassState = 0f
         rearBandLowPassState = 0f
+    }
+
+    private fun resetDynamicsState() {
+        limiterGain = 1f
+        wetAutoGain = 1f
     }
 
     private fun extractLfe(mono: Float, sampleRate: Int): Float {
@@ -832,6 +877,10 @@ internal class HrtfBinauralProcessor : BaseAudioProcessor() {
         val scaled = (value * drive).coerceIn(-4f, 4f)
         val norm = tanh(drive.toDouble()).toFloat().coerceAtLeast(0.0001f)
         return (tanh(scaled.toDouble()).toFloat() / norm).coerceIn(-1f, 1f)
+    }
+
+    private fun sanitizeSample(value: Float): Float {
+        return if (value.isFinite()) value else 0f
     }
 
     companion object {

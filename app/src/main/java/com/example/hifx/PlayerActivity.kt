@@ -113,6 +113,8 @@ class PlayerActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         binding = ActivityPlayerBinding.inflate(layoutInflater)
+        binding.root.alpha = 0f
+        binding.root.visibility = View.INVISIBLE
         setContentView(binding.root)
 
         setupImmersiveUi()
@@ -1816,6 +1818,7 @@ class PlayerActivity : AppCompatActivity() {
         if (startOnScreen == null) {
             entering = false
             val content = binding.root
+            content.visibility = View.VISIBLE
             content.alpha = 0f
             content.translationY = 22f
             content.animate()
@@ -1828,15 +1831,17 @@ class PlayerActivity : AppCompatActivity() {
         }
 
         binding.root.post {
+            val content = binding.root
             val overlayHost = findViewById<ViewGroup>(android.R.id.content) ?: run {
                 entering = false
-                binding.root.alpha = 1f
+                content.visibility = View.VISIBLE
+                content.alpha = 1f
                 return@post
             }
             entering = true
             val hostLoc = IntArray(2)
             overlayHost.getLocationOnScreen(hostLoc)
-            val endRect = rectInHost(binding.root, hostLoc)
+            val endRect = rectInHost(content, hostLoc)
             val startRect = Rect(
                 startOnScreen.left - hostLoc[0],
                 startOnScreen.top - hostLoc[1],
@@ -1845,7 +1850,8 @@ class PlayerActivity : AppCompatActivity() {
             )
             if (startRect.width() <= 0 || startRect.height() <= 0 || endRect.width() <= 0 || endRect.height() <= 0) {
                 entering = false
-                binding.root.alpha = 1f
+                content.visibility = View.VISIBLE
+                content.alpha = 1f
                 return@post
             }
 
@@ -1858,15 +1864,17 @@ class PlayerActivity : AppCompatActivity() {
             val rootStartRight = (rootStartLeft + startRect.width()).coerceIn(1, endRect.width())
             val rootStartBottom = (rootStartTop + startRect.height()).coerceIn(1, endRect.height())
             var liveClipRect = Rect(rootStartLeft, rootStartTop, rootStartRight, rootStartBottom)
-            binding.root.setLayerType(View.LAYER_TYPE_HARDWARE, null)
-            binding.root.clipToOutline = true
-            binding.root.outlineProvider = object : ViewOutlineProvider() {
+            content.setLayerType(View.LAYER_TYPE_HARDWARE, null)
+            content.clipToOutline = true
+            content.outlineProvider = object : ViewOutlineProvider() {
                 override fun getOutline(view: View, outline: Outline) {
                     outline.setRoundRect(liveClipRect, currentCorner)
                 }
             }
-            binding.root.clipBounds = Rect(liveClipRect)
-            binding.root.invalidateOutline()
+            content.clipBounds = Rect(liveClipRect)
+            content.invalidateOutline()
+            content.visibility = View.VISIBLE
+            content.alpha = 1f
 
             ValueAnimator.ofFloat(0f, 1f).apply {
                 this.duration = duration
@@ -1884,14 +1892,14 @@ class PlayerActivity : AppCompatActivity() {
                     val localRight = (localLeft + w).coerceIn(localLeft + 1, endRect.width())
                     val localBottom = (localTop + h).coerceIn(localTop + 1, endRect.height())
                     liveClipRect = Rect(localLeft, localTop, localRight, localBottom)
-                    binding.root.clipBounds = Rect(liveClipRect)
-                    binding.root.invalidateOutline()
+                    content.clipBounds = Rect(liveClipRect)
+                    content.invalidateOutline()
                 }
                 doOnEnd {
-                    binding.root.clipBounds = null
-                    binding.root.clipToOutline = false
-                    binding.root.outlineProvider = ViewOutlineProvider.BOUNDS
-                    binding.root.setLayerType(View.LAYER_TYPE_NONE, null)
+                    content.clipBounds = null
+                    content.clipToOutline = false
+                    content.outlineProvider = ViewOutlineProvider.BOUNDS
+                    content.setLayerType(View.LAYER_TYPE_NONE, null)
                     entering = false
                 }
                 start()
