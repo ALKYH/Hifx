@@ -10,6 +10,7 @@ import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
 import android.widget.ArrayAdapter
+import android.widget.EditText
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.Toast
@@ -25,11 +26,15 @@ import com.example.hifx.audio.EffectsUiState
 import com.example.hifx.databinding.FragmentEffectsBinding
 import com.example.hifx.ui.EqCurveView
 import com.example.hifx.ui.SpatialPadView
+import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.google.android.material.button.MaterialButton
 import com.google.android.material.slider.Slider
 import com.google.android.material.tabs.TabLayout
 import kotlinx.coroutines.launch
+import kotlin.math.abs
+import kotlin.math.ln
 import kotlin.math.max
+import kotlin.math.pow
 import kotlin.math.roundToInt
 
 class EffectsFragment : Fragment() {
@@ -41,6 +46,16 @@ class EffectsFragment : Fragment() {
     private var surroundGainPanelExpanded = false
     private var selectedHandle: SpatialPadView.Handle = SpatialPadView.Handle.LEFT
     private var selectedEqBandIndex: Int = 0
+    private var currentTabPosition: Int = 0
+    private var lastEqDotsSignature: String = ""
+
+    companion object {
+        private const val EQ_FREQ_MIN_HZ = 20f
+        private const val EQ_FREQ_MAX_HZ = 20_000f
+        private const val EQ_FREQ_SLIDER_MIN = 0f
+        private const val EQ_FREQ_SLIDER_MAX = 1000f
+    }
+
     private val eqPointColors by lazy {
         listOf(
             Color.parseColor("#43A047"),
@@ -242,25 +257,49 @@ class EffectsFragment : Fragment() {
             AudioEngine.removeEqBandPoint(selectedEqBandIndex)
             selectedEqBandIndex = selectedEqBandIndex.coerceAtMost(AudioEngine.effectsState.value.eqBandFrequenciesHz.lastIndex)
         }
-        binding.buttonEqLoadPreset.setOnClickListener {
-            if (internalUpdating) return@setOnClickListener
-            val presetName = binding.inputEqPresetName.text?.toString().orEmpty().trim()
-            if (presetName.isNotBlank()) {
-                AudioEngine.applyEqPreset(presetName)
+        binding.inputEqPresetName.setOnItemClickListener { parent, _, position, _ ->
+            if (internalUpdating) return@setOnItemClickListener
+            val selected = parent.getItemAtPosition(position)?.toString().orEmpty().trim()
+            if (selected.isNotBlank()) {
+                AudioEngine.applyEqPreset(selected)
             }
+        }
+        binding.inputEqPresetName.threshold = 0
+        binding.inputEqPresetName.setOnClickListener {
+            binding.inputEqPresetName.showDropDown()
+        }
+        binding.inputEqPresetName.setOnFocusChangeListener { _, hasFocus ->
+            if (hasFocus) binding.inputEqPresetName.showDropDown()
         }
         binding.buttonEqSavePreset.setOnClickListener {
             if (internalUpdating) return@setOnClickListener
+            showSaveEqPresetDialog()
+        }
+        binding.buttonEqDeletePreset.setOnClickListener {
+            if (internalUpdating) return@setOnClickListener
             val presetName = binding.inputEqPresetName.text?.toString().orEmpty().trim()
-            if (presetName.isNotBlank()) {
-                AudioEngine.saveCurrentEqAsPreset(presetName)
+            if (presetName.isBlank()) {
+                Toast.makeText(requireContext(), getString(R.string.effects_eq_preset_delete_empty), Toast.LENGTH_SHORT).show()
+                return@setOnClickListener
+            }
+            if (AudioEngine.isBuiltInEqPreset(presetName)) {
+                Toast.makeText(requireContext(), getString(R.string.effects_eq_preset_delete_builtin_denied), Toast.LENGTH_SHORT).show()
+                return@setOnClickListener
+            }
+            val deleted = AudioEngine.deleteEqPreset(presetName)
+            if (deleted) {
+                Toast.makeText(
+                    requireContext(),
+                    getString(R.string.effects_eq_preset_delete_confirm, presetName),
+                    Toast.LENGTH_SHORT
+                ).show()
             } else {
-                Toast.makeText(requireContext(), getString(R.string.effects_eq_preset_hint), Toast.LENGTH_SHORT).show()
+                Toast.makeText(requireContext(), getString(R.string.effects_eq_preset_delete_empty), Toast.LENGTH_SHORT).show()
             }
         }
         binding.sliderEqFreq.addOnChangeListener { _, value, fromUser ->
             if (fromUser && !internalUpdating) {
-                AudioEngine.setEqBandFrequency(selectedEqBandIndex, value.roundToInt())
+                AudioEngine.setEqBandFrequency(selectedEqBandIndex, sliderValueToFrequencyHz(value))
             }
         }
         binding.sliderEqQ.addOnChangeListener { _, value, fromUser ->
@@ -278,19 +317,55 @@ class EffectsFragment : Fragment() {
     private fun setupTabs() {
         binding.tabEffects.addOnTabSelectedListener(object : TabLayout.OnTabSelectedListener {
             override fun onTabSelected(tab: TabLayout.Tab?) {
-                renderEffectTab(tab?.position ?: 0)
+                renderEffectTab(tab?.position ?: 0, animate = true)
             }
 
             override fun onTabUnselected(tab: TabLayout.Tab?) = Unit
             override fun onTabReselected(tab: TabLayout.Tab?) = Unit
         })
-        renderEffectTab(0)
+        renderEffectTab(0, animate = false)
     }
 
-    private fun renderEffectTab(position: Int) {
-        binding.panelEq.isVisible = position == 0
-        binding.panelReverb.isVisible = position == 1
-        binding.panelOther.isVisible = position == 2
+    private fun renderEffectTab(position: Int, animate: Boolean) {
+        val panels = listOf(binding.panelEq, binding.panelReverb, binding.panelOther)
+        if (!animate || position == currentTabPosition) {
+            panels.forEachIndexed { index, panel ->
+                panel.isVisible = index == position
+                panel.alpha = 1f
+                panel.translationY = 0f
+            }
+            currentTabPosition = position
+            return
+        }
+        val offsetY = dp(12f).toFloat()
+        panels.forEachIndexed { index, panel ->
+            val show = index == position
+            panel.animate().cancel()
+            if (show) {
+                if (!panel.isVisible) {
+                    panel.alpha = 0f
+                    panel.translationY = offsetY
+                    panel.isVisible = true
+                }
+                panel.animate()
+                    .alpha(1f)
+                    .translationY(0f)
+                    .setDuration(220L)
+                    .start()
+            } else if (panel.isVisible) {
+                panel.animate()
+                    .alpha(0f)
+                    .translationY(offsetY * 0.7f)
+                    .setDuration(160L)
+                    .withEndAction {
+                        panel.isVisible = false
+                        panel.alpha = 1f
+                        panel.translationY = 0f
+                    }
+                    .start()
+            }
+        }
+        currentTabPosition = position
     }
 
     private fun observeEffectState() {
@@ -363,22 +438,23 @@ class EffectsFragment : Fragment() {
 
     private fun renderEqControls(state: EffectsUiState) {
         val eqInteractive = state.enabled && state.eqEnabled
-        binding.eqCurveView.alpha = if (eqInteractive) 1f else 0.55f
-        binding.cardEqParams.alpha = if (eqInteractive) 1f else 0.65f
+        animateAlphaIfNeeded(binding.eqCurveView, if (eqInteractive) 1f else 0.55f)
+        animateAlphaIfNeeded(binding.cardEqParams, if (eqInteractive) 1f else 0.65f)
         binding.buttonEqAddPoint.isEnabled = eqInteractive
-        binding.buttonEqLoadPreset.isEnabled = eqInteractive
         binding.buttonEqSavePreset.isEnabled = eqInteractive
+        binding.buttonEqDeletePreset.isEnabled = eqInteractive
         binding.inputEqPresetName.isEnabled = eqInteractive
         if (state.eqBandFrequenciesHz.isEmpty()) {
-            binding.cardEqParams.isVisible = false
+            setEqParamsVisible(visible = false)
             binding.layoutEqPointDots.removeAllViews()
+            lastEqDotsSignature = ""
             binding.eqCurveView.setData(emptyList(), -1)
             return
         }
         if (selectedEqBandIndex !in state.eqBandFrequenciesHz.indices) {
             selectedEqBandIndex = state.eqBandFrequenciesHz.lastIndex.coerceAtLeast(0)
         }
-        binding.cardEqParams.isVisible = true
+        setEqParamsVisible(visible = true)
         binding.buttonEqDeletePoint.isEnabled = state.eqBandFrequenciesHz.size > 1
         val presetAdapter = ArrayAdapter(requireContext(), android.R.layout.simple_list_item_1, state.eqPresetNames)
         binding.inputEqPresetName.setAdapter(presetAdapter)
@@ -416,24 +492,31 @@ class EffectsFragment : Fragment() {
         if (binding.sliderEqGain.valueTo != state.eqBandLevelMaxMb.toFloat()) {
             binding.sliderEqGain.valueTo = state.eqBandLevelMaxMb.toFloat()
         }
-        binding.sliderEqFreq.value = freq.toFloat()
+        binding.sliderEqFreq.value = frequencyHzToSliderValue(freq)
         binding.sliderEqQ.value = q100.toFloat()
         binding.sliderEqGain.value = gainMb.toFloat()
     }
 
     private fun rebuildEqPointDots(state: EffectsUiState) {
+        val signature = "${state.eqBandFrequenciesHz.joinToString(",")}|$selectedEqBandIndex"
+        if (signature == lastEqDotsSignature) return
+        lastEqDotsSignature = signature
         val container = binding.layoutEqPointDots
         container.removeAllViews()
         state.eqBandFrequenciesHz.indices.forEach { index ->
+            val selected = index == selectedEqBandIndex
             val dot = ImageView(requireContext()).apply {
                 val size = dp(20f)
                 layoutParams = LinearLayout.LayoutParams(size, size).also { lp ->
                     lp.marginEnd = dp(8f)
                 }
+                alpha = if (selected) 1f else 0.75f
+                scaleX = if (selected) 1.14f else 1f
+                scaleY = if (selected) 1.14f else 1f
                 background = GradientDrawable().apply {
                     shape = GradientDrawable.OVAL
                     setColor(eqPointColors[index % eqPointColors.size])
-                    if (index == selectedEqBandIndex) {
+                    if (selected) {
                         setStroke(dp(2f), ContextCompat.getColor(requireContext(), android.R.color.white))
                     } else {
                         setStroke(dp(1f), ContextCompat.getColor(requireContext(), android.R.color.transparent))
@@ -445,6 +528,15 @@ class EffectsFragment : Fragment() {
                         renderEqControls(AudioEngine.effectsState.value)
                     }
                 }
+            }
+            if (selected) {
+                dot.scaleX = 0.88f
+                dot.scaleY = 0.88f
+                dot.animate()
+                    .scaleX(1.14f)
+                    .scaleY(1.14f)
+                    .setDuration(180L)
+                    .start()
             }
             container.addView(dot)
         }
@@ -796,6 +888,77 @@ class EffectsFragment : Fragment() {
                 onUserChange(value.roundToInt())
             }
         }
+    }
+
+    private fun showSaveEqPresetDialog() {
+        val currentName = binding.inputEqPresetName.text?.toString().orEmpty()
+        val input = EditText(requireContext()).apply {
+            hint = getString(R.string.effects_eq_preset_name_hint)
+            setText(if (currentName == getString(R.string.effects_eq_custom_name)) "" else currentName)
+            setSelection(text.length)
+        }
+        MaterialAlertDialogBuilder(requireContext())
+            .setTitle(R.string.effects_eq_preset_save_title)
+            .setView(input)
+            .setNegativeButton(android.R.string.cancel, null)
+            .setPositiveButton(R.string.effects_eq_preset_save_confirm) { _, _ ->
+                val name = input.text?.toString().orEmpty().trim()
+                if (name.isBlank()) {
+                    Toast.makeText(requireContext(), getString(R.string.effects_eq_preset_name_hint), Toast.LENGTH_SHORT).show()
+                    return@setPositiveButton
+                }
+                AudioEngine.saveCurrentEqAsPreset(name)
+            }
+            .show()
+    }
+
+    private fun frequencyHzToSliderValue(frequencyHz: Int): Float {
+        val hz = frequencyHz.toFloat().coerceIn(EQ_FREQ_MIN_HZ, EQ_FREQ_MAX_HZ)
+        val logMin = ln(EQ_FREQ_MIN_HZ)
+        val logMax = ln(EQ_FREQ_MAX_HZ)
+        val ratio = ((ln(hz) - logMin) / (logMax - logMin)).coerceIn(0f, 1f)
+        return EQ_FREQ_SLIDER_MIN + (EQ_FREQ_SLIDER_MAX - EQ_FREQ_SLIDER_MIN) * ratio
+    }
+
+    private fun sliderValueToFrequencyHz(sliderValue: Float): Int {
+        val ratio = ((sliderValue - EQ_FREQ_SLIDER_MIN) / (EQ_FREQ_SLIDER_MAX - EQ_FREQ_SLIDER_MIN)).coerceIn(0f, 1f)
+        val frequency = EQ_FREQ_MIN_HZ * (EQ_FREQ_MAX_HZ / EQ_FREQ_MIN_HZ).pow(ratio)
+        return frequency.roundToInt().coerceIn(EQ_FREQ_MIN_HZ.toInt(), EQ_FREQ_MAX_HZ.toInt())
+    }
+
+    private fun setEqParamsVisible(visible: Boolean) {
+        val card = binding.cardEqParams
+        if (visible == card.isVisible) return
+        card.animate().cancel()
+        if (visible) {
+            card.alpha = 0f
+            card.scaleY = 0.96f
+            card.isVisible = true
+            card.animate()
+                .alpha(1f)
+                .scaleY(1f)
+                .setDuration(180L)
+                .start()
+        } else {
+            card.animate()
+                .alpha(0f)
+                .scaleY(0.96f)
+                .setDuration(140L)
+                .withEndAction {
+                    card.isVisible = false
+                    card.alpha = 1f
+                    card.scaleY = 1f
+                }
+                .start()
+        }
+    }
+
+    private fun animateAlphaIfNeeded(view: View, targetAlpha: Float) {
+        if (abs(view.alpha - targetAlpha) < 0.02f) return
+        view.animate()
+            .alpha(targetAlpha)
+            .setDuration(150L)
+            .start()
     }
 
     private fun isIrsFile(uri: Uri): Boolean {

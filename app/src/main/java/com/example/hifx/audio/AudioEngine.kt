@@ -1317,6 +1317,38 @@ object AudioEngine {
         prefs.edit().putString(KEY_EQ_ACTIVE_PRESET_NAME, normalized).apply()
     }
 
+    fun isBuiltInEqPreset(name: String): Boolean {
+        val normalized = name.trim()
+        if (normalized.isBlank()) return false
+        return builtInEqPresets().any { it.name.equals(normalized, ignoreCase = true) }
+    }
+
+    fun deleteEqPreset(name: String): Boolean {
+        val normalized = name.trim()
+        if (normalized.isBlank()) return false
+        if (isBuiltInEqPreset(normalized)) return false
+        val existing = eqCustomPresets.indexOfFirst { it.name.equals(normalized, ignoreCase = true) }
+        if (existing < 0) return false
+        eqCustomPresets.removeAt(existing)
+        persistCustomEqPresets(eqCustomPresets)
+        val current = _effectsState.value
+        val nextPresetNames = buildEqPresetNames(eqCustomPresets)
+        val nextActive = when {
+            current.eqActivePresetName.equals(normalized, ignoreCase = true) -> EQ_PRESET_CUSTOM_NAME
+            current.eqActivePresetName in nextPresetNames -> current.eqActivePresetName
+            else -> nextPresetNames.firstOrNull().orEmpty()
+        }
+        val next = withSpatialDerived(
+            current.copy(
+                eqPresetNames = nextPresetNames,
+                eqActivePresetName = nextActive
+            )
+        )
+        _effectsState.value = next
+        prefs.edit().putString(KEY_EQ_ACTIVE_PRESET_NAME, nextActive).apply()
+        return true
+    }
+
     fun setSpatialEnabled(enabled: Boolean) {
         val current = _effectsState.value
         val updated = if (enabled) {

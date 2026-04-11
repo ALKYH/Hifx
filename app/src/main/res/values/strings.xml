@@ -51,8 +51,14 @@
     <string name="effects_eq_hint">支持频率 / Q 值 / 增益调节；点击下方彩色圆点选择节点，点击 + 新增节点。</string>
     <string name="effects_eq_enabled">启用 EQ</string>
     <string name="effects_eq_preset_hint">EQ 预设</string>
-    <string name="effects_eq_preset_load">读取</string>
     <string name="effects_eq_preset_save">保存</string>
+    <string name="effects_eq_preset_delete">删除预设</string>
+    <string name="effects_eq_preset_save_title">保存 EQ 预设</string>
+    <string name="effects_eq_preset_name_hint">预设名称</string>
+    <string name="effects_eq_preset_save_confirm">保存</string>
+    <string name="effects_eq_preset_delete_confirm">已删除预设：%1$s</string>
+    <string name="effects_eq_preset_delete_builtin_denied">内置预设不可删除</string>
+    <string name="effects_eq_preset_delete_empty">当前没有可删除的自定义预设</string>
     <string name="effects_eq_delete_point">删除当前节点</string>
     <string name="effects_eq_custom_name">自定义</string>
     <string name="effects_reverb_title">空间化混响</string>
