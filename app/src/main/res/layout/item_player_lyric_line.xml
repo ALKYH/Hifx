@@ -5,6 +5,7 @@
     android:layout_height="wrap_content"
     android:ellipsize="end"
     android:maxLines="2"
-    android:paddingTop="6dp"
-    android:paddingBottom="6dp"
+    android:lineSpacingExtra="2dp"
+    android:paddingTop="8dp"
+    android:paddingBottom="8dp"
     android:textAppearance="?attr/textAppearanceBodyLarge" />

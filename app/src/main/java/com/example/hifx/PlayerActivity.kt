@@ -72,6 +72,15 @@ class PlayerActivity : AppCompatActivity() {
         private const val TAG = "PlayerLyrics"
         private const val COLLAPSED_COVER_SIZE_DP = 104f * 2f / 3f
         private const val LYRICS_AUTO_RETURN_DELAY_MS = 4_000L
+        private val LRC_BRACKET_TOKEN_REGEX = Regex("""\[(.*?)]""")
+        private val LRC_METADATA_TOKEN_REGEX = Regex("""^[A-Za-z]{1,16}\s*[:\uFF1A].*$""")
+        private val LRC_METADATA_LINE_REGEX = Regex("""^\s*\[\s*[A-Za-z]{1,16}\s*[:\uFF1A][^\]]*]\s*$""")
+        private val LRC_METADATA_INLINE_REGEX = Regex("""\[\s*[A-Za-z]{1,16}\s*[:\uFF1A][^\]]*]""")
+        private val LRC_OFFSET_REGEX =
+            Regex("""\[\s*offset\s*[:\uFF1A]\s*([+-]?\d{1,9})\s*]""", RegexOption.IGNORE_CASE)
+        private val LRC_TIMESTAMP_TOKEN_REGEX =
+            Regex("""^(?:(\d{1,2}):)?(\d{1,3}):(\d{1,2})(?:[.:](\d{1,3}))?$""")
+        private const val UTF16_NULL_RATIO_THRESHOLD = 0.2f
     }
 
     private lateinit var binding: ActivityPlayerBinding
@@ -548,6 +557,10 @@ class PlayerActivity : AppCompatActivity() {
             }
         }
         binding.recyclerLyrics.addOnScrollListener(object : RecyclerView.OnScrollListener() {
+            override fun onScrolled(recyclerView: RecyclerView, dx: Int, dy: Int) {
+                updateLyricsViewportEdgeBlur()
+            }
+
             override fun onScrollStateChanged(recyclerView: RecyclerView, newState: Int) {
                 when (newState) {
                     RecyclerView.SCROLL_STATE_DRAGGING -> {
@@ -562,8 +575,13 @@ class PlayerActivity : AppCompatActivity() {
                         }
                     }
                 }
+                updateLyricsViewportEdgeBlur()
             }
         })
+        binding.recyclerLyrics.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
+            updateLyricsViewportEdgeBlur()
+        }
+        binding.recyclerLyrics.post { updateLyricsViewportEdgeBlur() }
     }
 
     private fun toggleLyricsPanelExpanded() {
@@ -697,6 +715,7 @@ class PlayerActivity : AppCompatActivity() {
         binding.viewLyricsFadeBottom.visibility = if (expanded) View.VISIBLE else View.GONE
         binding.buttonLyricsCollapse.visibility = if (expanded) View.VISIBLE else View.GONE
         lyricsAdapter.setExpanded(expanded)
+        binding.recyclerLyrics.post { updateLyricsViewportEdgeBlur() }
     }
 
     private fun applyAlbumLayout(expanded: Boolean) {
@@ -1219,7 +1238,9 @@ class PlayerActivity : AppCompatActivity() {
     private fun isLikelyLyricText(text: String): Boolean {
         val normalized = text.trim()
         if (normalized.isBlank()) return false
-        if (Regex("""\[(\d{1,2}:)?\d{1,3}:\d{1,2}(?:[.:]\d{1,3})?]""").containsMatchIn(normalized)) return true
+        if (LRC_BRACKET_TOKEN_REGEX.findAll(normalized).any { parseFlexibleTimestamp(it.groupValues[1]) != null }) {
+            return true
+        }
         val lines = normalized.lineSequence().map { it.trim() }.filter { it.isNotBlank() }.take(4).count()
         return lines >= 3
     }
@@ -1424,28 +1445,75 @@ class PlayerActivity : AppCompatActivity() {
         }.getOrNull() ?: return null
 
         val baseName = pair.first.substringBeforeLast('.', pair.first)
-        val lrcName = "$baseName.lrc"
+        val lrcNames = linkedSetOf("$baseName.lrc", "$baseName.LRC")
         val filesUri = MediaStore.Files.getContentUri("external")
         val lrcUri = runCatching {
-            contentResolver.query(
-                filesUri,
-                arrayOf(MediaStore.Files.FileColumns._ID),
-                "${MediaStore.Files.FileColumns.RELATIVE_PATH}=? AND ${MediaStore.Files.FileColumns.DISPLAY_NAME}=?",
-                arrayOf(pair.second, lrcName),
-                null
-            )?.use { cursor ->
-                if (cursor.moveToFirst()) {
-                    val id = cursor.getLong(cursor.getColumnIndexOrThrow(MediaStore.Files.FileColumns._ID))
-                    ContentUris.withAppendedId(filesUri, id)
-                } else {
+            var hit: Uri? = null
+            for (name in lrcNames) {
+                hit = contentResolver.query(
+                    filesUri,
+                    arrayOf(MediaStore.Files.FileColumns._ID),
+                    "${MediaStore.Files.FileColumns.RELATIVE_PATH}=? AND ${MediaStore.Files.FileColumns.DISPLAY_NAME}=?",
+                    arrayOf(pair.second, name),
                     null
+                )?.use { cursor ->
+                    if (cursor.moveToFirst()) {
+                        val id = cursor.getLong(cursor.getColumnIndexOrThrow(MediaStore.Files.FileColumns._ID))
+                        ContentUris.withAppendedId(filesUri, id)
+                    } else {
+                        null
+                    }
                 }
+                if (hit != null) break
             }
+            hit
         }.getOrNull() ?: return null
 
         return runCatching {
-            contentResolver.openInputStream(lrcUri)?.bufferedReader()?.use { it.readText() }
+            contentResolver.openInputStream(lrcUri)?.use { input ->
+                decodeSidecarLyricBytes(input.readBytes())
+            }
         }.getOrNull()
+    }
+
+    private fun decodeSidecarLyricBytes(bytes: ByteArray): String? {
+        if (bytes.isEmpty()) return null
+
+        if (bytes.size >= 3 &&
+            (bytes[0].toInt() and 0xFF) == 0xEF &&
+            (bytes[1].toInt() and 0xFF) == 0xBB &&
+            (bytes[2].toInt() and 0xFF) == 0xBF
+        ) {
+            return String(bytes, 3, bytes.size - 3, Charsets.UTF_8)
+        }
+        if (bytes.size >= 2 &&
+            (bytes[0].toInt() and 0xFF) == 0xFF &&
+            (bytes[1].toInt() and 0xFF) == 0xFE
+        ) {
+            return String(bytes, 2, bytes.size - 2, Charsets.UTF_16LE)
+        }
+        if (bytes.size >= 2 &&
+            (bytes[0].toInt() and 0xFF) == 0xFE &&
+            (bytes[1].toInt() and 0xFF) == 0xFF
+        ) {
+            return String(bytes, 2, bytes.size - 2, Charsets.UTF_16BE)
+        }
+
+        val utf8 = runCatching { String(bytes, Charsets.UTF_8) }.getOrNull()
+        val utf16Le = runCatching { String(bytes, Charsets.UTF_16LE) }.getOrNull()
+        val utf16Be = runCatching { String(bytes, Charsets.UTF_16BE) }.getOrNull()
+        return listOfNotNull(utf8, utf16Le, utf16Be)
+            .maxByOrNull { scoreLyricDecodeCandidate(it) }
+    }
+
+    private fun scoreLyricDecodeCandidate(text: String): Int {
+        if (text.isBlank()) return Int.MIN_VALUE
+        val matches = LRC_BRACKET_TOKEN_REGEX.findAll(text).toList()
+        val timedCount = matches.count { parseFlexibleTimestamp(it.groupValues[1]) != null }
+        val metadataCount = matches.count { LRC_METADATA_TOKEN_REGEX.matches(it.groupValues[1].trim()) }
+        val replacementCount = text.count { it == '\uFFFD' }
+        val nullCount = text.count { it == '\u0000' }
+        return timedCount * 100 + metadataCount * 3 - replacementCount * 12 - nullCount * 8
     }
 
     private fun parseLrcLines(lrcText: String?): List<LyricLine> {
@@ -1457,13 +1525,11 @@ class PlayerActivity : AppCompatActivity() {
             return emptyList()
         }
         val result = mutableListOf<LyricLine>()
-        val bracketRegex = Regex("""\[(.*?)]""")
-        val metadataTokenRegex = Regex("""^[A-Za-z]{1,16}\s*[:\uFF1A].*$""")
         val offsetMs = extractLrcOffsetMs(normalized)
         normalized.lineSequence().forEach { rawLine ->
             val line = rawLine.trim()
             if (line.isBlank()) return@forEach
-            val matches = bracketRegex.findAll(line).toList()
+            val matches = LRC_BRACKET_TOKEN_REGEX.findAll(line).toList()
             if (matches.isEmpty()) return@forEach
 
             val times = mutableListOf<Long>()
@@ -1476,7 +1542,7 @@ class PlayerActivity : AppCompatActivity() {
                         times += (parsed + offsetMs).coerceAtLeast(0L)
                         removableRanges += match.range
                     }
-                    metadataTokenRegex.matches(token) -> removableRanges += match.range
+                    LRC_METADATA_TOKEN_REGEX.matches(token) -> removableRanges += match.range
                 }
             }
             if (times.isEmpty()) return@forEach
@@ -1496,13 +1562,11 @@ class PlayerActivity : AppCompatActivity() {
         }
 
         // Fallback: support unsynced lyric tags (plain lines without timestamps).
-        val metadataLineRegex = Regex("""^\s*\[\s*[A-Za-z]{1,16}\s*[:\uFF1A][^\]]*]\s*$""")
-        val metadataInlineRegex = Regex("""\[\s*[A-Za-z]{1,16}\s*[:\uFF1A][^\]]*]""")
         val plainLines = normalized.lineSequence()
             .map { it.trim() }
-            .map { it.replace(metadataInlineRegex, "").trim() }
+            .map { it.replace(LRC_METADATA_INLINE_REGEX, "").trim() }
             .map { sanitizeLyricText(it).trim() }
-            .filter { it.isNotBlank() && !metadataLineRegex.matches(it) }
+            .filter { it.isNotBlank() && !LRC_METADATA_LINE_REGEX.matches(it) }
             .toList()
         if (plainLines.isEmpty()) {
             return emptyList()
@@ -1516,9 +1580,14 @@ class PlayerActivity : AppCompatActivity() {
     private fun normalizeLyricPayload(raw: String): String {
         var text = raw
             .replace('\uFEFF', ' ')
+        text = if (looksLikeInterleavedUtf16(text)) {
+            text.replace("\u0000", "")
+        } else {
+            text.replace('\u0000', '\n')
+        }
+        text = text
             .replace("\r\n", "\n")
             .replace('\r', '\n')
-            .replace('\u0000', '\n')
             .replace('\u3010', '[')
             .replace('\u3011', ']')
             .replace('\uFF3B', '[')
@@ -1531,6 +1600,15 @@ class PlayerActivity : AppCompatActivity() {
         )
         return stripLikelyUsltHeader(text).trim()
     }
+
+    private fun looksLikeInterleavedUtf16(text: String): Boolean {
+        if (text.isEmpty()) return false
+        val nullCount = text.count { it == '\u0000' }
+        if (nullCount < 8) return false
+        val ratio = nullCount.toFloat() / text.length.toFloat()
+        return ratio >= UTF16_NULL_RATIO_THRESHOLD
+    }
+
     private fun sanitizeLyricText(input: String): String = buildString(input.length) {
         input.forEach { ch ->
             when {
@@ -1542,7 +1620,7 @@ class PlayerActivity : AppCompatActivity() {
     }
 
     private fun extractLrcOffsetMs(text: String): Long {
-        val match = Regex("""\[\s*offset\s*[:\uFF1A]\s*([+-]?\d{1,9})\s*]""", RegexOption.IGNORE_CASE).find(text)
+        val match = LRC_OFFSET_REGEX.find(text)
         return match?.groupValues?.getOrNull(1)?.toLongOrNull() ?: 0L
     }
 
@@ -1559,7 +1637,7 @@ class PlayerActivity : AppCompatActivity() {
             .replace('\uFF0E', '.')
             .replace('\uFE52', '.')
             .replace(',', '.')
-        val match = Regex("""^(?:(\d{1,2}):)?(\d{1,3}):(\d{1,2})(?:[.:](\d{1,3}))?$""").matchEntire(normalized)
+        val match = LRC_TIMESTAMP_TOKEN_REGEX.matchEntire(normalized)
             ?: return null
 
         val hours = match.groupValues[1].toLongOrNull() ?: 0L
@@ -1966,26 +2044,41 @@ class PlayerActivity : AppCompatActivity() {
         renderState(prewarmed)
     }
 
-    private fun applyLyricEdgeBlur(view: LyricMaskTextView, distance: Int, expanded: Boolean) {
+    private fun applyLyricEdgeBlur(view: LyricMaskTextView, expanded: Boolean) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return
-        if (!expanded) {
+        val rv = binding.recyclerLyrics
+        val viewportHeight = rv.height - rv.paddingTop - rv.paddingBottom
+        if (!expanded || viewportHeight <= 0) {
             view.setRenderEffect(null)
             return
         }
-        val radius = when (distance) {
-            0, 1 -> 0f
-            2 -> 1.2f
-            3 -> 2.6f
-            4 -> 4.4f
-            else -> 6.2f
-        }
-        if (radius <= 0f) {
+
+        val centerY = rv.paddingTop + viewportHeight * 0.5f
+        val clearBandHalf = (viewportHeight * 0.28f).coerceAtLeast(dp(34f).toFloat())
+        val edgeSpan = (viewportHeight * 0.5f - clearBandHalf).coerceAtLeast(1f)
+        val childCenterY = view.top + view.translationY + view.height * 0.5f
+        val distanceFromCenter = abs(childCenterY - centerY)
+        val raw = ((distanceFromCenter - clearBandHalf) / edgeSpan).coerceIn(0f, 1f)
+        val eased = raw * raw * (3f - 2f * raw)
+        val maxRadius = dp(15f).toFloat()
+        val radius = maxRadius * eased
+
+        if (radius < 0.3f) {
             view.setRenderEffect(null)
             return
         }
         view.setRenderEffect(
             RenderEffect.createBlurEffect(radius, radius, Shader.TileMode.CLAMP)
         )
+    }
+
+    private fun updateLyricsViewportEdgeBlur() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return
+        val rv = binding.recyclerLyrics
+        for (i in 0 until rv.childCount) {
+            val lyricView = rv.getChildAt(i) as? LyricMaskTextView ?: continue
+            applyLyricEdgeBlur(lyricView, expanded = lyricsExpanded)
+        }
     }
 
     private inner class LyricsListAdapter(
@@ -2006,6 +2099,7 @@ class PlayerActivity : AppCompatActivity() {
                 currentProgressRatePerSec = 0f
             }
             notifyDataSetChanged()
+            binding.recyclerLyrics.post { updateLyricsViewportEdgeBlur() }
         }
 
         fun setExpanded(value: Boolean) {
@@ -2050,22 +2144,29 @@ class PlayerActivity : AppCompatActivity() {
                 val isCurrent = position == currentIndex
                 val distance = abs(position - currentIndex)
                 val baseAlpha = when (distance) {
-                    0 -> 1f
-                    1 -> 0.78f
-                    2 -> 0.56f
-                    3 -> 0.4f
-                    else -> 0.28f
+                    0 -> 0.98f
+                    1 -> 0.8f
+                    2 -> 0.6f
+                    3 -> 0.43f
+                    4 -> 0.33f
+                    else -> 0.26f
                 }
                 val backwardPenalty = if (position < currentIndex) 0.08f else 0f
-                textView.alpha = (baseAlpha - backwardPenalty).coerceIn(0.2f, 1f)
+                val currentLift = if (isCurrent) 0.02f + currentProgress.pow(0.62f) * 0.08f else 0f
+                textView.alpha = (baseAlpha - backwardPenalty + currentLift).coerceIn(0.2f, 1f)
                 textView.maxLines = if (expanded) 4 else 1
                 textView.setSplitTailToNewLineEnabled(expanded)
                 textView.text = line.text
+                textView.setLyricFocusState(
+                    isCurrent = isCurrent,
+                    distance = distance,
+                    expanded = expanded
+                )
                 textView.setLyricProgress(
                     if (isCurrent) currentProgress else 0f,
                     if (isCurrent) currentProgressRatePerSec else 0f
                 )
-                applyLyricEdgeBlur(textView, distance = distance, expanded = expanded)
+                applyLyricEdgeBlur(textView, expanded = expanded)
                 textView.setOnClickListener { onLineClick(bindingAdapterPosition) }
             }
         }
