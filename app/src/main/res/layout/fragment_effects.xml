@@ -844,77 +844,147 @@
                     <TextView
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
-                        android:text="@string/effects_sound_color"
+                        android:text="@string/effects_other_title"
                         android:textAppearance="?attr/textAppearanceTitleMedium" />
 
-                    <TextView
+                    <com.google.android.material.materialswitch.MaterialSwitch
+                        android:id="@+id/switch_limiter_enabled"
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
                         android:layout_marginTop="12dp"
-                        android:text="@string/effects_bass"
-                        android:textAppearance="?attr/textAppearanceLabelLarge" />
-
-                    <TextView
-                        android:id="@+id/text_bass_value"
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:text="@string/effect_percent_default"
-                        android:textAppearance="?attr/textAppearanceBodySmall" />
-
-                    <com.google.android.material.slider.Slider
-                        android:id="@+id/slider_bass"
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:stepSize="1"
-                        android:value="400"
-                        android:valueFrom="0"
-                        android:valueTo="1000" />
+                        android:text="@string/effects_limiter_switch" />
 
                     <TextView
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
                         android:layout_marginTop="10dp"
-                        android:text="@string/effects_virtualizer"
+                        android:text="@string/effects_pan_title"
                         android:textAppearance="?attr/textAppearanceLabelLarge" />
 
                     <TextView
-                        android:id="@+id/text_virtualizer_value"
+                        android:id="@+id/text_pan_value"
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
-                        android:text="@string/effect_percent_default"
+                        android:text="@string/effects_pan_value_center"
                         android:textAppearance="?attr/textAppearanceBodySmall" />
 
                     <com.google.android.material.slider.Slider
-                        android:id="@+id/slider_virtualizer"
+                        android:id="@+id/slider_pan"
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
                         android:stepSize="1"
-                        android:value="300"
-                        android:valueFrom="0"
-                        android:valueTo="1000" />
+                        android:value="0"
+                        android:valueFrom="-100"
+                        android:valueTo="100" />
+
+                    <com.google.android.material.materialswitch.MaterialSwitch
+                        android:id="@+id/switch_pan_invert_enabled"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="8dp"
+                        android:text="@string/effects_pan_invert_switch" />
+
+                    <com.google.android.material.materialswitch.MaterialSwitch
+                        android:id="@+id/switch_mono_enabled"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="8dp"
+                        android:text="@string/effects_mono_switch" />
+
+                    <com.google.android.material.materialswitch.MaterialSwitch
+                        android:id="@+id/switch_phase_invert_enabled"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="8dp"
+                        android:text="@string/effects_phase_invert_switch" />
 
                     <TextView
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
                         android:layout_marginTop="10dp"
-                        android:text="@string/effects_loudness"
+                        android:text="@string/effects_crossfeed_title"
                         android:textAppearance="?attr/textAppearanceLabelLarge" />
 
                     <TextView
-                        android:id="@+id/text_loudness_value"
+                        android:id="@+id/text_crossfeed_value"
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
-                        android:text="@string/effect_gain_default"
+                        android:text="@string/effects_crossfeed_value"
                         android:textAppearance="?attr/textAppearanceBodySmall" />
 
                     <com.google.android.material.slider.Slider
-                        android:id="@+id/slider_loudness"
+                        android:id="@+id/slider_crossfeed"
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
                         android:stepSize="1"
                         android:value="0"
                         android:valueFrom="0"
-                        android:valueTo="2000" />
+                        android:valueTo="100" />
+
+                    <TextView
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="12dp"
+                        android:text="@string/effects_playback_speed_title"
+                        android:textAppearance="?attr/textAppearanceLabelLarge" />
+
+                    <LinearLayout
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="6dp"
+                        android:gravity="center_vertical"
+                        android:orientation="horizontal">
+
+                        <com.google.android.material.button.MaterialButton
+                            android:id="@+id/button_playback_speed_down"
+                            style="@style/Widget.Material3.Button.OutlinedButton"
+                            android:layout_width="48dp"
+                            android:layout_height="48dp"
+                            android:insetTop="0dp"
+                            android:insetBottom="0dp"
+                            android:minWidth="48dp"
+                            android:text="-" />
+
+                        <TextView
+                            android:id="@+id/text_playback_speed_value"
+                            android:layout_width="0dp"
+                            android:layout_height="wrap_content"
+                            android:layout_marginStart="10dp"
+                            android:layout_marginEnd="10dp"
+                            android:layout_weight="1"
+                            android:background="@drawable/bg_eq_curve_panel"
+                            android:gravity="center"
+                            android:paddingStart="10dp"
+                            android:paddingTop="8dp"
+                            android:paddingEnd="10dp"
+                            android:paddingBottom="8dp"
+                            android:text="@string/effects_playback_speed_default"
+                            android:textAppearance="?attr/textAppearanceTitleSmall" />
+
+                        <com.google.android.material.button.MaterialButton
+                            android:id="@+id/button_playback_speed_up"
+                            style="@style/Widget.Material3.Button.OutlinedButton"
+                            android:layout_width="48dp"
+                            android:layout_height="48dp"
+                            android:insetTop="0dp"
+                            android:insetBottom="0dp"
+                            android:minWidth="48dp"
+                            android:text="+" />
+                    </LinearLayout>
+
+                    <TextView
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="6dp"
+                        android:text="@string/effects_playback_speed_hint"
+                        android:textAppearance="?attr/textAppearanceBodySmall" />
+
+                    <com.google.android.material.materialswitch.MaterialSwitch
+                        android:id="@+id/switch_playback_speed_pitch_compensation_enabled"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="8dp"
+                        android:text="@string/effects_playback_speed_pitch_compensation_switch" />
                 </LinearLayout>
             </FrameLayout>
         </com.google.android.material.card.MaterialCardView>

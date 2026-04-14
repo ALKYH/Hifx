@@ -43,6 +43,23 @@
     <string name="effects_tab_eq">EQ</string>
     <string name="effects_tab_reverb">混响</string>
     <string name="effects_tab_other">其他</string>
+    <string name="effects_other_title">其他音频处理</string>
+    <string name="effects_limiter_switch">压限器</string>
+    <string name="effects_pan_title">声像调节（Pan）</string>
+    <string name="effects_pan_value_center">声像：居中</string>
+    <string name="effects_pan_value_left">声像：左 %1$d</string>
+    <string name="effects_pan_value_right">声像：右 %1$d</string>
+    <string name="effects_pan_invert_switch">声像反转开关</string>
+    <string name="effects_mono_switch">单声道开关</string>
+    <string name="effects_phase_invert_switch">相位反转开关（波形反转）</string>
+    <string name="effects_crossfeed_title">交叉馈音</string>
+    <string name="effects_crossfeed_value">左右混合：0%</string>
+    <string name="effects_crossfeed_value_format">左右混合：%1$d%%</string>
+    <string name="effects_playback_speed_title">播放速度</string>
+    <string name="effects_playback_speed_default">1.00x</string>
+    <string name="effects_playback_speed_value">%1$.2fx</string>
+    <string name="effects_playback_speed_hint">左右按钮调节速度，长按可连续调节（0.50x - 2.00x）。</string>
+    <string name="effects_playback_speed_pitch_compensation_switch">播放速度频率补偿开关</string>
     <string name="effects_sound_color">音色调节</string>
     <string name="effects_bass">低频增强</string>
     <string name="effects_virtualizer">空间环绕</string>
@@ -116,11 +133,26 @@
     <string name="effect_band_default">0.0 dB</string>
     <string name="effect_band_value">%1$.1f dB</string>
 
+    <string name="settings_menu_appearance">外观</string>
+    <string name="settings_menu_playback">播放</string>
+    <string name="settings_menu_lyrics">歌词</string>
+    <string name="settings_menu_visualization">可视化</string>
     <string name="settings_menu_library">媒体库</string>
-    <string name="settings_menu_audio">音频</string>
-    <string name="settings_menu_theme">主题</string>
+    <string name="settings_menu_other">其他</string>
     <string name="settings_menu_about">关于</string>
+    <string name="settings_submenu_back">返回</string>
+    <string name="settings_appearance_title">外观设置</string>
+    <string name="settings_playback_title">播放设置</string>
+    <string name="settings_lyrics_title">歌词设置</string>
+    <string name="settings_visualization_title">可视化设置</string>
+    <string name="settings_background_card_title">背景设置</string>
+    <string name="settings_background_dynamic_switch">启用背景动态平铺滚动</string>
+    <string name="settings_background_blur_value">背景高斯模糊：80</string>
+    <string name="settings_background_blur_value_format">背景高斯模糊：%1$d</string>
+    <string name="settings_background_opacity_value">背景不透明度：52%%</string>
+    <string name="settings_background_opacity_value_format">背景不透明度：%1$d%%</string>
     <string name="settings_library_title">媒体库设置</string>
+    <string name="settings_other_title">其他设置</string>
 
     <string name="settings_hifi_switch">开启 Hi-Fi 输出优先</string>
     <string name="settings_hifi_on_hint">已优先启用高保真输出策略，并尝试硬件 Offload。</string>
@@ -132,7 +164,6 @@
     <string name="settings_buffer_value">输出缓冲帧：%1$s</string>
     <string name="settings_offload_value">硬件 Offload：%1$s</string>
 
-    <string name="settings_theme_title">主题设置</string>
     <string name="theme_mode_system">跟随系统</string>
     <string name="theme_mode_light">浅色模式</string>
     <string name="theme_mode_dark">深色模式</string>
@@ -192,6 +223,11 @@
     <string name="player_sleep_option_45">45 分钟后停止</string>
     <string name="player_sleep_option_60">60 分钟后停止</string>
     <string name="player_lyrics_empty">暂无歌词</string>
+    <string name="player_lyrics_translation_toggle">歌词翻译显示切换</string>
+    <string name="player_lyrics_translation_original_only_short">原</string>
+    <string name="player_lyrics_translation_with_translation_short">双</string>
+    <string name="player_lyrics_translation_mode_original_only">当前：仅原文</string>
+    <string name="player_lyrics_translation_mode_with_translation">当前：原文+翻译</string>
     <string name="effects_surround_gain_expand">展开声道增益调节</string>
     <string name="effects_surround_gain_collapse">收起声道增益调节</string>
     <string name="effects_surround_gain_hint">可按当前模式分别调整各声道增益（0% - 200%）。</string>
@@ -217,6 +253,14 @@
     <string name="settings_hires_api_switch">启用 Hi-Res API</string>
     <string name="settings_remember_playback_switch">退出后记忆播放音轨与进度</string>
     <string name="settings_haptic_feedback_switch">点击交互触感反馈（线性马达）</string>
+    <string name="settings_show_lyrics_panel_switch">显示歌词面板</string>
+    <string name="settings_lyrics_font_size_value">歌词字号：18sp</string>
+    <string name="settings_lyrics_font_size_value_format">歌词字号：%1$dsp</string>
+    <string name="settings_lyrics_glow_intensity_value">辉光强度：100%%</string>
+    <string name="settings_lyrics_glow_intensity_value_format">辉光强度：%1$d%%</string>
+    <string name="settings_lyrics_bold_switch">歌词粗体</string>
+    <string name="settings_lyrics_font_preview_text">实时预览：这句歌词会跟随上方字号变化。</string>
+    <string name="settings_show_visualization_switch">启用可视化效果（背景与波形预览）</string>
     <string name="settings_bit_depth_title">输出位深</string>
     <string name="settings_output_sample_rate_title">目标输出采样率（USB 独占）</string>
     <string name="settings_bitrate_title">最大音频码率</string>

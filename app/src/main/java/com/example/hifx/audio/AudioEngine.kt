@@ -34,6 +34,7 @@ import androidx.media3.common.C
 import androidx.media3.common.Format
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
+import androidx.media3.common.PlaybackParameters
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.audio.AudioProcessor
@@ -125,6 +126,14 @@ private const val EQ_PRESET_CUSTOM_NAME = "自定义"
 data class EffectsUiState(
     val enabled: Boolean = true,
     val eqEnabled: Boolean = true,
+    val limiterEnabled: Boolean = false,
+    val panPercent: Int = 0,
+    val panInvertEnabled: Boolean = false,
+    val monoEnabled: Boolean = false,
+    val phaseInvertEnabled: Boolean = false,
+    val crossfeedPercent: Int = 0,
+    val playbackSpeedPercent: Int = 100,
+    val playbackSpeedPitchCompensationEnabled: Boolean = true,
     val bassStrength: Int = 400,
     val virtualizerStrength: Int = 300,
     val loudnessGainMb: Int = 0,
@@ -188,6 +197,14 @@ data class SettingsUiState(
     val hiResApiEnabled: Boolean = true,
     val rememberPlaybackSessionEnabled: Boolean = true,
     val hapticFeedbackEnabled: Boolean = true,
+    val showLyricsPanelEnabled: Boolean = true,
+    val showVisualizationEnabled: Boolean = true,
+    val backgroundBlurStrength: Int = 80,
+    val backgroundOpacityPercent: Int = 52,
+    val backgroundDynamicEnabled: Boolean = true,
+    val lyricsFontSizeSp: Int = 18,
+    val lyricsGlowIntensityPercent: Int = 100,
+    val lyricsBoldEnabled: Boolean = false,
     val preferredBitDepth: Int = 32,
     val preferredOutputSampleRateHz: Int? = null,
     val preferredMaxBitrateKbps: Int? = null,
@@ -259,12 +276,28 @@ object AudioEngine {
     private const val KEY_HIRES_API_ENABLED = "key_hires_api_enabled"
     private const val KEY_REMEMBER_PLAYBACK_SESSION = "key_remember_playback_session"
     private const val KEY_HAPTIC_FEEDBACK = "key_haptic_feedback"
+    private const val KEY_SHOW_LYRICS_PANEL = "key_show_lyrics_panel"
+    private const val KEY_SHOW_VISUALIZATION = "key_show_visualization"
+    private const val KEY_BACKGROUND_BLUR_STRENGTH = "key_background_blur_strength"
+    private const val KEY_BACKGROUND_OPACITY_PERCENT = "key_background_opacity_percent"
+    private const val KEY_BACKGROUND_DYNAMIC_ENABLED = "key_background_dynamic_enabled"
+    private const val KEY_LYRICS_FONT_SIZE_SP = "key_lyrics_font_size_sp"
+    private const val KEY_LYRICS_GLOW_INTENSITY_PERCENT = "key_lyrics_glow_intensity_percent"
+    private const val KEY_LYRICS_BOLD_ENABLED = "key_lyrics_bold_enabled"
     private const val KEY_PREFERRED_BIT_DEPTH = "key_preferred_bit_depth"
     private const val KEY_PREFERRED_OUTPUT_SAMPLE_RATE_HZ = "key_preferred_output_sample_rate_hz"
     private const val KEY_MAX_AUDIO_BITRATE_KBPS = "key_max_audio_bitrate_kbps"
     private const val KEY_PREFERRED_USB_DEVICE_ID = "key_preferred_usb_device_id"
     private const val KEY_USB_EXCLUSIVE_MODE = "key_usb_exclusive_mode"
     private const val KEY_EFFECT_ENABLED = "key_effect_enabled"
+    private const val KEY_LIMITER_ENABLED = "key_limiter_enabled"
+    private const val KEY_PAN_PERCENT = "key_pan_percent"
+    private const val KEY_PAN_INVERT_ENABLED = "key_pan_invert_enabled"
+    private const val KEY_MONO_ENABLED = "key_mono_enabled"
+    private const val KEY_PHASE_INVERT_ENABLED = "key_phase_invert_enabled"
+    private const val KEY_CROSSFEED_PERCENT = "key_crossfeed_percent"
+    private const val KEY_PLAYBACK_SPEED_PERCENT = "key_playback_speed_percent"
+    private const val KEY_PLAYBACK_SPEED_PITCH_COMPENSATION = "key_playback_speed_pitch_compensation"
     private const val KEY_BASS_STRENGTH = "key_bass_strength"
     private const val KEY_VIRTUALIZER_STRENGTH = "key_virtualizer_strength"
     private const val KEY_LOUDNESS_GAIN_MB = "key_loudness_gain_mb"
@@ -389,6 +422,7 @@ object AudioEngine {
     private var environmentalReverb: EnvironmentalReverb? = null
     private var hrtfBinauralProcessor: HrtfBinauralProcessor? = null
     private var convolutionReverbProcessor: ConvolutionReverbProcessor? = null
+    private var stereoUtilityProcessor: StereoUtilityProcessor? = null
     private var usbHostPassthroughProcessor: UsbHostPassthroughProcessor? = null
     private var usbHostDirectOutput: UsbHostDirectOutput? = null
     private val playbackQueue = mutableListOf<LibraryTrack>()
@@ -501,6 +535,14 @@ object AudioEngine {
         val storedEffects = EffectsUiState(
             enabled = prefs.getBoolean(KEY_EFFECT_ENABLED, true),
             eqEnabled = prefs.getBoolean(KEY_EQ_ENABLED, true),
+            limiterEnabled = prefs.getBoolean(KEY_LIMITER_ENABLED, false),
+            panPercent = prefs.getInt(KEY_PAN_PERCENT, 0).coerceIn(-100, 100),
+            panInvertEnabled = prefs.getBoolean(KEY_PAN_INVERT_ENABLED, false),
+            monoEnabled = prefs.getBoolean(KEY_MONO_ENABLED, false),
+            phaseInvertEnabled = prefs.getBoolean(KEY_PHASE_INVERT_ENABLED, false),
+            crossfeedPercent = prefs.getInt(KEY_CROSSFEED_PERCENT, 0).coerceIn(0, 100),
+            playbackSpeedPercent = prefs.getInt(KEY_PLAYBACK_SPEED_PERCENT, 100).coerceIn(50, 200),
+            playbackSpeedPitchCompensationEnabled = prefs.getBoolean(KEY_PLAYBACK_SPEED_PITCH_COMPENSATION, true),
             bassStrength = prefs.getInt(KEY_BASS_STRENGTH, 400).coerceIn(0, 1000),
             virtualizerStrength = prefs.getInt(KEY_VIRTUALIZER_STRENGTH, 300).coerceIn(0, 1000),
             loudnessGainMb = prefs.getInt(KEY_LOUDNESS_GAIN_MB, 0).coerceIn(0, 2000),
@@ -596,6 +638,14 @@ object AudioEngine {
             hiResApiEnabled = prefs.getBoolean(KEY_HIRES_API_ENABLED, true),
             rememberPlaybackSessionEnabled = prefs.getBoolean(KEY_REMEMBER_PLAYBACK_SESSION, true),
             hapticFeedbackEnabled = prefs.getBoolean(KEY_HAPTIC_FEEDBACK, true),
+            showLyricsPanelEnabled = prefs.getBoolean(KEY_SHOW_LYRICS_PANEL, true),
+            showVisualizationEnabled = prefs.getBoolean(KEY_SHOW_VISUALIZATION, true),
+            backgroundBlurStrength = prefs.getInt(KEY_BACKGROUND_BLUR_STRENGTH, 80).coerceIn(0, 100),
+            backgroundOpacityPercent = prefs.getInt(KEY_BACKGROUND_OPACITY_PERCENT, 52).coerceIn(0, 100),
+            backgroundDynamicEnabled = prefs.getBoolean(KEY_BACKGROUND_DYNAMIC_ENABLED, true),
+            lyricsFontSizeSp = prefs.getInt(KEY_LYRICS_FONT_SIZE_SP, 18).coerceIn(12, 40),
+            lyricsGlowIntensityPercent = prefs.getInt(KEY_LYRICS_GLOW_INTENSITY_PERCENT, 100).coerceIn(0, 100),
+            lyricsBoldEnabled = prefs.getBoolean(KEY_LYRICS_BOLD_ENABLED, false),
             preferredBitDepth = preferredBitDepth,
             preferredOutputSampleRateHz = preferredOutputSampleRateHz,
             preferredMaxBitrateKbps = preferredMaxBitrate,
@@ -1069,6 +1119,82 @@ object AudioEngine {
 
     fun isHapticFeedbackEnabled(): Boolean = _settingsState.value.hapticFeedbackEnabled
 
+    fun setShowLyricsPanelEnabled(enabled: Boolean) {
+        val current = _settingsState.value
+        if (current.showLyricsPanelEnabled == enabled) {
+            return
+        }
+        _settingsState.value = current.copy(showLyricsPanelEnabled = enabled)
+        prefs.edit().putBoolean(KEY_SHOW_LYRICS_PANEL, enabled).apply()
+    }
+
+    fun setShowVisualizationEnabled(enabled: Boolean) {
+        val current = _settingsState.value
+        if (current.showVisualizationEnabled == enabled) {
+            return
+        }
+        _settingsState.value = current.copy(showVisualizationEnabled = enabled)
+        prefs.edit().putBoolean(KEY_SHOW_VISUALIZATION, enabled).apply()
+    }
+
+    fun setBackgroundBlurStrength(value: Int) {
+        val normalized = value.coerceIn(0, 100)
+        val current = _settingsState.value
+        if (current.backgroundBlurStrength == normalized) {
+            return
+        }
+        _settingsState.value = current.copy(backgroundBlurStrength = normalized)
+        prefs.edit().putInt(KEY_BACKGROUND_BLUR_STRENGTH, normalized).apply()
+    }
+
+    fun setBackgroundOpacityPercent(value: Int) {
+        val normalized = value.coerceIn(0, 100)
+        val current = _settingsState.value
+        if (current.backgroundOpacityPercent == normalized) {
+            return
+        }
+        _settingsState.value = current.copy(backgroundOpacityPercent = normalized)
+        prefs.edit().putInt(KEY_BACKGROUND_OPACITY_PERCENT, normalized).apply()
+    }
+
+    fun setBackgroundDynamicEnabled(enabled: Boolean) {
+        val current = _settingsState.value
+        if (current.backgroundDynamicEnabled == enabled) {
+            return
+        }
+        _settingsState.value = current.copy(backgroundDynamicEnabled = enabled)
+        prefs.edit().putBoolean(KEY_BACKGROUND_DYNAMIC_ENABLED, enabled).apply()
+    }
+
+    fun setLyricsFontSizeSp(value: Int) {
+        val normalized = value.coerceIn(12, 40)
+        val current = _settingsState.value
+        if (current.lyricsFontSizeSp == normalized) {
+            return
+        }
+        _settingsState.value = current.copy(lyricsFontSizeSp = normalized)
+        prefs.edit().putInt(KEY_LYRICS_FONT_SIZE_SP, normalized).apply()
+    }
+
+    fun setLyricsGlowIntensityPercent(value: Int) {
+        val normalized = value.coerceIn(0, 100)
+        val current = _settingsState.value
+        if (current.lyricsGlowIntensityPercent == normalized) {
+            return
+        }
+        _settingsState.value = current.copy(lyricsGlowIntensityPercent = normalized)
+        prefs.edit().putInt(KEY_LYRICS_GLOW_INTENSITY_PERCENT, normalized).apply()
+    }
+
+    fun setLyricsBoldEnabled(enabled: Boolean) {
+        val current = _settingsState.value
+        if (current.lyricsBoldEnabled == enabled) {
+            return
+        }
+        _settingsState.value = current.copy(lyricsBoldEnabled = enabled)
+        prefs.edit().putBoolean(KEY_LYRICS_BOLD_ENABLED, enabled).apply()
+    }
+
     fun setPreferredBitDepth(bitDepth: Int) {
         val normalized = normalizeBitDepth(bitDepth)
         val current = _settingsState.value
@@ -1148,6 +1274,65 @@ object AudioEngine {
         _effectsState.value = withSpatialDerived(_effectsState.value.copy(enabled = enabled))
         prefs.edit().putBoolean(KEY_EFFECT_ENABLED, enabled).apply()
         applyEffectState()
+    }
+
+    fun setLimiterEnabled(enabled: Boolean) {
+        _effectsState.value = withSpatialDerived(_effectsState.value.copy(limiterEnabled = enabled))
+        prefs.edit().putBoolean(KEY_LIMITER_ENABLED, enabled).apply()
+        applyEffectState()
+    }
+
+    fun setPanPercent(value: Int) {
+        val clamped = value.coerceIn(-100, 100)
+        _effectsState.value = withSpatialDerived(_effectsState.value.copy(panPercent = clamped))
+        prefs.edit().putInt(KEY_PAN_PERCENT, clamped).apply()
+        applyEffectState()
+    }
+
+    fun setPanInvertEnabled(enabled: Boolean) {
+        _effectsState.value = withSpatialDerived(_effectsState.value.copy(panInvertEnabled = enabled))
+        prefs.edit().putBoolean(KEY_PAN_INVERT_ENABLED, enabled).apply()
+        applyEffectState()
+    }
+
+    fun setMonoEnabled(enabled: Boolean) {
+        _effectsState.value = withSpatialDerived(_effectsState.value.copy(monoEnabled = enabled))
+        prefs.edit().putBoolean(KEY_MONO_ENABLED, enabled).apply()
+        applyEffectState()
+    }
+
+    fun setPhaseInvertEnabled(enabled: Boolean) {
+        _effectsState.value = withSpatialDerived(_effectsState.value.copy(phaseInvertEnabled = enabled))
+        prefs.edit().putBoolean(KEY_PHASE_INVERT_ENABLED, enabled).apply()
+        applyEffectState()
+    }
+
+    fun setCrossfeedPercent(value: Int) {
+        val clamped = value.coerceIn(0, 100)
+        _effectsState.value = withSpatialDerived(_effectsState.value.copy(crossfeedPercent = clamped))
+        prefs.edit().putInt(KEY_CROSSFEED_PERCENT, clamped).apply()
+        applyEffectState()
+    }
+
+    fun setPlaybackSpeedPercent(value: Int) {
+        val clamped = value.coerceIn(50, 200)
+        _effectsState.value = withSpatialDerived(_effectsState.value.copy(playbackSpeedPercent = clamped))
+        prefs.edit().putInt(KEY_PLAYBACK_SPEED_PERCENT, clamped).apply()
+        applyPlaybackSpeed(_effectsState.value)
+    }
+
+    fun adjustPlaybackSpeedByStep(stepPercent: Int) {
+        if (stepPercent == 0) return
+        val current = _effectsState.value.playbackSpeedPercent
+        setPlaybackSpeedPercent(current + stepPercent)
+    }
+
+    fun setPlaybackSpeedPitchCompensationEnabled(enabled: Boolean) {
+        _effectsState.value = withSpatialDerived(
+            _effectsState.value.copy(playbackSpeedPitchCompensationEnabled = enabled)
+        )
+        prefs.edit().putBoolean(KEY_PLAYBACK_SPEED_PITCH_COMPENSATION, enabled).apply()
+        applyPlaybackSpeed(_effectsState.value)
     }
 
     fun setBassStrength(value: Int) {
@@ -1975,7 +2160,14 @@ object AudioEngine {
             appendLine()
             appendLine("[信号处理链路]")
             appendLine("Equalizer: enabled=${effects.enabled} bands=${effects.eqBandLevelsMb.joinToString(prefix = "[", postfix = "]")}")
-            appendLine("BassBoost=${effects.bassStrength}  Virtualizer=${effects.virtualizerStrength}  Loudness=${effects.loudnessGainMb}mB")
+            appendLine(
+                "Limiter=${effects.limiterEnabled} Pan=${effects.panPercent}% PanInvert=${effects.panInvertEnabled} " +
+                    "Mono=${effects.monoEnabled} PhaseInvert=${effects.phaseInvertEnabled} Crossfeed=${effects.crossfeedPercent}%"
+            )
+            appendLine(
+                "PlaybackSpeed=${effects.playbackSpeedPercent}% " +
+                    "PitchComp=${effects.playbackSpeedPitchCompensationEnabled}"
+            )
             appendLine("Spatial=${effects.spatialEnabled}  HRTF=${effects.hrtfEnabled} (db=${effects.hrtfUseDatabase}, blend=${effects.hrtfBlendPercent}%, crossfeed=${effects.hrtfCrossfeedPercent}%, externalization=${effects.hrtfExternalizationPercent}%)")
             appendLine("Convolution=${effects.convolutionEnabled}  IR=${effects.convolutionIrName}  Wet=${effects.convolutionWetPercent}%")
             appendLine()
@@ -2168,6 +2360,7 @@ fun release() {
         sleepTimerEndElapsedMs = null
         hrtfBinauralProcessor = null
         convolutionReverbProcessor = null
+        stereoUtilityProcessor = null
         usbHostPassthroughProcessor = null
         releaseAudioEffects()
         AudioPlaybackService.stop(appContext)
@@ -2186,6 +2379,7 @@ fun release() {
 
         hrtfBinauralProcessor = if (bypassAudioPipeline) null else HrtfBinauralProcessor()
         convolutionReverbProcessor = if (bypassAudioPipeline) null else ConvolutionReverbProcessor()
+        stereoUtilityProcessor = if (bypassAudioPipeline) null else StereoUtilityProcessor()
         usbHostPassthroughProcessor = UsbHostPassthroughProcessor()
         val renderersFactory = object : DefaultRenderersFactory(appContext) {
             override fun buildAudioSink(
@@ -2204,6 +2398,7 @@ fun release() {
                         arrayOf<AudioProcessor>(
                             hrtfBinauralProcessor!!,
                             convolutionReverbProcessor!!,
+                            stereoUtilityProcessor!!,
                             usbHostPassthroughProcessor!!
                         )
                     )
@@ -2791,6 +2986,8 @@ fun release() {
     }
 
     private fun applyEffectState() {
+        val state = _effectsState.value
+        applyPlaybackSpeed(state)
         if (bitPerfectBypassActive) {
             player?.volume = 1f
             runCatching { equalizer?.enabled = false }
@@ -2798,14 +2995,15 @@ fun release() {
             runCatching { virtualizer?.enabled = false }
             runCatching { loudnessEnhancer?.enabled = false }
             runCatching { environmentalReverb?.enabled = false }
+            updateStereoUtilityProcessor(state.copy(enabled = false))
             return
         }
-        val state = _effectsState.value
         val model = buildSpatialModel(state)
         val finalCurve = composeFinalEqCurveMb(state, model)
 
         updateHrtfProcessor(state)
         updateConvolutionProcessor(state)
+        updateStereoUtilityProcessor(state)
 
         player?.volume = if (state.enabled && state.spatialEnabled) {
             model.gainLinear.coerceIn(0.08f, 1f)
@@ -2831,18 +3029,15 @@ fun release() {
         }
 
         runCatching {
-            bassBoost?.enabled = state.enabled
-            bassBoost?.setStrength(state.bassStrength.toShort())
+            bassBoost?.enabled = false
         }
 
         runCatching {
-            virtualizer?.enabled = state.enabled
-            virtualizer?.setStrength(state.virtualizerStrength.toShort())
+            virtualizer?.enabled = false
         }
 
         runCatching {
-            loudnessEnhancer?.enabled = state.enabled
-            loudnessEnhancer?.setTargetGain(state.loudnessGainMb)
+            loudnessEnhancer?.enabled = false
         }
 
         runCatching {
@@ -2967,6 +3162,23 @@ fun release() {
             enabled = state.enabled && state.convolutionEnabled && !state.convolutionIrUri.isNullOrBlank(),
             wetMix = state.convolutionWetPercent / 100f
         )
+    }
+
+    private fun updateStereoUtilityProcessor(state: EffectsUiState) {
+        stereoUtilityProcessor?.updateConfig(
+            limiterEnabled = state.enabled && state.limiterEnabled,
+            panBalance = (state.panPercent / 100f).coerceIn(-1f, 1f),
+            panInvertEnabled = state.enabled && state.panInvertEnabled,
+            monoEnabled = state.enabled && state.monoEnabled,
+            phaseInvertEnabled = state.enabled && state.phaseInvertEnabled,
+            crossfeedMix = state.crossfeedPercent / 100f
+        )
+    }
+
+    private fun applyPlaybackSpeed(state: EffectsUiState) {
+        val speed = (state.playbackSpeedPercent / 100f).coerceIn(0.5f, 2.0f)
+        val pitch = if (state.playbackSpeedPitchCompensationEnabled) 1f else speed
+        player?.setPlaybackParameters(PlaybackParameters(speed, pitch))
     }
 
     private fun withSpatialDerived(state: EffectsUiState): EffectsUiState {

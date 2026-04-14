@@ -6,10 +6,13 @@ import android.animation.ValueAnimator
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.Matrix
 import android.graphics.Outline
 import android.graphics.Rect
 import android.graphics.RenderEffect
 import android.graphics.Shader
+import android.graphics.drawable.BitmapDrawable
+import android.graphics.Typeface
 import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.os.Build
@@ -22,9 +25,11 @@ import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
 import android.view.ViewOutlineProvider
+import android.view.animation.DecelerateInterpolator
 import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.LinearLayout
+import android.view.animation.LinearInterpolator
 import android.util.TypedValue
 import android.text.SpannableStringBuilder
 import android.text.Spanned
@@ -33,6 +38,7 @@ import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.activity.addCallback
 import androidx.core.animation.doOnEnd
+import androidx.core.graphics.drawable.toBitmap
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
@@ -46,6 +52,7 @@ import androidx.recyclerview.widget.LinearSmoothScroller
 import androidx.recyclerview.widget.RecyclerView
 import com.example.hifx.audio.AudioEngine
 import com.example.hifx.audio.PlaybackUiState
+import com.example.hifx.audio.SettingsUiState
 import com.example.hifx.databinding.ActivityPlayerBinding
 import com.example.hifx.ui.PlayerTransitionState
 import com.example.hifx.ui.LyricMaskTextView
@@ -66,8 +73,14 @@ import java.util.Locale
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.pow
+import kotlin.math.sin
 
 class PlayerActivity : AppCompatActivity() {
+    private enum class LyricsTranslationMode {
+        ORIGINAL_ONLY,
+        ORIGINAL_WITH_TRANSLATION
+    }
+
     companion object {
         private const val TAG = "PlayerLyrics"
         private const val COLLAPSED_COVER_SIZE_DP = 104f * 2f / 3f
@@ -111,8 +124,30 @@ class PlayerActivity : AppCompatActivity() {
     private lateinit var lyricsAdapter: LyricsListAdapter
     private var lyricsAutoFollowEnabled = true
     private var lyricsAutoReturnJob: Job? = null
+    private var lyricsPanelVisibleBySetting = true
+    private var lyricsTranslationMode = LyricsTranslationMode.ORIGINAL_ONLY
+    private var lyricsHasTranslation = false
+    private var backgroundBlurStrength = 80
+    private var backgroundOpacityPercent = 52
+    private var backgroundDynamicEnabled = true
+    private var backgroundScrollAnimator: ValueAnimator? = null
+    private val backgroundScrollMatrix = Matrix()
+    private var lyricsFontSizeSp = 18
+    private var lyricsGlowIntensityPercent = 100
+    private var lyricsBoldEnabled = false
     private var currentLyricIndex: Int = -1
     private var lastAutoFollowedLyricIndex: Int = -1
+    private var lyricInertiaVelocityPxPerSec = 0f
+    private var lyricInertiaPhase = 0f
+    private var lyricLastScrollUptimeMs = 0L
+    private var lyricInertiaAnimator: ValueAnimator? = null
+    private var lyricSettleAnimator: ValueAnimator? = null
+    private var lyricInertiaLastFrameUptimeMs = 0L
+    private var lyricSettleLastFrameUptimeMs = 0L
+    private var lyricsTranslationSwitchInProgress = false
+    private var lyricsTranslationSwitchJob: Job? = null
+    private val lyricLineOffsetsPx = mutableMapOf<Int, Float>()
+    private val lyricLineVelocitiesPxPerSec = mutableMapOf<Int, Float>()
     private var albumDefaultHeightPx: Int = 0
     private var titleTextSizeSpDefault = 0f
     private var subtitleTextSizeSpDefault = 0f
@@ -133,6 +168,7 @@ class PlayerActivity : AppCompatActivity() {
         setupBackgroundEffects()
         applyPrewarmedStateIfAvailable()
         observePlaybackState()
+        observeSettingsState()
         playEnterAnimation()
         onBackPressedDispatcher.addCallback(this) {
             animateCollapseToMiniPlayerAndFinish()
@@ -235,6 +271,16 @@ class PlayerActivity : AppCompatActivity() {
             repeatOnLifecycle(Lifecycle.State.STARTED) {
                 AudioEngine.playbackState.collect { state ->
                     renderState(state)
+                }
+            }
+        }
+    }
+
+    private fun observeSettingsState() {
+        lifecycleScope.launch {
+            repeatOnLifecycle(Lifecycle.State.STARTED) {
+                AudioEngine.settingsState.collect { state ->
+                    renderSettings(state)
                 }
             }
         }
@@ -387,6 +433,12 @@ class PlayerActivity : AppCompatActivity() {
         waveformJob?.cancel()
         lyricJob?.cancel()
         lyricsAutoReturnJob?.cancel()
+        lyricsTranslationSwitchJob?.cancel()
+        lyricInertiaAnimator?.cancel()
+        lyricSettleAnimator?.cancel()
+        lyricLineOffsetsPx.clear()
+        lyricLineVelocitiesPxPerSec.clear()
+        stopBackgroundDynamicScroll()
         releaseEnterMaskOverlay(immediate = true)
         super.onDestroy()
     }
@@ -398,17 +450,11 @@ class PlayerActivity : AppCompatActivity() {
         val artworkKey = state.artworkUri?.toString()
         if (artworkKey != lastArtworkKey) {
             binding.imagePlayerBg.loadArtworkOrDefault(state.artworkUri)
+            binding.imagePlayerBg.alpha = 1f
             if (entering) {
-                binding.imagePlayerBg.alpha = 0.52f
                 binding.imagePlayerBg.scaleX = 1.24f
                 binding.imagePlayerBg.scaleY = 1.24f
             } else {
-                binding.imagePlayerBg.alpha = 0.15f
-                binding.imagePlayerBg.animate()
-                    .alpha(0.52f)
-                    .setInterpolator(standardInterpolator)
-                    .setDuration(260L)
-                    .start()
                 binding.imagePlayerBg.scaleX = 1.08f
                 binding.imagePlayerBg.scaleY = 1.08f
                 binding.imagePlayerBg.animate()
@@ -419,6 +465,9 @@ class PlayerActivity : AppCompatActivity() {
                     .start()
             }
             lastArtworkKey = artworkKey
+        }
+        if (backgroundDynamicEnabled) {
+            binding.root.post { ensureDynamicBackgroundTiled() }
         }
         binding.textTrackTitle.text = state.title
         val artistText = state.artist.ifBlank { state.subtitle }
@@ -457,7 +506,10 @@ class PlayerActivity : AppCompatActivity() {
             binding.textCurrentTime.text = state.positionMs.toTimeString()
         }
         bindLyricsForCurrentTrack(state)
-        updateLyrics(state.positionMs.coerceIn(0L, duration))
+        updateLyrics(
+            positionMs = state.positionMs.coerceIn(0L, duration),
+            isPlaying = state.isPlaying
+        )
         bindWaveformForCurrentTrack(state)
         if (binding.waveformPreviewCard.visibility == View.VISIBLE) {
             val previewPositionMs = when {
@@ -504,7 +556,26 @@ class PlayerActivity : AppCompatActivity() {
 
     private fun setupLyricsPanelExpansion() {
         setupLyricsRecycler()
+        binding.buttonLyricsTranslationToggle.setOnClickListener {
+            if (!lyricsHasTranslation) return@setOnClickListener
+            if (lyricsTranslationSwitchInProgress) return@setOnClickListener
+            lyricsTranslationSwitchInProgress = true
+            lyricsTranslationSwitchJob?.cancel()
+            lyricsTranslationSwitchJob = lifecycleScope.launch {
+                delay(360L)
+                lyricsTranslationSwitchInProgress = false
+            }
+            AppHaptics.click(it)
+            lyricsTranslationMode = if (lyricsTranslationMode == LyricsTranslationMode.ORIGINAL_ONLY) {
+                LyricsTranslationMode.ORIGINAL_WITH_TRANSLATION
+            } else {
+                LyricsTranslationMode.ORIGINAL_ONLY
+            }
+            lyricsAdapter.setTranslationMode(lyricsTranslationMode, animate = true)
+            updateLyricsTranslationToggleUi()
+        }
         binding.cardLyrics.setOnClickListener {
+            if (!lyricsPanelVisibleBySetting) return@setOnClickListener
             AppHaptics.click(it)
             toggleLyricsPanelExpanded()
         }
@@ -520,6 +591,98 @@ class PlayerActivity : AppCompatActivity() {
             cacheTrackTextSizesIfNeeded()
             applyAlbumLayout(expanded = false)
             applyLyricsExpandedVisual(expanded = false)
+            updateLyricsTranslationToggleUi()
+        }
+    }
+
+    private fun renderSettings(state: SettingsUiState) {
+        applyLyricsPanelVisibility(state.showLyricsPanelEnabled)
+        applyBackgroundSettings(state)
+        applyLyricsFontSize(state.lyricsFontSizeSp)
+        applyLyricsGlowIntensity(state.lyricsGlowIntensityPercent)
+        applyLyricsBoldEnabled(state.lyricsBoldEnabled)
+    }
+
+    private fun applyLyricsFontSize(sizeSp: Int) {
+        val normalized = sizeSp.coerceIn(12, 40)
+        if (lyricsFontSizeSp == normalized) {
+            return
+        }
+        lyricsFontSizeSp = normalized
+        if (::lyricsAdapter.isInitialized) {
+            lyricsAdapter.setLyricFontSizeSp(normalized)
+        }
+    }
+
+    private fun applyLyricsGlowIntensity(value: Int) {
+        val normalized = value.coerceIn(0, 100)
+        if (lyricsGlowIntensityPercent == normalized) return
+        lyricsGlowIntensityPercent = normalized
+        if (::lyricsAdapter.isInitialized) {
+            lyricsAdapter.setLyricGlowIntensityPercent(normalized)
+        }
+    }
+
+    private fun applyLyricsBoldEnabled(enabled: Boolean) {
+        if (lyricsBoldEnabled == enabled) return
+        lyricsBoldEnabled = enabled
+        if (::lyricsAdapter.isInitialized) {
+            lyricsAdapter.setLyricsBoldEnabled(enabled)
+        }
+    }
+
+    private fun applyLyricsPanelVisibility(enabled: Boolean) {
+        if (lyricsPanelVisibleBySetting == enabled &&
+            binding.cardLyrics.visibility == if (enabled) View.VISIBLE else View.GONE
+        ) {
+            return
+        }
+        lyricsPanelVisibleBySetting = enabled
+        if (!enabled) {
+            lyricsPanelAnimator?.cancel()
+            lyricsExpanded = false
+            lyricsAutoReturnJob?.cancel()
+            lyricsAutoFollowEnabled = true
+            applyLyricsExpandedVisual(expanded = false)
+            binding.layoutLyrics.layoutParams = binding.layoutLyrics.layoutParams.apply {
+                height = dp(65f)
+            }
+            binding.layoutLyrics.requestLayout()
+            binding.cardLyrics.visibility = View.GONE
+            return
+        }
+        binding.cardLyrics.visibility = View.VISIBLE
+        lyricsExpanded = false
+        applyLyricsExpandedVisual(expanded = false)
+        binding.layoutLyrics.layoutParams = binding.layoutLyrics.layoutParams.apply {
+            height = dp(65f)
+        }
+        binding.layoutLyrics.requestLayout()
+    }
+
+    private fun applyBackgroundSettings(state: SettingsUiState) {
+        val dynamicChanged = backgroundDynamicEnabled != state.backgroundDynamicEnabled
+        backgroundBlurStrength = state.backgroundBlurStrength
+        backgroundOpacityPercent = state.backgroundOpacityPercent
+        backgroundDynamicEnabled = state.backgroundDynamicEnabled
+
+        applyBackgroundBlur(backgroundBlurStrength)
+        binding.viewPlayerBgOverlay.alpha = (backgroundOpacityPercent / 100f).coerceIn(0f, 1f)
+
+        if (dynamicChanged) {
+            if (backgroundDynamicEnabled) {
+                ensureDynamicBackgroundTiled()
+                startBackgroundDynamicScroll()
+            } else {
+                stopBackgroundDynamicScroll()
+                binding.imagePlayerBg.scaleType = ImageView.ScaleType.CENTER_CROP
+                binding.imagePlayerBg.imageMatrix = Matrix()
+                val uri = latestArtworkRequestKey?.let { Uri.parse(it) }
+                binding.imagePlayerBg.loadArtworkOrDefault(uri)
+            }
+        } else if (backgroundDynamicEnabled) {
+            ensureDynamicBackgroundTiled()
+            startBackgroundDynamicScroll()
         }
     }
 
@@ -558,18 +721,41 @@ class PlayerActivity : AppCompatActivity() {
         }
         binding.recyclerLyrics.addOnScrollListener(object : RecyclerView.OnScrollListener() {
             override fun onScrolled(recyclerView: RecyclerView, dx: Int, dy: Int) {
+                val now = android.os.SystemClock.uptimeMillis()
+                val last = lyricLastScrollUptimeMs
+                lyricLastScrollUptimeMs = now
+                if (last > 0L) {
+                    val deltaMs = (now - last).coerceAtLeast(1L)
+                    val instantVelocity = (dy.toFloat() * 1000f) / deltaMs.toFloat()
+                    lyricInertiaVelocityPxPerSec = (
+                        lyricInertiaVelocityPxPerSec * 0.35f + instantVelocity * 0.65f
+                        ).coerceIn(-3200f, 3200f)
+                    lyricInertiaPhase += (dy.toFloat() / dp(44f).coerceAtLeast(1)).coerceIn(-2f, 2f)
+                    applyLyricsInertiaToVisibleItems((deltaMs / 1000f).coerceIn(1f / 240f, 1f / 24f))
+                }
                 updateLyricsViewportEdgeBlur()
             }
 
             override fun onScrollStateChanged(recyclerView: RecyclerView, newState: Int) {
                 when (newState) {
                     RecyclerView.SCROLL_STATE_DRAGGING -> {
+                        lyricInertiaAnimator?.cancel()
+                        lyricSettleAnimator?.cancel()
+                        lyricInertiaLastFrameUptimeMs = 0L
+                        lyricSettleLastFrameUptimeMs = 0L
                         if (lyricsExpanded) {
                             lyricsAutoFollowEnabled = false
                             lyricsAutoReturnJob?.cancel()
                         }
                     }
+                    RecyclerView.SCROLL_STATE_SETTLING -> {
+                        lyricInertiaAnimator?.cancel()
+                        lyricSettleAnimator?.cancel()
+                        lyricInertiaLastFrameUptimeMs = 0L
+                        lyricSettleLastFrameUptimeMs = 0L
+                    }
                     RecyclerView.SCROLL_STATE_IDLE -> {
+                        startLyricInertiaDecay()
                         if (lyricsExpanded && !lyricsAutoFollowEnabled) {
                             scheduleLyricsAutoReturn()
                         }
@@ -582,6 +768,207 @@ class PlayerActivity : AppCompatActivity() {
             updateLyricsViewportEdgeBlur()
         }
         binding.recyclerLyrics.post { updateLyricsViewportEdgeBlur() }
+    }
+
+    private data class LyricInertiaNode(
+        val view: LyricMaskTextView,
+        val adapterPos: Int,
+        val distance: Int,
+        val isCurrent: Boolean
+    )
+
+    private fun applyLyricsInertiaToVisibleItems(deltaSec: Float = 1f / 60f) {
+        if (!lyricsExpanded) {
+            resetLyricInertiaTransforms()
+            return
+        }
+        val rv = binding.recyclerLyrics
+        if (rv.childCount == 0) {
+            return
+        }
+        val dt = deltaSec.coerceIn(1f / 240f, 1f / 24f)
+        val velocityAbs = abs(lyricInertiaVelocityPxPerSec)
+        val intensity = (velocityAbs / 1800f).coerceIn(0f, 1f)
+        val signed = if (lyricInertiaVelocityPxPerSec >= 0f) 1f else -1f
+        val centerY = rv.paddingTop + (rv.height - rv.paddingTop - rv.paddingBottom) * 0.5f
+        val nodes = ArrayList<LyricInertiaNode>(rv.childCount)
+
+        for (i in 0 until rv.childCount) {
+            val lyricView = rv.getChildAt(i) as? LyricMaskTextView ?: continue
+            val adapterPos = rv.getChildAdapterPosition(lyricView)
+            if (adapterPos == RecyclerView.NO_POSITION) continue
+            val distance = lyricView.getTag(R.id.tag_lyric_distance) as? Int ?: 4
+            val isCurrent = lyricView.getTag(R.id.tag_lyric_is_current) == true
+            val depthWeight = when (distance.coerceAtLeast(0)) {
+                0 -> if (isCurrent) 0.18f else 0.5f
+                1 -> 1f
+                2 -> 0.8f
+                3 -> 0.62f
+                else -> 0.42f
+            }
+            val childCenterY = lyricView.top + lyricView.height * 0.5f + lyricView.translationY
+            val repulseFromCenter = if (childCenterY >= centerY) 1f else -1f
+            val phaseOffset = distance * 0.52f + (adapterPos % 3) * 0.21f
+            val oscillation = sin(lyricInertiaPhase + phaseOffset) * dp(1.45f)
+            val inertialDrift = signed * dp(2.6f) * intensity
+            val repulsion = repulseFromCenter * dp(2.1f) * (0.3f + 0.7f * intensity) * (1f - (distance / 5f).coerceIn(0f, 1f))
+            val target = (inertialDrift + oscillation + repulsion) * depthWeight
+
+            val currentOffset = lyricLineOffsetsPx[adapterPos] ?: lyricView.translationY
+            val currentVelocity = lyricLineVelocitiesPxPerSec[adapterPos] ?: 0f
+            val stiffness = 26f + intensity * 18f
+            val damping = 12f + (1f - intensity) * 8f
+            val acceleration = (target - currentOffset) * stiffness - currentVelocity * damping
+            val nextVelocity = currentVelocity + acceleration * dt
+            val nextOffset = currentOffset + nextVelocity * dt
+
+            lyricLineVelocitiesPxPerSec[adapterPos] = nextVelocity
+            lyricLineOffsetsPx[adapterPos] = nextOffset
+            lyricView.translationY = nextOffset
+            nodes += LyricInertiaNode(
+                view = lyricView,
+                adapterPos = adapterPos,
+                distance = distance,
+                isCurrent = isCurrent
+            )
+        }
+
+        // Repulsion spacing pass: keep lightweight minimum gap between adjacent visible lines.
+        val desiredGapPx = dp(4f).toFloat()
+        nodes.sortedBy { it.view.top + it.view.translationY }
+            .windowed(2, 1, partialWindows = false)
+            .forEach { pair ->
+                val first = pair[0]
+                val second = pair[1]
+                val firstBottom = first.view.top + first.view.height + first.view.translationY
+                val secondTop = second.view.top + second.view.translationY
+                val overlap = (firstBottom + desiredGapPx) - secondTop
+                if (overlap > 0f) {
+                    val push = overlap * 0.5f
+                    first.view.translationY -= push
+                    second.view.translationY += push
+                    lyricLineOffsetsPx[first.adapterPos] = first.view.translationY
+                    lyricLineOffsetsPx[second.adapterPos] = second.view.translationY
+                }
+            }
+    }
+
+    private fun resetLyricInertiaTransforms() {
+        val rv = binding.recyclerLyrics
+        for (i in 0 until rv.childCount) {
+            val lyricView = rv.getChildAt(i) as? LyricMaskTextView ?: continue
+            lyricView.translationY = 0f
+        }
+        lyricLineOffsetsPx.clear()
+        lyricLineVelocitiesPxPerSec.clear()
+    }
+
+    private fun startLyricInertiaDecay() {
+        val startVelocity = lyricInertiaVelocityPxPerSec
+        if (abs(startVelocity) < 12f) {
+            lyricInertiaVelocityPxPerSec = 0f
+            startLyricOffsetSettle()
+            return
+        }
+        lyricInertiaAnimator?.cancel()
+        lyricSettleAnimator?.cancel()
+        lyricInertiaLastFrameUptimeMs = 0L
+        lyricInertiaAnimator = ValueAnimator.ofFloat(1f, 0f).apply {
+            duration = 860L
+            interpolator = DecelerateInterpolator()
+            addUpdateListener { animator ->
+                val now = android.os.SystemClock.uptimeMillis()
+                val last = lyricInertiaLastFrameUptimeMs
+                lyricInertiaLastFrameUptimeMs = now
+                val dt = if (last > 0L) {
+                    ((now - last).coerceAtLeast(1L) / 1000f).coerceIn(1f / 240f, 1f / 24f)
+                } else {
+                    1f / 60f
+                }
+                val decay = (animator.animatedValue as Float).coerceIn(0f, 1f)
+                lyricInertiaVelocityPxPerSec = startVelocity * decay * decay
+                lyricInertiaPhase += (lyricInertiaVelocityPxPerSec / 3600f).coerceIn(-0.12f, 0.12f)
+                applyLyricsInertiaToVisibleItems(dt)
+            }
+            doOnEnd {
+                lyricInertiaVelocityPxPerSec = 0f
+                lyricInertiaLastFrameUptimeMs = 0L
+                startLyricOffsetSettle()
+            }
+            start()
+        }
+    }
+
+    private fun startLyricOffsetSettle() {
+        lyricSettleAnimator?.cancel()
+        if (lyricLineOffsetsPx.isEmpty() && lyricLineVelocitiesPxPerSec.isEmpty()) {
+            return
+        }
+        lyricSettleLastFrameUptimeMs = 0L
+        lyricSettleAnimator = ValueAnimator.ofFloat(0f, 1f).apply {
+            duration = 620L
+            interpolator = LinearInterpolator()
+            addUpdateListener { animator ->
+                val now = android.os.SystemClock.uptimeMillis()
+                val last = lyricSettleLastFrameUptimeMs
+                lyricSettleLastFrameUptimeMs = now
+                val dt = if (last > 0L) {
+                    ((now - last).coerceAtLeast(1L) / 1000f).coerceIn(1f / 240f, 1f / 20f)
+                } else {
+                    1f / 60f
+                }
+                val rv = binding.recyclerLyrics
+                var maxOffset = 0f
+                var maxVelocity = 0f
+                for (i in 0 until rv.childCount) {
+                    val lyricView = rv.getChildAt(i) as? LyricMaskTextView ?: continue
+                    val adapterPos = rv.getChildAdapterPosition(lyricView)
+                    if (adapterPos == RecyclerView.NO_POSITION) continue
+                    val currentOffset = lyricLineOffsetsPx[adapterPos] ?: lyricView.translationY
+                    val currentVelocity = lyricLineVelocitiesPxPerSec[adapterPos] ?: 0f
+                    val acceleration = (-currentOffset * 42f) - (currentVelocity * 13f)
+                    val nextVelocity = currentVelocity + acceleration * dt
+                    val nextOffset = currentOffset + nextVelocity * dt
+                    val settled = abs(nextOffset) < 0.08f && abs(nextVelocity) < 1.25f
+                    val finalOffset = if (settled) 0f else nextOffset
+                    val finalVelocity = if (settled) 0f else nextVelocity
+                    lyricView.translationY = finalOffset
+                    if (settled) {
+                        lyricLineOffsetsPx.remove(adapterPos)
+                        lyricLineVelocitiesPxPerSec.remove(adapterPos)
+                    } else {
+                        lyricLineOffsetsPx[adapterPos] = finalOffset
+                        lyricLineVelocitiesPxPerSec[adapterPos] = finalVelocity
+                    }
+                    maxOffset = max(maxOffset, abs(finalOffset))
+                    maxVelocity = max(maxVelocity, abs(finalVelocity))
+                }
+                if (maxOffset < 0.08f && maxVelocity < 1.25f) {
+                    animator.end()
+                }
+            }
+            doOnEnd {
+                endLyricOffsetSettle(immediate = false)
+            }
+            start()
+        }
+    }
+
+    private fun endLyricOffsetSettle(immediate: Boolean) {
+        if (immediate) {
+            lyricSettleAnimator?.cancel()
+        }
+        lyricSettleAnimator = null
+        lyricSettleLastFrameUptimeMs = 0L
+        lyricLineOffsetsPx.entries.removeAll { abs(it.value) < 0.08f }
+        lyricLineVelocitiesPxPerSec.entries.removeAll { abs(it.value) < 1.25f }
+        val rv = binding.recyclerLyrics
+        for (i in 0 until rv.childCount) {
+            val lyricView = rv.getChildAt(i) as? LyricMaskTextView ?: continue
+            val adapterPos = rv.getChildAdapterPosition(lyricView)
+            if (adapterPos == RecyclerView.NO_POSITION) continue
+            lyricView.translationY = lyricLineOffsetsPx[adapterPos] ?: 0f
+        }
     }
 
     private fun toggleLyricsPanelExpanded() {
@@ -714,8 +1101,27 @@ class PlayerActivity : AppCompatActivity() {
         binding.viewLyricsFadeTop.visibility = if (expanded) View.VISIBLE else View.GONE
         binding.viewLyricsFadeBottom.visibility = if (expanded) View.VISIBLE else View.GONE
         binding.buttonLyricsCollapse.visibility = if (expanded) View.VISIBLE else View.GONE
+        binding.buttonLyricsTranslationToggle.visibility = if (expanded) View.VISIBLE else View.GONE
         lyricsAdapter.setExpanded(expanded)
+        updateLyricsTranslationToggleUi()
         binding.recyclerLyrics.post { updateLyricsViewportEdgeBlur() }
+    }
+
+    private fun updateLyricsTranslationToggleUi() {
+        val hasTranslation = lyricsHasTranslation
+        binding.buttonLyricsTranslationToggle.isEnabled = hasTranslation
+        binding.buttonLyricsTranslationToggle.alpha = if (hasTranslation) 1f else 0.45f
+        val showBoth = lyricsTranslationMode == LyricsTranslationMode.ORIGINAL_WITH_TRANSLATION
+        binding.buttonLyricsTranslationToggle.text = if (showBoth) {
+            getString(R.string.player_lyrics_translation_with_translation_short)
+        } else {
+            getString(R.string.player_lyrics_translation_original_only_short)
+        }
+        binding.buttonLyricsTranslationToggle.contentDescription = if (showBoth) {
+            getString(R.string.player_lyrics_translation_mode_with_translation)
+        } else {
+            getString(R.string.player_lyrics_translation_mode_original_only)
+        }
     }
 
     private fun applyAlbumLayout(expanded: Boolean) {
@@ -863,11 +1269,13 @@ class PlayerActivity : AppCompatActivity() {
     private fun bindLyricsForCurrentTrack(state: PlaybackUiState) {
         val mediaUri = state.mediaUri ?: run {
             activeLyrics = emptyList()
+            lyricsHasTranslation = false
             lastLyricMediaKey = null
             currentLyricIndex = -1
             lastAutoFollowedLyricIndex = -1
             lyricsAdapter.submitLyrics(emptyList())
             lyricsAdapter.updatePlayback(currentIndex = -1, progress = 0f, progressRatePerSec = 0f)
+            updateLyricsTranslationToggleUi()
             return
         }
         val key = mediaUri.toString()
@@ -879,22 +1287,33 @@ class PlayerActivity : AppCompatActivity() {
         lyricsAutoReturnJob?.cancel()
         currentLyricIndex = -1
         lastAutoFollowedLyricIndex = -1
+        lyricsHasTranslation = false
         lyricsAdapter.submitLyrics(emptyList())
         lyricsAdapter.updatePlayback(currentIndex = -1, progress = 0f, progressRatePerSec = 0f)
-        lyricCache[key]?.let { cached ->
+        updateLyricsTranslationToggleUi()
+        lyricCache[key]?.let { cachedRaw ->
+            val cached = normalizeLyricTranslations(cachedRaw)
+            lyricCache[key] = cached
             activeLyrics = cached
+            lyricsHasTranslation = cached.any { !it.translatedText.isNullOrBlank() }
             lyricsAdapter.submitLyrics(cached)
+            updateLyricsTranslationToggleUi()
             return
         }
         lyricJob?.cancel()
         lyricJob = lifecycleScope.launch {
             val loadResult = readLrcMetadata(mediaUri)
-            val parsed = parseLrcLines(loadResult.text)
+            val parsed = normalizeLyricTranslations(parseLrcLines(loadResult.text))
             lyricCache[key] = parsed
             if (lastLyricMediaKey == key) {
                 activeLyrics = parsed
+                lyricsHasTranslation = parsed.any { !it.translatedText.isNullOrBlank() }
                 lyricsAdapter.submitLyrics(parsed)
-                updateLyrics(binding.progressSlider.value.toLong())
+                updateLyricsTranslationToggleUi()
+                updateLyrics(
+                    positionMs = binding.progressSlider.value.toLong(),
+                    isPlaying = AudioEngine.playbackState.value.isPlaying
+                )
                 Log.d(
                     TAG,
                     "lyrics loaded: source=${loadResult.source}, parsedLines=${parsed.size}, media=$key"
@@ -903,7 +1322,7 @@ class PlayerActivity : AppCompatActivity() {
         }
     }
 
-    private fun updateLyrics(positionMs: Long) {
+    private fun updateLyrics(positionMs: Long, isPlaying: Boolean) {
         if (activeLyrics.isEmpty()) {
             currentLyricIndex = -1
             lastAutoFollowedLyricIndex = -1
@@ -914,7 +1333,11 @@ class PlayerActivity : AppCompatActivity() {
         val rawIndex = findCurrentLyricIndex(positionMs, activeLyrics)
         currentLyricIndex = rawIndex.coerceAtLeast(0).coerceAtMost(activeLyrics.lastIndex)
         val progress = computeLyricProgress(positionMs, currentLyricIndex, activeLyrics)
-        val progressRatePerSec = computeLyricProgressRate(currentLyricIndex, activeLyrics)
+        val progressRatePerSec = if (isPlaying) {
+            computeLyricProgressRate(currentLyricIndex, activeLyrics)
+        } else {
+            0f
+        }
         lyricsAdapter.updatePlayback(currentIndex = currentLyricIndex, progress = progress, progressRatePerSec = progressRatePerSec)
         maybeAutoFollowLyrics(animated = previousIndex != currentLyricIndex)
     }
@@ -951,12 +1374,16 @@ class PlayerActivity : AppCompatActivity() {
         if (targetView != null) {
             val dy = targetView.top - targetOffset
             if (abs(dy) <= 1) return
+            injectLyricSpringKick(dy)
             val duration = (abs(dy).toFloat().pow(0.72f) * 14f + 120f)
                 .toInt()
                 .coerceIn(140, 420)
             rv.smoothScrollBy(0, dy, standardInterpolator, duration)
             return
         }
+        val anchor = lyricsLayoutManager.findFirstVisibleItemPosition().coerceAtLeast(0)
+        val estimateDy = ((index - anchor) * dp(46f)).coerceIn(-dp(460f), dp(460f))
+        injectLyricSpringKick(estimateDy)
         val scroller = object : LinearSmoothScroller(this) {
             override fun getVerticalSnapPreference(): Int = SNAP_TO_START
 
@@ -979,6 +1406,37 @@ class PlayerActivity : AppCompatActivity() {
             }
         }.apply { targetPosition = index }
         lyricsLayoutManager.startSmoothScroll(scroller)
+    }
+
+    private fun injectLyricSpringKick(dy: Int) {
+        if (dy == 0) return
+        lyricSettleAnimator?.cancel()
+        val rv = binding.recyclerLyrics
+        if (rv.childCount <= 0) return
+        val signed = if (dy >= 0) 1f else -1f
+        val magnitude = abs(dy).toFloat().coerceIn(dp(12f).toFloat(), dp(220f).toFloat())
+        val centerY = rv.paddingTop + (rv.height - rv.paddingTop - rv.paddingBottom) * 0.5f
+        for (i in 0 until rv.childCount) {
+            val lyricView = rv.getChildAt(i) as? LyricMaskTextView ?: continue
+            val adapterPos = rv.getChildAdapterPosition(lyricView)
+            if (adapterPos == RecyclerView.NO_POSITION) continue
+            val childCenterY = lyricView.top + lyricView.translationY + lyricView.height * 0.5f
+            val normalizedDistance = (abs(childCenterY - centerY) / rv.height.coerceAtLeast(1)).coerceIn(0f, 0.6f)
+            val depthWeight = (0.42f + normalizedDistance * 1.25f).coerceIn(0.35f, 1.15f)
+            val phase = lyricInertiaPhase + (adapterPos % 5) * 0.46f
+            val wave = sin(phase) * dp(1.8f).toFloat()
+            val targetOffset = signed * magnitude * 0.04f * depthWeight + wave
+            val currentOffset = lyricLineOffsetsPx[adapterPos] ?: lyricView.translationY
+            val blendedOffset = currentOffset * 0.42f + targetOffset * 0.58f
+            val currentVelocity = lyricLineVelocitiesPxPerSec[adapterPos] ?: 0f
+            val kickVelocity = signed * magnitude * (14f + depthWeight * 5f)
+            val blendedVelocity = currentVelocity * 0.34f + kickVelocity * 0.66f
+            lyricLineOffsetsPx[adapterPos] = blendedOffset
+            lyricLineVelocitiesPxPerSec[adapterPos] = blendedVelocity
+            lyricView.translationY = blendedOffset
+        }
+        lyricInertiaVelocityPxPerSec = signed * magnitude * 5.4f
+        lyricInertiaPhase += signed * 0.35f
     }
 
     private fun resolveLyricCenterOffset(index: Int): Int {
@@ -1555,7 +2013,11 @@ class PlayerActivity : AppCompatActivity() {
                 }
             content = sanitizeLyricText(content).trim()
             if (content.isBlank()) return@forEach
-            for (timeMs in times) result += LyricLine(timeMs, content)
+            val (original, translation) = splitLyricTranslation(content)
+            if (original.isBlank()) return@forEach
+            for (timeMs in times) {
+                result += LyricLine(timeMs = timeMs, originalText = original, translatedText = translation)
+            }
         }
         if (result.isNotEmpty()) {
             return result.sortedBy { it.timeMs }
@@ -1573,7 +2035,57 @@ class PlayerActivity : AppCompatActivity() {
         }
         val stepMs = 3_500L
         return plainLines.mapIndexed { index, text ->
-            LyricLine(timeMs = index * stepMs, text = text)
+            val (original, translation) = splitLyricTranslation(text)
+            LyricLine(
+                timeMs = index * stepMs,
+                originalText = original,
+                translatedText = translation
+            )
+        }
+    }
+
+    private fun splitLyricTranslation(content: String): Pair<String, String?> {
+        val separators = listOf(
+            " ⟂ ",
+            " ⫽ ",
+            " || ",
+            " // ",
+            " ｜ ",
+            "\u2009",
+            "\u200A",
+            "\u202F",
+            "\u205F",
+            "|",
+            "｜"
+        )
+        val normalized = content.trim()
+        for (separator in separators) {
+            val index = normalized.lastIndexOf(separator)
+            if (index <= 0 || index >= normalized.lastIndex) {
+                continue
+            }
+            val original = normalized.substring(0, index).trim()
+            val translated = normalized.substring(index + separator.length).trim()
+            if (original.isNotBlank() && translated.isNotBlank()) {
+                return original to translated
+            }
+        }
+        return normalized to null
+    }
+
+    private fun normalizeLyricTranslations(lines: List<LyricLine>): List<LyricLine> {
+        if (lines.isEmpty()) return lines
+        return lines.map { line ->
+            if (!line.translatedText.isNullOrBlank()) {
+                line
+            } else {
+                val (original, translation) = splitLyricTranslation(line.originalText)
+                if (translation.isNullOrBlank()) {
+                    line
+                } else {
+                    line.copy(originalText = original, translatedText = translation)
+                }
+            }
         }
     }
 
@@ -1693,8 +2205,17 @@ class PlayerActivity : AppCompatActivity() {
 
     private data class LyricLine(
         val timeMs: Long,
-        val text: String
-    )
+        val originalText: String,
+        val translatedText: String? = null
+    ) {
+        fun displayText(mode: LyricsTranslationMode): String {
+            return if (mode == LyricsTranslationMode.ORIGINAL_WITH_TRANSLATION && !translatedText.isNullOrBlank()) {
+                "$originalText\n$translatedText"
+            } else {
+                originalText
+            }
+        }
+    }
 
     private data class LyricLoadResult(
         val text: String?,
@@ -1837,6 +2358,13 @@ class PlayerActivity : AppCompatActivity() {
         return start + (end - start) * fraction.coerceIn(0f, 1f)
     }
 
+    private fun springEase(fraction: Float): Float {
+        val t = fraction.coerceIn(0f, 1f)
+        val base = 1f - (1f - t).pow(2.25f)
+        val oscillation = sin(t * Math.PI.toFloat() * 2.1f) * (1f - t) * 0.14f
+        return (base + oscillation).coerceIn(0f, 1.1f)
+    }
+
     private fun updateControlIcons(state: PlaybackUiState) {
         val active = MaterialColors.getColor(binding.root, com.google.android.material.R.attr.colorPrimary)
         val inactive = MaterialColors.getColor(binding.root, com.google.android.material.R.attr.colorOnSurfaceVariant)
@@ -1884,11 +2412,64 @@ class PlayerActivity : AppCompatActivity() {
     }
 
     private fun setupBackgroundEffects() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            binding.imagePlayerBg.setRenderEffect(
-                RenderEffect.createBlurEffect(80f, 80f, Shader.TileMode.CLAMP)
-            )
+        applyBackgroundBlur(backgroundBlurStrength)
+    }
+
+    private fun applyBackgroundBlur(strength: Int) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) {
+            return
         }
+        val radius = (strength.coerceIn(0, 100) / 100f) * 120f
+        binding.imagePlayerBg.setRenderEffect(
+            RenderEffect.createBlurEffect(radius, radius, Shader.TileMode.CLAMP)
+        )
+    }
+
+    private fun ensureDynamicBackgroundTiled() {
+        if (!backgroundDynamicEnabled) {
+            return
+        }
+        val current = binding.imagePlayerBg.drawable ?: return
+        val bitmapCurrent = current as? BitmapDrawable
+        val alreadyTiled = bitmapCurrent?.tileModeY == Shader.TileMode.REPEAT &&
+            binding.imagePlayerBg.scaleType == ImageView.ScaleType.MATRIX
+        if (alreadyTiled) {
+            return
+        }
+        val tileSize = dp(160f).coerceAtLeast(64)
+        val bitmap = current.toBitmap(width = tileSize, height = tileSize, config = Bitmap.Config.ARGB_8888)
+        val tiled = BitmapDrawable(resources, bitmap).apply {
+            setTileModeXY(Shader.TileMode.REPEAT, Shader.TileMode.REPEAT)
+        }
+        binding.imagePlayerBg.scaleType = ImageView.ScaleType.MATRIX
+        binding.imagePlayerBg.setImageDrawable(tiled)
+        startBackgroundDynamicScroll()
+    }
+
+    private fun startBackgroundDynamicScroll() {
+        if (!backgroundDynamicEnabled || backgroundScrollAnimator?.isRunning == true) {
+            return
+        }
+        val travelY = dp(180f).toFloat()
+        backgroundScrollAnimator = ValueAnimator.ofFloat(0f, 1f).apply {
+            duration = 16_000L
+            repeatCount = ValueAnimator.INFINITE
+            interpolator = LinearInterpolator()
+            addUpdateListener { animator ->
+                val t = animator.animatedValue as Float
+                backgroundScrollMatrix.reset()
+                backgroundScrollMatrix.setTranslate(0f, travelY * t)
+                binding.imagePlayerBg.imageMatrix = backgroundScrollMatrix
+            }
+            start()
+        }
+    }
+
+    private fun stopBackgroundDynamicScroll() {
+        backgroundScrollAnimator?.cancel()
+        backgroundScrollAnimator = null
+        backgroundScrollMatrix.reset()
+        binding.imagePlayerBg.imageMatrix = backgroundScrollMatrix
     }
 
     private fun playEnterAnimation() {
@@ -2044,11 +2625,11 @@ class PlayerActivity : AppCompatActivity() {
         renderState(prewarmed)
     }
 
-    private fun applyLyricEdgeBlur(view: LyricMaskTextView, expanded: Boolean) {
+    private fun applyLyricEdgeBlur(view: LyricMaskTextView, expanded: Boolean, isCurrent: Boolean) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return
         val rv = binding.recyclerLyrics
         val viewportHeight = rv.height - rv.paddingTop - rv.paddingBottom
-        if (!expanded || viewportHeight <= 0) {
+        if (!expanded || viewportHeight <= 0 || isCurrent) {
             view.setRenderEffect(null)
             return
         }
@@ -2077,22 +2658,30 @@ class PlayerActivity : AppCompatActivity() {
         val rv = binding.recyclerLyrics
         for (i in 0 until rv.childCount) {
             val lyricView = rv.getChildAt(i) as? LyricMaskTextView ?: continue
-            applyLyricEdgeBlur(lyricView, expanded = lyricsExpanded)
+            val isCurrent = lyricView.getTag(R.id.tag_lyric_is_current) == true
+            applyLyricEdgeBlur(lyricView, expanded = lyricsExpanded, isCurrent = isCurrent)
         }
     }
 
     private inner class LyricsListAdapter(
         private val onLineClick: (Int) -> Unit
     ) : RecyclerView.Adapter<LyricsListAdapter.LyricViewHolder>() {
+        private val payloadTranslationMode = "payload_translation_mode"
 
         private var items: List<LyricLine> = emptyList()
         private var currentIndex: Int = -1
         private var currentProgress: Float = 0f
         private var currentProgressRatePerSec: Float = 0f
         private var expanded: Boolean = false
+        private var lyricFontSizeSp: Int = lyricsFontSizeSp
+        private var lyricGlowIntensityPercent: Int = lyricsGlowIntensityPercent
+        private var lyricBoldEnabled: Boolean = lyricsBoldEnabled
+        private var translationMode: LyricsTranslationMode = lyricsTranslationMode
 
         fun submitLyrics(lines: List<LyricLine>) {
             items = lines
+            lyricLineOffsetsPx.keys.retainAll(items.indices.toSet())
+            lyricLineVelocitiesPxPerSec.keys.retainAll(items.indices.toSet())
             if (currentIndex !in items.indices) {
                 currentIndex = if (items.isEmpty()) -1 else 0
                 currentProgress = 0f
@@ -2105,6 +2694,46 @@ class PlayerActivity : AppCompatActivity() {
         fun setExpanded(value: Boolean) {
             if (expanded == value) return
             expanded = value
+            if (!expanded) {
+                resetLyricInertiaTransforms()
+            }
+            notifyDataSetChanged()
+        }
+
+        fun setTranslationMode(mode: LyricsTranslationMode, animate: Boolean = false) {
+            if (translationMode == mode) return
+            translationMode = mode
+            if (items.isEmpty()) {
+                notifyDataSetChanged()
+                return
+            }
+            if (animate && expanded) {
+                val kick = if (mode == LyricsTranslationMode.ORIGINAL_WITH_TRANSLATION) -dp(128f) else dp(112f)
+                injectLyricSpringKick(kick)
+                notifyItemRangeChanged(0, items.size, payloadTranslationMode)
+            } else {
+                notifyDataSetChanged()
+            }
+        }
+
+        fun setLyricFontSizeSp(value: Int) {
+            val normalized = value.coerceIn(12, 40)
+            if (lyricFontSizeSp == normalized) return
+            lyricFontSizeSp = normalized
+            notifyDataSetChanged()
+            binding.recyclerLyrics.post { updateLyricsViewportEdgeBlur() }
+        }
+
+        fun setLyricGlowIntensityPercent(value: Int) {
+            val normalized = value.coerceIn(0, 100)
+            if (lyricGlowIntensityPercent == normalized) return
+            lyricGlowIntensityPercent = normalized
+            notifyDataSetChanged()
+        }
+
+        fun setLyricsBoldEnabled(enabled: Boolean) {
+            if (lyricBoldEnabled == enabled) return
+            lyricBoldEnabled = enabled
             notifyDataSetChanged()
         }
 
@@ -2131,7 +2760,17 @@ class PlayerActivity : AppCompatActivity() {
         }
 
         override fun onBindViewHolder(holder: LyricViewHolder, position: Int) {
-            holder.bind(position)
+            holder.bind(position, animateTranslationModeChange = false)
+        }
+
+        override fun onBindViewHolder(holder: LyricViewHolder, position: Int, payloads: MutableList<Any>) {
+            val animateModeChange = payloads.any { it == payloadTranslationMode }
+            holder.bind(position, animateTranslationModeChange = animateModeChange)
+        }
+
+        override fun onViewRecycled(holder: LyricViewHolder) {
+            holder.cancelLineAnimator()
+            super.onViewRecycled(holder)
         }
 
         override fun getItemCount(): Int = items.size
@@ -2139,7 +2778,10 @@ class PlayerActivity : AppCompatActivity() {
         inner class LyricViewHolder(
             private val textView: LyricMaskTextView
         ) : RecyclerView.ViewHolder(textView) {
-            fun bind(position: Int) {
+            private var lineAnimator: ValueAnimator? = null
+            private var lastShowTranslation: Boolean? = null
+
+            fun bind(position: Int, animateTranslationModeChange: Boolean) {
                 val line = items[position]
                 val isCurrent = position == currentIndex
                 val distance = abs(position - currentIndex)
@@ -2154,9 +2796,26 @@ class PlayerActivity : AppCompatActivity() {
                 val backwardPenalty = if (position < currentIndex) 0.08f else 0f
                 val currentLift = if (isCurrent) 0.02f + currentProgress.pow(0.62f) * 0.08f else 0f
                 textView.alpha = (baseAlpha - backwardPenalty + currentLift).coerceIn(0.2f, 1f)
-                textView.maxLines = if (expanded) 4 else 1
-                textView.setSplitTailToNewLineEnabled(expanded)
-                textView.text = line.text
+                val showTranslation = translationMode == LyricsTranslationMode.ORIGINAL_WITH_TRANSLATION
+                val oldHeight = textView.height.takeIf { it > 0 } ?: textView.measuredHeight.takeIf { it > 0 } ?: 0
+                val oldSpacing = textView.lineSpacingExtra
+                textView.maxLines = if (expanded) {
+                    if (showTranslation) 6 else 4
+                } else {
+                    1
+                }
+                val displayText = line.displayText(translationMode)
+                textView.text = displayText
+                textView.textSize = lyricFontSizeSp.toFloat()
+                textView.typeface = if (lyricBoldEnabled) Typeface.DEFAULT_BOLD else Typeface.DEFAULT
+                textView.setGlowIntensityPercent(lyricGlowIntensityPercent)
+                val targetSpacing = if (expanded && showTranslation) dp(3f).toFloat() else 0f
+                textView.setLineSpacing(targetSpacing, 1f)
+                textView.setProgressSections(
+                    originalText = line.originalText,
+                    translatedText = line.translatedText,
+                    bilingualEnabled = showTranslation
+                )
                 textView.setLyricFocusState(
                     isCurrent = isCurrent,
                     distance = distance,
@@ -2166,8 +2825,95 @@ class PlayerActivity : AppCompatActivity() {
                     if (isCurrent) currentProgress else 0f,
                     if (isCurrent) currentProgressRatePerSec else 0f
                 )
-                applyLyricEdgeBlur(textView, expanded = expanded)
-                textView.setOnClickListener { onLineClick(bindingAdapterPosition) }
+                textView.setTag(R.id.tag_lyric_is_current, isCurrent)
+                textView.setTag(R.id.tag_lyric_distance, distance)
+                applyLyricEdgeBlur(textView, expanded = expanded, isCurrent = isCurrent)
+                val baseOffset = lyricLineOffsetsPx[position] ?: 0f
+                val modeChanged = lastShowTranslation != null && lastShowTranslation != showTranslation
+                if (animateTranslationModeChange && modeChanged && expanded && oldHeight > 0 && textView.width > 0) {
+                    animateLineMorph(
+                        startHeight = oldHeight,
+                        startSpacing = oldSpacing,
+                        endSpacing = targetSpacing,
+                        baseOffset = baseOffset,
+                        showingTranslation = showTranslation
+                    )
+                } else {
+                    lineAnimator?.cancel()
+                    lineAnimator = null
+                    textView.layoutParams = textView.layoutParams.apply {
+                        height = ViewGroup.LayoutParams.WRAP_CONTENT
+                    }
+                    textView.translationY = baseOffset
+                }
+                lastShowTranslation = showTranslation
+                textView.setOnClickListener {
+                    val adapterPos = bindingAdapterPosition
+                    if (adapterPos == RecyclerView.NO_POSITION) return@setOnClickListener
+                    onLineClick(adapterPos)
+                }
+            }
+
+            private fun animateLineMorph(
+                startHeight: Int,
+                startSpacing: Float,
+                endSpacing: Float,
+                baseOffset: Float,
+                showingTranslation: Boolean
+            ) {
+                lineAnimator?.cancel()
+                textView.measure(
+                    View.MeasureSpec.makeMeasureSpec(textView.width.coerceAtLeast(1), View.MeasureSpec.EXACTLY),
+                    View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED)
+                )
+                val targetHeight = textView.measuredHeight.takeIf { it > 0 } ?: startHeight
+                if (targetHeight <= 0 || startHeight <= 0 || targetHeight == startHeight) {
+                    textView.layoutParams = textView.layoutParams.apply {
+                        height = ViewGroup.LayoutParams.WRAP_CONTENT
+                    }
+                    textView.translationY = baseOffset
+                    textView.setLineSpacing(endSpacing, 1f)
+                    return
+                }
+                val travel = if (showingTranslation) dp(11f).toFloat() else -dp(9f).toFloat()
+                textView.layoutParams = textView.layoutParams.apply {
+                    height = startHeight
+                }
+                textView.requestLayout()
+                lineAnimator = ValueAnimator.ofFloat(0f, 1f).apply {
+                    duration = 340L
+                    interpolator = LinearInterpolator()
+                    addUpdateListener { animator ->
+                        val t = springEase(animator.animatedFraction)
+                        val nextHeight = (startHeight + (targetHeight - startHeight) * t)
+                            .toInt()
+                            .coerceAtLeast(1)
+                        textView.layoutParams = textView.layoutParams.apply {
+                            height = nextHeight
+                        }
+                        textView.translationY = baseOffset + travel * (1f - t).coerceIn(0f, 1f)
+                        val spacing = startSpacing + (endSpacing - startSpacing) * t
+                        textView.setLineSpacing(spacing, 1f)
+                        textView.requestLayout()
+                    }
+                    doOnEnd {
+                        textView.layoutParams = textView.layoutParams.apply {
+                            height = ViewGroup.LayoutParams.WRAP_CONTENT
+                        }
+                        textView.translationY = baseOffset
+                        textView.setLineSpacing(endSpacing, 1f)
+                        lineAnimator = null
+                    }
+                    start()
+                }
+            }
+
+            fun cancelLineAnimator() {
+                lineAnimator?.cancel()
+                lineAnimator = null
+                textView.layoutParams = textView.layoutParams.apply {
+                    height = ViewGroup.LayoutParams.WRAP_CONTENT
+                }
             }
         }
     }

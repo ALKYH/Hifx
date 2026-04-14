@@ -1,12 +1,14 @@
 ﻿package com.example.hifx
 
 import android.content.Intent
+import android.graphics.Typeface
 import android.os.Bundle
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
 import android.widget.AdapterView
 import android.widget.ArrayAdapter
+import androidx.activity.OnBackPressedCallback
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatDelegate
 import androidx.fragment.app.Fragment
@@ -19,13 +21,14 @@ import com.example.hifx.audio.SettingsUiState
 import com.example.hifx.databinding.FragmentSettingsBinding
 import com.example.hifx.util.AppHaptics
 import kotlinx.coroutines.launch
+import kotlin.math.roundToInt
 
 class SettingsFragment : Fragment() {
     private var _binding: FragmentSettingsBinding? = null
     private val binding get() = _binding!!
 
     private var internalUpdating = false
-    private var selectedSection: SettingsSection = SettingsSection.LIBRARY
+    private var selectedSection: SettingsSection? = null
     private var usbSpinnerIds: List<Int?> = listOf(null)
     private var latestAudioPipelineDetails: String = ""
     private val outputSampleRateOptionsHz = listOf<Int?>(null, 44_100, 48_000, 88_200, 96_000, 176_400, 192_000)
@@ -56,6 +59,7 @@ class SettingsFragment : Fragment() {
 
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         setupMenuActions()
+        setupBackNavigation()
         setupSettingActions()
         val versionName = runCatching {
             requireContext().packageManager.getPackageInfo(requireContext().packageName, 0).versionName
@@ -64,7 +68,7 @@ class SettingsFragment : Fragment() {
             R.string.settings_about_version,
             versionName
         )
-        renderSection(SettingsSection.LIBRARY)
+        renderRootMenu()
         observeSettings()
     }
 
@@ -74,22 +78,51 @@ class SettingsFragment : Fragment() {
     }
 
     private fun setupMenuActions() {
+        binding.buttonMenuAppearance.setOnClickListener {
+            AppHaptics.click(it)
+            openSection(SettingsSection.APPEARANCE)
+        }
+        binding.buttonMenuPlayback.setOnClickListener {
+            AppHaptics.click(it)
+            openSection(SettingsSection.PLAYBACK)
+        }
+        binding.buttonMenuLyrics.setOnClickListener {
+            AppHaptics.click(it)
+            openSection(SettingsSection.LYRICS)
+        }
         binding.buttonMenuLibrary.setOnClickListener {
             AppHaptics.click(it)
-            renderSection(SettingsSection.LIBRARY)
+            openSection(SettingsSection.LIBRARY)
         }
-        binding.buttonMenuAudio.setOnClickListener {
+        binding.buttonMenuOther.setOnClickListener {
             AppHaptics.click(it)
-            renderSection(SettingsSection.AUDIO)
-        }
-        binding.buttonMenuTheme.setOnClickListener {
-            AppHaptics.click(it)
-            renderSection(SettingsSection.THEME)
+            openSection(SettingsSection.OTHER)
         }
         binding.buttonMenuAbout.setOnClickListener {
             AppHaptics.click(it)
-            renderSection(SettingsSection.ABOUT)
+            openSection(SettingsSection.ABOUT)
         }
+        binding.buttonSubmenuBack.setOnClickListener {
+            AppHaptics.click(it)
+            renderRootMenu()
+        }
+    }
+
+    private fun setupBackNavigation() {
+        requireActivity().onBackPressedDispatcher.addCallback(
+            viewLifecycleOwner,
+            object : OnBackPressedCallback(true) {
+                override fun handleOnBackPressed() {
+                    if (selectedSection != null) {
+                        renderRootMenu()
+                        return
+                    }
+                    isEnabled = false
+                    requireActivity().onBackPressedDispatcher.onBackPressed()
+                    isEnabled = true
+                }
+            }
+        )
     }
 
     private fun setupSettingActions() {
@@ -130,6 +163,61 @@ class SettingsFragment : Fragment() {
                     AppHaptics.click(requireContext())
                 }
             }
+        }
+        binding.switchShowLyricsPanel.setOnCheckedChangeListener { _, isChecked ->
+            if (!internalUpdating) {
+                AppHaptics.click(requireContext())
+                AudioEngine.setShowLyricsPanelEnabled(isChecked)
+            }
+        }
+        binding.switchBackgroundDynamic.setOnCheckedChangeListener { _, isChecked ->
+            if (!internalUpdating) {
+                AppHaptics.click(requireContext())
+                AudioEngine.setBackgroundDynamicEnabled(isChecked)
+            }
+        }
+        binding.sliderBackgroundBlur.addOnChangeListener { _, value, fromUser ->
+            if (!fromUser || internalUpdating) {
+                return@addOnChangeListener
+            }
+            AudioEngine.setBackgroundBlurStrength(value.roundToInt())
+        }
+        binding.sliderBackgroundOpacity.addOnChangeListener { _, value, fromUser ->
+            if (!fromUser || internalUpdating) {
+                return@addOnChangeListener
+            }
+            AudioEngine.setBackgroundOpacityPercent(value.roundToInt())
+        }
+        binding.sliderLyricsFontSize.addOnChangeListener { _, value, fromUser ->
+            val sizeSp = value.roundToInt()
+            binding.textLyricsFontSizeValue.text = getString(
+                R.string.settings_lyrics_font_size_value_format,
+                sizeSp
+            )
+            binding.textLyricsFontPreview.textSize = sizeSp.toFloat()
+            if (!fromUser || internalUpdating) {
+                return@addOnChangeListener
+            }
+            AudioEngine.setLyricsFontSizeSp(sizeSp)
+        }
+        binding.switchLyricsBold.setOnCheckedChangeListener { _, isChecked ->
+            binding.textLyricsFontPreview.typeface =
+                if (isChecked) Typeface.DEFAULT_BOLD else Typeface.DEFAULT
+            if (!internalUpdating) {
+                AppHaptics.click(requireContext())
+                AudioEngine.setLyricsBoldEnabled(isChecked)
+            }
+        }
+        binding.sliderLyricsGlowIntensity.addOnChangeListener { _, value, fromUser ->
+            val intensity = value.roundToInt()
+            binding.textLyricsGlowIntensityValue.text = getString(
+                R.string.settings_lyrics_glow_intensity_value_format,
+                intensity
+            )
+            if (!fromUser || internalUpdating) {
+                return@addOnChangeListener
+            }
+            AudioEngine.setLyricsGlowIntensityPercent(intensity)
         }
         binding.switchUsbExclusive.setOnCheckedChangeListener { _, isChecked ->
             if (!internalUpdating) {
@@ -242,6 +330,32 @@ class SettingsFragment : Fragment() {
         binding.switchHiResApi.isChecked = state.hiResApiEnabled
         binding.switchRememberPlayback.isChecked = state.rememberPlaybackSessionEnabled
         binding.switchHapticFeedback.isChecked = state.hapticFeedbackEnabled
+        binding.switchShowLyricsPanel.isChecked = state.showLyricsPanelEnabled
+        binding.switchBackgroundDynamic.isChecked = state.backgroundDynamicEnabled
+        binding.sliderBackgroundBlur.value = state.backgroundBlurStrength.toFloat()
+        binding.sliderBackgroundOpacity.value = state.backgroundOpacityPercent.toFloat()
+        binding.textBackgroundBlurValue.text = getString(
+            R.string.settings_background_blur_value_format,
+            state.backgroundBlurStrength
+        )
+        binding.textBackgroundOpacityValue.text = getString(
+            R.string.settings_background_opacity_value_format,
+            state.backgroundOpacityPercent
+        )
+        binding.sliderLyricsFontSize.value = state.lyricsFontSizeSp.toFloat()
+        binding.textLyricsFontSizeValue.text = getString(
+            R.string.settings_lyrics_font_size_value_format,
+            state.lyricsFontSizeSp
+        )
+        binding.textLyricsFontPreview.textSize = state.lyricsFontSizeSp.toFloat()
+        binding.switchLyricsBold.isChecked = state.lyricsBoldEnabled
+        binding.textLyricsFontPreview.typeface =
+            if (state.lyricsBoldEnabled) Typeface.DEFAULT_BOLD else Typeface.DEFAULT
+        binding.sliderLyricsGlowIntensity.value = state.lyricsGlowIntensityPercent.toFloat()
+        binding.textLyricsGlowIntensityValue.text = getString(
+            R.string.settings_lyrics_glow_intensity_value_format,
+            state.lyricsGlowIntensityPercent
+        )
         binding.textSampleRate.text = getString(
             R.string.settings_sample_rate_value,
             state.outputSampleRateHz?.toString() ?: getString(R.string.unknown_value)
@@ -357,28 +471,47 @@ class SettingsFragment : Fragment() {
             "• " + points.distinct().joinToString(separator = "\n• ")
         }
     }
-    private fun renderSection(section: SettingsSection) {
+    private fun openSection(section: SettingsSection) {
         selectedSection = section
-        binding.sectionLibrary.visibility = if (section == SettingsSection.LIBRARY) View.VISIBLE else View.GONE
-        binding.sectionAudio.visibility = if (section == SettingsSection.AUDIO) View.VISIBLE else View.GONE
-        binding.sectionTheme.visibility = if (section == SettingsSection.THEME) View.VISIBLE else View.GONE
-        binding.sectionAbout.visibility = if (section == SettingsSection.ABOUT) View.VISIBLE else View.GONE
-
-        updateMenuSelectedStyle(binding.buttonMenuLibrary, section == SettingsSection.LIBRARY)
-        updateMenuSelectedStyle(binding.buttonMenuAudio, section == SettingsSection.AUDIO)
-        updateMenuSelectedStyle(binding.buttonMenuTheme, section == SettingsSection.THEME)
-        updateMenuSelectedStyle(binding.buttonMenuAbout, section == SettingsSection.ABOUT)
+        binding.layoutRootMenu.visibility = View.GONE
+        binding.layoutSubmenuHeader.visibility = View.VISIBLE
+        binding.textSubmenuTitle.setText(section.titleResId)
+        renderVisibleSection(section)
     }
 
-    private fun updateMenuSelectedStyle(button: com.google.android.material.button.MaterialButton, selected: Boolean) {
-        button.alpha = if (selected) 1f else 0.65f
+    private fun renderRootMenu() {
+        selectedSection = null
+        binding.layoutSubmenuHeader.visibility = View.GONE
+        binding.layoutRootMenu.visibility = View.VISIBLE
+        renderVisibleSection(null)
+    }
+
+    private fun renderVisibleSection(section: SettingsSection?) {
+        binding.sectionAppearance.visibility = if (section == SettingsSection.APPEARANCE) View.VISIBLE else View.GONE
+        binding.sectionPlayback.visibility = if (section == SettingsSection.PLAYBACK) View.VISIBLE else View.GONE
+        binding.sectionLyrics.visibility = if (section == SettingsSection.LYRICS) View.VISIBLE else View.GONE
+        binding.sectionLibrary.visibility = if (section == SettingsSection.LIBRARY) View.VISIBLE else View.GONE
+        binding.sectionOther.visibility = if (section == SettingsSection.OTHER) View.VISIBLE else View.GONE
+        binding.sectionAbout.visibility = if (section == SettingsSection.ABOUT) View.VISIBLE else View.GONE
     }
 
     private enum class SettingsSection {
+        APPEARANCE,
+        PLAYBACK,
+        LYRICS,
         LIBRARY,
-        AUDIO,
-        THEME,
-        ABOUT
+        OTHER,
+        ABOUT;
+
+        val titleResId: Int
+            get() = when (this) {
+                APPEARANCE -> R.string.settings_appearance_title
+                PLAYBACK -> R.string.settings_playback_title
+                LYRICS -> R.string.settings_lyrics_title
+                LIBRARY -> R.string.settings_library_title
+                OTHER -> R.string.settings_other_title
+                ABOUT -> R.string.settings_about_title
+            }
     }
 }
 

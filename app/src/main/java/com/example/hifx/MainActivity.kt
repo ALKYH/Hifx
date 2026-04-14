@@ -173,6 +173,11 @@ class MainActivity : AppCompatActivity() {
                 }
             }
         })
+        miniPlayerBinding.progressMini.addOnChangeListener { _, value, fromUser ->
+            if (fromUser) {
+                updateMiniProgressFill((value / 1000f).coerceIn(0f, 1f))
+            }
+        }
     }
 
     private fun animateMiniPlayerTrackSwitch(next: Boolean) {
@@ -253,6 +258,7 @@ class MainActivity : AppCompatActivity() {
 
         if (!state.hasMedia) {
             latestDurationMs = 0L
+            updateMiniProgressFill(0f)
             PlayerTransitionState.miniPlayerRectOnScreen = null
             return
         }
@@ -271,7 +277,18 @@ class MainActivity : AppCompatActivity() {
         } else if (!hasDuration && !miniProgressUserSeeking) {
             miniPlayerBinding.progressMini.value = 0f
         }
+        val fillRatio = when {
+            !hasDuration -> 0f
+            miniProgressUserSeeking -> (miniPlayerBinding.progressMini.value / 1000f).coerceIn(0f, 1f)
+            else -> (state.positionMs.toFloat() / state.durationMs.toFloat()).coerceIn(0f, 1f)
+        }
+        updateMiniProgressFill(fillRatio)
         updateMiniPlayerTransitionState()
+    }
+
+    private fun updateMiniProgressFill(ratio: Float) {
+        miniPlayerBinding.viewMiniProgressFill.pivotX = 0f
+        miniPlayerBinding.viewMiniProgressFill.scaleX = ratio.coerceIn(0f, 1f)
     }
 
     private fun applyMiniPlayerVisibility(animated: Boolean) {

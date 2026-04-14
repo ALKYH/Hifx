@@ -16,6 +16,7 @@
         android:src="@drawable/ic_music_note" />
 
     <View
+        android:id="@+id/view_player_bg_overlay"
         android:layout_width="match_parent"
         android:layout_height="match_parent"
         android:background="?attr/colorSurface"
@@ -164,6 +165,21 @@
                         android:contentDescription="@string/action_collapse"
                         android:src="@android:drawable/ic_menu_close_clear_cancel"
                         android:tint="?attr/colorOnSurface"
+                        android:visibility="gone" />
+
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/button_lyrics_translation_toggle"
+                        style="@style/Widget.Material3.Button.TextButton"
+                        android:layout_width="wrap_content"
+                        android:layout_height="36dp"
+                        android:layout_gravity="bottom|end"
+                        android:layout_marginEnd="8dp"
+                        android:layout_marginBottom="8dp"
+                        android:minWidth="0dp"
+                        android:paddingStart="10dp"
+                        android:paddingEnd="10dp"
+                        android:text="@string/player_lyrics_translation_original_only_short"
+                        android:textSize="12sp"
                         android:visibility="gone" />
                 </FrameLayout>
             </com.google.android.material.card.MaterialCardView>

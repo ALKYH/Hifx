@@ -5,8 +5,11 @@ import android.graphics.Color
 import android.graphics.drawable.GradientDrawable
 import android.net.Uri
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.provider.OpenableColumns
 import android.view.LayoutInflater
+import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
 import android.widget.ArrayAdapter
@@ -48,6 +51,8 @@ class EffectsFragment : Fragment() {
     private var selectedEqBandIndex: Int = 0
     private var currentTabPosition: Int = 0
     private var lastEqDotsSignature: String = ""
+    private val speedRepeatHandler = Handler(Looper.getMainLooper())
+    private var speedRepeatTask: Runnable? = null
 
     companion object {
         private const val EQ_FREQ_MIN_HZ = 20f
@@ -100,6 +105,7 @@ class EffectsFragment : Fragment() {
     }
 
     override fun onDestroyView() {
+        stopSpeedAdjustRepeat()
         super.onDestroyView()
         _binding = null
     }
@@ -187,9 +193,34 @@ class EffectsFragment : Fragment() {
             AudioEngine.setSurroundChannelGain(AudioEngine.SURROUND_CHANNEL_REAR_RIGHT, it)
         }
 
-        bindSlider(binding.sliderBass) { AudioEngine.setBassStrength(it) }
-        bindSlider(binding.sliderVirtualizer) { AudioEngine.setVirtualizerStrength(it) }
-        bindSlider(binding.sliderLoudness) { AudioEngine.setLoudnessGainMb(it) }
+        binding.switchLimiterEnabled.setOnCheckedChangeListener { _, checked ->
+            if (!internalUpdating) {
+                AudioEngine.setLimiterEnabled(checked)
+            }
+        }
+        bindSlider(binding.sliderPan) { AudioEngine.setPanPercent(it) }
+        binding.switchPanInvertEnabled.setOnCheckedChangeListener { _, checked ->
+            if (!internalUpdating) {
+                AudioEngine.setPanInvertEnabled(checked)
+            }
+        }
+        binding.switchMonoEnabled.setOnCheckedChangeListener { _, checked ->
+            if (!internalUpdating) {
+                AudioEngine.setMonoEnabled(checked)
+            }
+        }
+        binding.switchPhaseInvertEnabled.setOnCheckedChangeListener { _, checked ->
+            if (!internalUpdating) {
+                AudioEngine.setPhaseInvertEnabled(checked)
+            }
+        }
+        bindSlider(binding.sliderCrossfeed) { AudioEngine.setCrossfeedPercent(it) }
+        binding.switchPlaybackSpeedPitchCompensationEnabled.setOnCheckedChangeListener { _, checked ->
+            if (!internalUpdating) {
+                AudioEngine.setPlaybackSpeedPitchCompensationEnabled(checked)
+            }
+        }
+        setupSpeedAdjustButtons()
 
         binding.switchConvolutionEnabled.setOnCheckedChangeListener { _, checked ->
             if (!internalUpdating) {
@@ -393,12 +424,22 @@ class EffectsFragment : Fragment() {
             state.realtimeReverbMeterPercent
         )
 
-        binding.sliderBass.value = state.bassStrength.toFloat()
-        binding.sliderVirtualizer.value = state.virtualizerStrength.toFloat()
-        binding.sliderLoudness.value = state.loudnessGainMb.toFloat()
-        binding.textBassValue.text = getString(R.string.effect_percent_value, state.bassStrength / 10)
-        binding.textVirtualizerValue.text = getString(R.string.effect_percent_value, state.virtualizerStrength / 10)
-        binding.textLoudnessValue.text = getString(R.string.effect_gain_value, state.loudnessGainMb)
+        binding.switchLimiterEnabled.isChecked = state.limiterEnabled
+        binding.sliderPan.value = state.panPercent.toFloat()
+        binding.textPanValue.text = panValueLabel(state.panPercent)
+        binding.switchPanInvertEnabled.isChecked = state.panInvertEnabled
+        binding.switchMonoEnabled.isChecked = state.monoEnabled
+        binding.switchPhaseInvertEnabled.isChecked = state.phaseInvertEnabled
+        binding.sliderCrossfeed.value = state.crossfeedPercent.toFloat()
+        binding.textCrossfeedValue.text = getString(
+            R.string.effects_crossfeed_value_format,
+            state.crossfeedPercent
+        )
+        binding.switchPlaybackSpeedPitchCompensationEnabled.isChecked = state.playbackSpeedPitchCompensationEnabled
+        binding.textPlaybackSpeedValue.text = getString(
+            R.string.effects_playback_speed_value,
+            state.playbackSpeedPercent / 100f
+        )
 
         binding.textSpatialDistance.text = getString(
             R.string.effects_spatial_distance_value_cm,
@@ -434,6 +475,14 @@ class EffectsFragment : Fragment() {
         renderEqControls(state)
 
         internalUpdating = false
+    }
+
+    private fun panValueLabel(panPercent: Int): String {
+        return when {
+            panPercent > 0 -> getString(R.string.effects_pan_value_right, panPercent)
+            panPercent < 0 -> getString(R.string.effects_pan_value_left, -panPercent)
+            else -> getString(R.string.effects_pan_value_center)
+        }
     }
 
     private fun renderEqControls(state: EffectsUiState) {
@@ -880,6 +929,58 @@ class EffectsFragment : Fragment() {
                 state.spatialRightZ
             )
         }
+    }
+
+    private fun setupSpeedAdjustButtons() {
+        binding.buttonPlaybackSpeedDown.setOnClickListener {
+            if (!internalUpdating) {
+                AudioEngine.adjustPlaybackSpeedByStep(-1)
+            }
+        }
+        binding.buttonPlaybackSpeedUp.setOnClickListener {
+            if (!internalUpdating) {
+                AudioEngine.adjustPlaybackSpeedByStep(1)
+            }
+        }
+
+        binding.buttonPlaybackSpeedDown.setOnLongClickListener {
+            if (internalUpdating) return@setOnLongClickListener false
+            startSpeedAdjustRepeat(-1)
+            true
+        }
+        binding.buttonPlaybackSpeedUp.setOnLongClickListener {
+            if (internalUpdating) return@setOnLongClickListener false
+            startSpeedAdjustRepeat(1)
+            true
+        }
+
+        val touchStopListener = View.OnTouchListener { _, event ->
+            when (event.actionMasked) {
+                MotionEvent.ACTION_UP,
+                MotionEvent.ACTION_CANCEL -> stopSpeedAdjustRepeat()
+            }
+            false
+        }
+        binding.buttonPlaybackSpeedDown.setOnTouchListener(touchStopListener)
+        binding.buttonPlaybackSpeedUp.setOnTouchListener(touchStopListener)
+    }
+
+    private fun startSpeedAdjustRepeat(step: Int) {
+        stopSpeedAdjustRepeat()
+        val task = object : Runnable {
+            override fun run() {
+                if (_binding == null || internalUpdating) return
+                AudioEngine.adjustPlaybackSpeedByStep(step)
+                speedRepeatHandler.postDelayed(this, 90L)
+            }
+        }
+        speedRepeatTask = task
+        speedRepeatHandler.postDelayed(task, 220L)
+    }
+
+    private fun stopSpeedAdjustRepeat() {
+        speedRepeatTask?.let { speedRepeatHandler.removeCallbacks(it) }
+        speedRepeatTask = null
     }
 
     private fun bindSlider(slider: Slider, onUserChange: (Int) -> Unit) {

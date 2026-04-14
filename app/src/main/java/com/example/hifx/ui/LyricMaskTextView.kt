@@ -10,6 +10,7 @@ import androidx.appcompat.widget.AppCompatTextView
 import com.google.android.material.color.MaterialColors
 import kotlin.math.max
 import kotlin.math.min
+import kotlin.math.pow
 import kotlin.math.sin
 
 class LyricMaskTextView @JvmOverloads constructor(
@@ -17,6 +18,10 @@ class LyricMaskTextView @JvmOverloads constructor(
     attrs: AttributeSet? = null,
     defStyleAttr: Int = android.R.attr.textViewStyle
 ) : AppCompatTextView(context, attrs, defStyleAttr) {
+    private enum class ProgressSyncMode {
+        NONE,
+        BILINGUAL_SECTION
+    }
 
     private var sampledProgress: Float = 0f
     private var progressRatePerSec: Float = 0f
@@ -24,10 +29,12 @@ class LyricMaskTextView @JvmOverloads constructor(
     private var renderedProgress: Float = 0f
     private var highlightColor: Int = MaterialColors.getColor(this, com.google.android.material.R.attr.colorPrimary)
     private var progressFrameRunning = false
-    private var splitTailToNewLineEnabled = true
     private var lineIsCurrent = false
     private var lineDistance = Int.MAX_VALUE
     private var lyricsExpanded = false
+    private var glowIntensityFactor = 1f
+    private var progressSyncMode = ProgressSyncMode.NONE
+    private var bilingualBoundaryIndex = -1
     private val progressFrameRunner = object : Runnable {
         override fun run() {
             if (!progressFrameRunning) return
@@ -43,15 +50,6 @@ class LyricMaskTextView @JvmOverloads constructor(
         }
     }
 
-    override fun setText(text: CharSequence?, type: BufferType?) {
-        val displayText = if (splitTailToNewLineEnabled) formatForDisplay(text) else text
-        super.setText(displayText, type)
-    }
-
-    fun setSplitTailToNewLineEnabled(enabled: Boolean) {
-        splitTailToNewLineEnabled = enabled
-    }
-
     fun setLyricFocusState(isCurrent: Boolean, distance: Int, expanded: Boolean) {
         lineIsCurrent = isCurrent
         lineDistance = distance.coerceAtLeast(0)
@@ -62,22 +60,23 @@ class LyricMaskTextView @JvmOverloads constructor(
         translationY = 0f
     }
 
-    private fun formatForDisplay(source: CharSequence?): CharSequence? {
-        if (source.isNullOrEmpty()) return source
-        val raw = source.toString()
-        if (raw.contains('\n')) return source
-        val trimmed = raw.trimEnd()
-        if (trimmed.isEmpty()) return source
-        val lastSpace = trimmed.lastIndexOfAny(charArrayOf(' ', '\u3000'))
-        if (lastSpace <= 0 || lastSpace >= trimmed.lastIndex) return source
-        val head = trimmed.substring(0, lastSpace).trimEnd()
-        val tail = trimmed.substring(lastSpace + 1).trimStart()
-        if (head.isEmpty() || tail.isEmpty()) return source
-        return "$head\n$tail"
+    fun setProgressSections(originalText: String, translatedText: String?, bilingualEnabled: Boolean) {
+        val hasTranslation = bilingualEnabled && !translatedText.isNullOrBlank()
+        if (!hasTranslation || originalText.isBlank()) {
+            progressSyncMode = ProgressSyncMode.NONE
+            bilingualBoundaryIndex = -1
+            return
+        }
+        progressSyncMode = ProgressSyncMode.BILINGUAL_SECTION
+        bilingualBoundaryIndex = originalText.length
     }
 
     fun setLyricProgress(progress: Float) {
         setLyricProgress(progress = progress, ratePerSec = 0f)
+    }
+
+    fun setGlowIntensityPercent(value: Int) {
+        glowIntensityFactor = (value.coerceIn(0, 100) / 100f).coerceIn(0f, 1f)
     }
 
     fun setLyricProgress(progress: Float, ratePerSec: Float) {
@@ -156,10 +155,29 @@ class LyricMaskTextView @JvmOverloads constructor(
             super.onDraw(canvas)
         } else {
             val progress = resolveNonLinearScanProgress(renderedProgress)
-            val frontier = (progress * build.unitCount.toFloat()).coerceIn(0f, build.unitCount.toFloat())
-            drawBaseLayerWithoutSwept(canvas, content, build, frontier, baseColor)
-            if (frontier > 0f) {
-                drawGlyphProgressOverlay(canvas, content, build, frontier)
+            val twoLineSyncProgress = shouldUseTwoLineSynchronizedProgress(content)
+            drawCurrentLineAura(
+                canvas = canvas,
+                textLayout = textLayout,
+                content = content,
+                progress = progress
+            )
+            drawBaseLayerWithoutSwept(
+                canvas = canvas,
+                content = content,
+                build = build,
+                progress = progress,
+                baseColor = baseColor,
+                twoLineSyncProgress = twoLineSyncProgress
+            )
+            if (progress > 0f) {
+                drawGlyphProgressOverlay(
+                    canvas = canvas,
+                    content = content,
+                    build = build,
+                    progress = progress,
+                    twoLineSyncProgress = twoLineSyncProgress
+                )
             }
         }
 
@@ -168,15 +186,81 @@ class LyricMaskTextView @JvmOverloads constructor(
         paint.clearShadowLayer()
     }
 
+    private fun drawCurrentLineAura(
+        canvas: Canvas,
+        textLayout: Layout,
+        content: CharSequence,
+        progress: Float
+    ) {
+        if (!lineIsCurrent || progress <= 0f) return
+        val save = canvas.save()
+        canvas.clipRect(
+            totalPaddingLeft,
+            totalPaddingTop,
+            width - totalPaddingRight,
+            height - totalPaddingBottom
+        )
+        canvas.translate(totalPaddingLeft.toFloat(), totalPaddingTop.toFloat())
+
+        val eased = easeOutCubic(progress.coerceIn(0f, 1f))
+        val intensityAlpha = glowIntensityFactor.pow(0.86f)
+        val intensityBoost = (0.72f + intensityAlpha * 0.7f).coerceIn(0.72f, 1.42f)
+        val auraAlphaBase = ((0.06f + eased * 0.18f) * intensityAlpha).coerceIn(0f, 0.28f)
+        val auraRadiusBase = textSize * (0.11f + eased * 0.05f) * intensityBoost
+        val auraColor = blendColor(highlightColor, Color.WHITE, 0.34f)
+        val contentWidth = (width - totalPaddingLeft - totalPaddingRight).toFloat().coerceAtLeast(1f)
+        val contentHeight = (height - totalPaddingTop - totalPaddingBottom).toFloat().coerceAtLeast(1f)
+
+        paint.color = auraColor
+
+        for (line in 0 until textLayout.lineCount) {
+            val start = textLayout.getLineStart(line)
+            val end = textLayout.getLineEnd(line).coerceAtMost(content.length)
+            if (end <= start) continue
+            val baseline = textLayout.getLineBaseline(line).toFloat()
+            val drawX = textLayout.getLineLeft(line)
+            val lineTop = textLayout.getLineTop(line).toFloat()
+            val lineBottom = textLayout.getLineBottom(line).toFloat()
+            val lineLeft = textLayout.getLineLeft(line)
+            val lineRight = textLayout.getLineRight(line)
+            val nearestEdge = min(
+                min(lineLeft, contentWidth - lineRight),
+                min(lineTop, contentHeight - lineBottom)
+            ).coerceAtLeast(0f)
+            val edgeFactor = ((nearestEdge / (textSize * 0.92f).coerceAtLeast(1f)).coerceIn(0f, 1f)).pow(1.55f)
+            if (edgeFactor <= 0.02f) continue
+            val auraAlpha = auraAlphaBase * edgeFactor
+            val auraRadius = (auraRadiusBase * (0.56f + edgeFactor * 0.44f)).coerceAtLeast(0.45f)
+            paint.alpha = (255f * auraAlpha).toInt().coerceIn(0, 255)
+            paint.setShadowLayer(
+                auraRadius,
+                0f,
+                0f,
+                applyAlpha(
+                    blendColor(highlightColor, Color.WHITE, 0.42f),
+                    ((0.2f + eased * 0.34f) * edgeFactor * intensityAlpha).coerceIn(0f, 0.68f)
+                )
+            )
+            canvas.drawText(content, start, end, drawX, baseline, paint)
+        }
+        paint.clearShadowLayer()
+        canvas.restoreToCount(save)
+    }
+
     private data class UnitSpan(
         val start: Int,
-        val end: Int
+        val end: Int,
+        val section: Int
     )
 
     private data class RenderUnitFragment(
         val start: Int,
         val end: Int,
         val unitIndex: Int,
+        val unitIndexInLine: Int,
+        val unitIndexInSection: Int,
+        val lineUnitCount: Int,
+        val sectionUnitCount: Int,
         val lineTop: Float,
         val lineBottom: Float,
         val baseline: Float,
@@ -194,8 +278,9 @@ class LyricMaskTextView @JvmOverloads constructor(
         canvas: Canvas,
         content: CharSequence,
         build: RenderUnitBuild,
-        frontier: Float,
-        baseColor: Int
+        progress: Float,
+        baseColor: Int,
+        twoLineSyncProgress: Boolean
     ) {
         val save = canvas.save()
         canvas.clipRect(
@@ -211,7 +296,12 @@ class LyricMaskTextView @JvmOverloads constructor(
         paint.clearShadowLayer()
 
         for (fragment in build.fragments) {
-            val unitProgressRaw = frontier - fragment.unitIndex.toFloat()
+            val unitProgressRaw = resolveUnitProgressRaw(
+                fragment = fragment,
+                progress = progress,
+                unitCount = build.unitCount,
+                twoLineSyncProgress = twoLineSyncProgress
+            )
             val drawX = if (fragment.rtl) fragment.right else fragment.left
             when {
                 unitProgressRaw <= 0f -> {
@@ -244,9 +334,10 @@ class LyricMaskTextView @JvmOverloads constructor(
         canvas: Canvas,
         content: CharSequence,
         build: RenderUnitBuild,
-        frontier: Float
+        progress: Float,
+        twoLineSyncProgress: Boolean
     ) {
-        if (frontier <= 0f) return
+        if (progress <= 0f) return
 
         val save = canvas.save()
         canvas.clipRect(
@@ -258,7 +349,12 @@ class LyricMaskTextView @JvmOverloads constructor(
         canvas.translate(totalPaddingLeft.toFloat(), totalPaddingTop.toFloat())
 
         for (fragment in build.fragments) {
-            val unitProgressRaw = frontier - fragment.unitIndex.toFloat()
+            val unitProgressRaw = resolveUnitProgressRaw(
+                fragment = fragment,
+                progress = progress,
+                unitCount = build.unitCount,
+                twoLineSyncProgress = twoLineSyncProgress
+            )
             val reveal = unitProgressRaw.coerceIn(0f, 1f)
             if (reveal <= 0f) continue
             drawUnitFragmentOverlay(
@@ -278,6 +374,30 @@ class LyricMaskTextView @JvmOverloads constructor(
         if (logicalUnits.isEmpty()) {
             return RenderUnitBuild(emptyList(), 0)
         }
+        val unitLineIndexes = IntArray(logicalUnits.size) { 0 }
+        val lineUnitCounts = mutableMapOf<Int, Int>()
+        logicalUnits.forEachIndexed { index, unit ->
+            val line = textLayout.getLineForOffset(unit.start)
+            unitLineIndexes[index] = line
+            lineUnitCounts[line] = (lineUnitCounts[line] ?: 0) + 1
+        }
+        val lineRunningIndexes = mutableMapOf<Int, Int>()
+        val unitIndexInLine = IntArray(logicalUnits.size) { 0 }
+        val sectionRunningIndexes = mutableMapOf<Int, Int>()
+        val unitIndexInSection = IntArray(logicalUnits.size) { 0 }
+        val sectionUnitCounts = mutableMapOf<Int, Int>()
+        logicalUnits.indices.forEach { index ->
+            val line = unitLineIndexes[index]
+            val running = lineRunningIndexes[line] ?: 0
+            unitIndexInLine[index] = running
+            lineRunningIndexes[line] = running + 1
+
+            val section = logicalUnits[index].section
+            val sectionRunning = sectionRunningIndexes[section] ?: 0
+            unitIndexInSection[index] = sectionRunning
+            sectionRunningIndexes[section] = sectionRunning + 1
+            sectionUnitCounts[section] = (sectionUnitCounts[section] ?: 0) + 1
+        }
         val fragments = ArrayList<RenderUnitFragment>(logicalUnits.size * 2)
         logicalUnits.forEachIndexed { unitIndex, unit ->
             var cursor = unit.start
@@ -295,6 +415,10 @@ class LyricMaskTextView @JvmOverloads constructor(
                         start = cursor,
                         end = lineEnd,
                         unitIndex = unitIndex,
+                        unitIndexInLine = unitIndexInLine[unitIndex],
+                        unitIndexInSection = unitIndexInSection[unitIndex],
+                        lineUnitCount = lineUnitCounts[line] ?: 1,
+                        sectionUnitCount = sectionUnitCounts[unit.section] ?: 1,
                         lineTop = textLayout.getLineTop(line).toFloat(),
                         lineBottom = textLayout.getLineBottom(line).toFloat(),
                         baseline = textLayout.getLineBaseline(line).toFloat(),
@@ -311,6 +435,7 @@ class LyricMaskTextView @JvmOverloads constructor(
 
     private fun buildLogicalUnits(content: CharSequence): List<UnitSpan> {
         val units = mutableListOf<UnitSpan>()
+        val boundary = bilingualBoundaryIndex
         var offset = 0
         while (offset < content.length) {
             val codePoint = Character.codePointAt(content, offset)
@@ -319,10 +444,50 @@ class LyricMaskTextView @JvmOverloads constructor(
                 offset += step
                 continue
             }
-            units += UnitSpan(start = offset, end = offset + step)
+            val section = if (
+                progressSyncMode == ProgressSyncMode.BILINGUAL_SECTION &&
+                boundary >= 0 &&
+                offset > boundary
+            ) {
+                1
+            } else {
+                0
+            }
+            units += UnitSpan(start = offset, end = offset + step, section = section)
             offset += step
         }
         return units
+    }
+
+    private fun resolveUnitProgressRaw(
+        fragment: RenderUnitFragment,
+        progress: Float,
+        unitCount: Int,
+        twoLineSyncProgress: Boolean
+    ): Float {
+        val clamped = progress.coerceIn(0f, 1f)
+        return if (progressSyncMode == ProgressSyncMode.BILINGUAL_SECTION) {
+            val frontier = clamped * fragment.sectionUnitCount.coerceAtLeast(1).toFloat()
+            frontier - fragment.unitIndexInSection.toFloat()
+        } else if (twoLineSyncProgress) {
+            val frontier = clamped * fragment.lineUnitCount.coerceAtLeast(1).toFloat()
+            frontier - fragment.unitIndexInLine.toFloat()
+        } else {
+            val frontier = clamped * unitCount.coerceAtLeast(1).toFloat()
+            frontier - fragment.unitIndex.toFloat()
+        }
+    }
+
+    private fun shouldUseTwoLineSynchronizedProgress(content: CharSequence): Boolean {
+        if (progressSyncMode == ProgressSyncMode.BILINGUAL_SECTION) {
+            return false
+        }
+        // Only sync when text is exactly "original + '\n' + translation".
+        var newlineCount = 0
+        content.forEach { ch ->
+            if (ch == '\n') newlineCount++
+        }
+        return newlineCount == 1
     }
 
     private fun drawUnitFragmentOverlay(
@@ -340,14 +505,45 @@ class LyricMaskTextView @JvmOverloads constructor(
         val motion = resolveUnitMotion(unitProgressRaw, lineWeight)
         val scale = motion.scale
         val lift = motion.lift
+        val disableBlurForCurrent = false
+        val passed = (unitProgressRaw - 1f).coerceAtLeast(0f)
+        val intensityAlpha = glowIntensityFactor.pow(0.86f)
+        val intensityBoost = (0.72f + intensityAlpha * 0.7f).coerceIn(0.72f, 1.42f)
+        val rawDecay = (1f / (1f + passed * if (lineIsCurrent) 3.8f else 2.9f)).pow(1.85f)
+        // Keep a tiny afterglow for scanned characters.
+        val afterglowFloor = if (lineIsCurrent) 0.1f else 0.06f
+        val decay = if (passed > 0f) {
+            afterglowFloor + (1f - afterglowFloor) * rawDecay
+        } else {
+            rawDecay
+        }
+        val scannedTailAlpha = if (passed > 0f) {
+            (((0.016f + 0.042f * rawDecay) * if (lineIsCurrent) 1f else 0.82f) * intensityAlpha)
+                .coerceIn(0f, 0.075f)
+        } else {
+            0f
+        }
+        val scannedTailRadius = if (passed > 0f) {
+            textSize * (0.032f + 0.03f * rawDecay) * intensityBoost
+        } else {
+            0f
+        }
+        val scannedTailInflate = textSize * 0.014f * (0.9f + 0.45f * intensityAlpha)
 
         val revealEase = easeOutCubic(reveal)
-        val blurAlpha = (0.03f + (1f - revealEase) * 0.08f + motion.energy * 0.1f).coerceIn(0f, 0.2f)
-        val glowAlpha = (0.06f + motion.energy * 0.14f).coerceIn(0f, 0.26f)
+        val blurAlpha = if (disableBlurForCurrent) 0f else
+            ((0.03f + (1f - revealEase) * 0.08f + motion.energy * 0.1f) * decay * intensityAlpha).coerceIn(0f, 0.24f)
+        // Keep current-line glow visible without Gaussian blur.
+        val glowAlpha = if (disableBlurForCurrent)
+            ((0.08f + motion.energy * 0.08f) * decay * intensityAlpha).coerceIn(0f, 0.24f)
+        else
+            ((0.08f + motion.energy * if (lineIsCurrent) 0.22f else 0.14f) * decay * intensityAlpha).coerceIn(0f, 0.4f)
         val solidAlpha = if (unitProgressRaw >= 1f) 1f else (0.22f + revealEase * 0.78f).coerceIn(0f, 1f)
-        val blurRadius = textSize * (0.06f + motion.energy * if (lineIsCurrent) 0.2f else 0.13f)
-        val glowRadius = textSize * (0.04f + motion.energy * if (lineIsCurrent) 0.12f else 0.08f)
-        val clipInflate = textSize * (0.03f + motion.energy * 0.05f)
+        val blurRadius = if (disableBlurForCurrent) 0f else
+            textSize * (0.08f + motion.energy * if (lineIsCurrent) 0.26f else 0.13f) * decay * intensityBoost
+        val glowRadius = if (disableBlurForCurrent) 0f else
+            textSize * (0.06f + motion.energy * if (lineIsCurrent) 0.18f else 0.08f) * decay * intensityBoost
+        val clipInflate = textSize * (0.02f + motion.energy * 0.04f) * (0.62f + 0.38f * decay) * (0.9f + 0.45f * intensityAlpha)
 
         drawGlyphPass(
             canvas = canvas,
@@ -370,7 +566,7 @@ class LyricMaskTextView @JvmOverloads constructor(
             color = blendColor(highlightColor, Color.WHITE, 0.4f),
             alpha = blurAlpha,
             shadowRadiusPx = blurRadius,
-            shadowColor = applyAlpha(blendColor(highlightColor, Color.WHITE, 0.46f), 0.62f),
+            shadowColor = applyAlpha(blendColor(highlightColor, Color.WHITE, 0.46f), (0.62f * intensityAlpha).coerceIn(0f, 0.75f)),
             clipInflatePx = clipInflate
         )
 
@@ -395,9 +591,36 @@ class LyricMaskTextView @JvmOverloads constructor(
             color = blendColor(highlightColor, Color.WHITE, 0.23f),
             alpha = glowAlpha,
             shadowRadiusPx = glowRadius,
-            shadowColor = applyAlpha(blendColor(highlightColor, Color.WHITE, 0.18f), 0.58f),
+            shadowColor = applyAlpha(blendColor(highlightColor, Color.WHITE, 0.18f), (0.58f * intensityAlpha).coerceIn(0f, 0.72f)),
             clipInflatePx = clipInflate * 0.5f
         )
+
+        if (scannedTailAlpha > 0f) {
+            drawGlyphPass(
+                canvas = canvas,
+                content = content,
+                start = fragment.start,
+                end = fragment.end,
+                drawX = if (fragment.rtl) fragment.right else fragment.left,
+                baseline = fragment.baseline,
+                lineTop = fragment.lineTop,
+                lineBottom = fragment.lineBottom,
+                left = fragment.left,
+                right = fragment.right,
+                width = width,
+                centerX = centerX,
+                centerY = centerY,
+                reveal = 1f,
+                scale = scale,
+                lift = lift,
+                rtl = fragment.rtl,
+                color = blendColor(highlightColor, Color.WHITE, 0.08f),
+                alpha = scannedTailAlpha,
+                shadowRadiusPx = scannedTailRadius,
+                shadowColor = applyAlpha(blendColor(highlightColor, Color.WHITE, 0.24f), (0.4f * intensityAlpha).coerceIn(0f, 0.52f)),
+                clipInflatePx = scannedTailInflate
+            )
+        }
 
         drawGlyphPass(
             canvas = canvas,
