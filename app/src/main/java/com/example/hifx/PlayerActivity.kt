@@ -1583,52 +1583,44 @@ class PlayerActivity : AppCompatActivity() {
     }
 
     private fun seekToFlacStream(input: InputStream): Boolean {
-        if (!input.markSupported()) return false
-        input.mark(16)
-        val probe = ByteArray(10)
-        val read = input.read(probe)
-        if (read < 4) return false
+        val marker = ByteArray(4)
+        if (!readFully(input, marker)) return false
 
         val startsWithFlac =
-            probe[0].toInt().toChar() == 'f' &&
-            probe[1].toInt().toChar() == 'L' &&
-            probe[2].toInt().toChar() == 'a' &&
-            probe[3].toInt().toChar() == 'C'
+            marker[0].toInt().toChar() == 'f' &&
+            marker[1].toInt().toChar() == 'L' &&
+            marker[2].toInt().toChar() == 'a' &&
+            marker[3].toInt().toChar() == 'C'
         if (startsWithFlac) {
-            input.reset()
+            // Cursor is now exactly at the first FLAC metadata block header.
             return true
         }
 
         val startsWithId3 =
-            read >= 10 &&
-            probe[0].toInt().toChar() == 'I' &&
-            probe[1].toInt().toChar() == 'D' &&
-            probe[2].toInt().toChar() == '3'
-        if (!startsWithId3) {
-            input.reset()
-            return false
-        }
+            marker[0].toInt().toChar() == 'I' &&
+            marker[1].toInt().toChar() == 'D' &&
+            marker[2].toInt().toChar() == '3'
+        if (!startsWithId3) return false
 
+        val id3RestHeader = ByteArray(6)
+        if (!readFully(input, id3RestHeader)) return false
         var tagSize =
-            ((probe[6].toInt() and 0x7F) shl 21) or
-            ((probe[7].toInt() and 0x7F) shl 14) or
-            ((probe[8].toInt() and 0x7F) shl 7) or
-            (probe[9].toInt() and 0x7F)
-        if ((probe[5].toInt() and 0x10) != 0) {
-            tagSize += 10
+            ((id3RestHeader[2].toInt() and 0x7F) shl 21) or
+            ((id3RestHeader[3].toInt() and 0x7F) shl 14) or
+            ((id3RestHeader[4].toInt() and 0x7F) shl 7) or
+            (id3RestHeader[5].toInt() and 0x7F)
+        if ((id3RestHeader[1].toInt() and 0x10) != 0) {
+            tagSize += 10 // ID3 footer
         }
 
         if (!skipFully(input, tagSize.toLong())) return false
 
         val flac = ByteArray(4)
         if (!readFully(input, flac)) return false
-        val valid =
-            flac[0].toInt().toChar() == 'f' &&
+        return flac[0].toInt().toChar() == 'f' &&
             flac[1].toInt().toChar() == 'L' &&
             flac[2].toInt().toChar() == 'a' &&
             flac[3].toInt().toChar() == 'C'
-        if (!valid) return false
-        return true
     }
 
     private fun parseFlacVorbisCommentForLyrics(block: ByteArray): LyricLoadResult? {
@@ -1650,10 +1642,17 @@ class PlayerActivity : AppCompatActivity() {
             "LYRIC",
             "UNSYNCEDLYRICS",
             "UNSYNCED_LYRICS",
+            "UNSYNCED LYRICS",
             "SYNCEDLYRICS",
+            "SYNCED LYRICS",
             "SYNCHRONIZEDLYRICS",
+            "SYNCHRONIZED LYRICS",
             "LRC"
         )
+        val keyNormalizeRegex = Regex("""[\s_\-]""")
+        val normalizedDirectKeys = directKeys.mapTo(mutableSetOf()) {
+            it.replace(keyNormalizeRegex, "")
+        }
 
         var fallback: LyricLoadResult? = null
         repeat(commentCount.coerceAtMost(2048)) {
@@ -1670,10 +1669,11 @@ class PlayerActivity : AppCompatActivity() {
             val sep = entry.indexOf('=')
             if (sep <= 0 || sep >= entry.lastIndex) return@repeat
             val key = entry.substring(0, sep).trim().uppercase(Locale.ROOT)
+            val normalizedKey = key.replace(keyNormalizeRegex, "")
             val value = entry.substring(sep + 1).trim()
             if (value.isBlank()) return@repeat
 
-            if (key in directKeys) {
+            if (key in directKeys || normalizedKey in normalizedDirectKeys) {
                 return LyricLoadResult(value, "flac:vorbis:$key")
             }
 
