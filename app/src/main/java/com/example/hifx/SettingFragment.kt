@@ -18,6 +18,7 @@ import androidx.lifecycle.repeatOnLifecycle
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.example.hifx.audio.AudioEngine
 import com.example.hifx.audio.SettingsUiState
+import com.example.hifx.audio.TopBarVisualizationMode
 import com.example.hifx.databinding.FragmentSettingsBinding
 import com.example.hifx.util.AppHaptics
 import kotlinx.coroutines.launch
@@ -30,10 +31,23 @@ class SettingsFragment : Fragment() {
     private var internalUpdating = false
     private var selectedSection: SettingsSection? = null
     private var usbSpinnerIds: List<Int?> = listOf(null)
+    private var usbDirectSampleRateOptionsHz: List<Int?> = listOf(null)
+    private var usbDirectBitDepthOptions: List<Int?> = listOf(null)
     private var latestAudioPipelineDetails: String = ""
     private val outputSampleRateOptionsHz = listOf<Int?>(null, 44_100, 48_000, 88_200, 96_000, 176_400, 192_000)
     private val bitDepthOptions = listOf(16, 32)
+    private val usbResamplerAlgorithmOptions = listOf(
+        com.example.hifx.audio.USB_RESAMPLER_ALGORITHM_NEAREST,
+        com.example.hifx.audio.USB_RESAMPLER_ALGORITHM_LINEAR,
+        com.example.hifx.audio.USB_RESAMPLER_ALGORITHM_CUBIC
+    )
     private val bitrateOptionsKbps = listOf<Int?>(null, 320, 512, 768, 1024, 1536, 3072, 6144, 9216)
+    private val visualizationModeOptions = listOf(
+        TopBarVisualizationMode.LEVEL_METER,
+        TopBarVisualizationMode.ANALOG_METER,
+        TopBarVisualizationMode.WAVEFORM,
+        TopBarVisualizationMode.BARS
+    )
 
     private val openTreeLauncher =
         registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
@@ -89,6 +103,10 @@ class SettingsFragment : Fragment() {
         binding.buttonMenuLyrics.setOnClickListener {
             AppHaptics.click(it)
             openSection(SettingsSection.LYRICS)
+        }
+        binding.buttonMenuVisualization.setOnClickListener {
+            AppHaptics.click(it)
+            openSection(SettingsSection.VISUALIZATION)
         }
         binding.buttonMenuLibrary.setOnClickListener {
             AppHaptics.click(it)
@@ -164,10 +182,48 @@ class SettingsFragment : Fragment() {
                 }
             }
         }
+        binding.switchHapticAudio.setOnCheckedChangeListener { _, isChecked ->
+            if (!internalUpdating) {
+                if (isChecked) {
+                    AppHaptics.click(requireContext())
+                }
+                AudioEngine.setHapticAudioEnabled(isChecked)
+            }
+        }
+        binding.switchDirectDacGoldTheme.setOnCheckedChangeListener { _, isChecked ->
+            if (!internalUpdating) {
+                AppHaptics.click(requireContext())
+                AudioEngine.setDirectDacGoldThemeEnabled(isChecked)
+            }
+        }
         binding.switchShowLyricsPanel.setOnCheckedChangeListener { _, isChecked ->
             if (!internalUpdating) {
                 AppHaptics.click(requireContext())
                 AudioEngine.setShowLyricsPanelEnabled(isChecked)
+            }
+        }
+        binding.switchLyricsGlow.setOnCheckedChangeListener { _, isChecked ->
+            if (!internalUpdating) {
+                AppHaptics.click(requireContext())
+                AudioEngine.setLyricsGlowEnabled(isChecked)
+            }
+        }
+        binding.switchShowLyricsScanHead.setOnCheckedChangeListener { _, isChecked ->
+            if (!internalUpdating) {
+                AppHaptics.click(requireContext())
+                AudioEngine.setShowLyricsScanHeadEnabled(isChecked)
+            }
+        }
+        binding.switchShowVisualization.setOnCheckedChangeListener { _, isChecked ->
+            if (!internalUpdating) {
+                AppHaptics.click(requireContext())
+                AudioEngine.setShowVisualizationEnabled(isChecked)
+            }
+        }
+        binding.switchShowStreamInfo.setOnCheckedChangeListener { _, isChecked ->
+            if (!internalUpdating) {
+                AppHaptics.click(requireContext())
+                AudioEngine.setShowStreamInfoEnabled(isChecked)
             }
         }
         binding.switchBackgroundDynamic.setOnCheckedChangeListener { _, isChecked ->
@@ -246,6 +302,27 @@ class SettingsFragment : Fragment() {
             AudioEngine.setThemeMode(mode)
             AppCompatDelegate.setDefaultNightMode(mode)
         }
+        binding.spinnerVisualizationMode.adapter = ArrayAdapter(
+            requireContext(),
+            android.R.layout.simple_spinner_dropdown_item,
+            listOf(
+                getString(R.string.settings_visualization_mode_level_meter),
+                getString(R.string.settings_visualization_mode_analog_meter),
+                getString(R.string.settings_visualization_mode_waveform),
+                getString(R.string.settings_visualization_mode_bars)
+            )
+        )
+        binding.spinnerVisualizationMode.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+            override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
+                if (!internalUpdating) {
+                    AudioEngine.setTopBarVisualizationMode(
+                        visualizationModeOptions.getOrElse(position) { TopBarVisualizationMode.LEVEL_METER }
+                    )
+                }
+            }
+
+            override fun onNothingSelected(parent: AdapterView<*>?) = Unit
+        }
     }
 
     private fun setupAudioSelectionControls() {
@@ -311,6 +388,45 @@ class SettingsFragment : Fragment() {
 
             override fun onNothingSelected(parent: AdapterView<*>?) = Unit
         }
+
+        binding.spinnerUsbDirectSampleRate.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+            override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
+                if (!internalUpdating) {
+                    AudioEngine.setPreferredUsbDirectSampleRateHz(usbDirectSampleRateOptionsHz.getOrNull(position))
+                }
+            }
+
+            override fun onNothingSelected(parent: AdapterView<*>?) = Unit
+        }
+
+        binding.spinnerUsbDirectBitDepth.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+            override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
+                if (!internalUpdating) {
+                    AudioEngine.setPreferredUsbDirectBitDepth(usbDirectBitDepthOptions.getOrNull(position))
+                }
+            }
+
+            override fun onNothingSelected(parent: AdapterView<*>?) = Unit
+        }
+
+        binding.spinnerUsbResampleAlgorithm.adapter = ArrayAdapter(
+            requireContext(),
+            android.R.layout.simple_spinner_dropdown_item,
+            listOf("Nearest", "Linear", "Cubic")
+        )
+        binding.spinnerUsbResampleAlgorithm.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+            override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
+                if (!internalUpdating) {
+                    AudioEngine.setPreferredUsbResampleAlgorithm(
+                        usbResamplerAlgorithmOptions.getOrElse(position) {
+                            com.example.hifx.audio.USB_RESAMPLER_ALGORITHM_LINEAR
+                        }
+                    )
+                }
+            }
+
+            override fun onNothingSelected(parent: AdapterView<*>?) = Unit
+        }
     }
 
     private fun observeSettings() {
@@ -330,7 +446,15 @@ class SettingsFragment : Fragment() {
         binding.switchHiResApi.isChecked = state.hiResApiEnabled
         binding.switchRememberPlayback.isChecked = state.rememberPlaybackSessionEnabled
         binding.switchHapticFeedback.isChecked = state.hapticFeedbackEnabled
+        binding.switchHapticAudio.isChecked = state.hapticAudioEnabled
+        binding.switchDirectDacGoldTheme.isChecked = state.directDacGoldThemeEnabled
         binding.switchShowLyricsPanel.isChecked = state.showLyricsPanelEnabled
+        binding.switchLyricsGlow.isChecked = state.lyricsGlowEnabled
+        binding.switchShowLyricsScanHead.isChecked = state.showLyricsScanHeadEnabled
+        binding.switchShowStreamInfo.isChecked = state.showStreamInfoEnabled
+        binding.switchShowVisualization.isChecked = state.showVisualizationEnabled
+        val visualizationModeIndex = visualizationModeOptions.indexOf(state.topBarVisualizationMode).coerceAtLeast(0)
+        binding.spinnerVisualizationMode.setSelection(visualizationModeIndex, false)
         binding.switchBackgroundDynamic.isChecked = state.backgroundDynamicEnabled
         binding.sliderBackgroundBlur.value = state.backgroundBlurStrength.toFloat()
         binding.sliderBackgroundOpacity.value = state.backgroundOpacityPercent.toFloat()
@@ -379,6 +503,9 @@ class SettingsFragment : Fragment() {
             R.string.settings_active_route_value,
             state.activeOutputRouteLabel
         )
+        binding.textUsbDirectCapability.text = state.usbDirectCapabilitySummary
+        val algorithmIndex = usbResamplerAlgorithmOptions.indexOf(state.preferredUsbResampleAlgorithm).coerceAtLeast(0)
+        binding.spinnerUsbResampleAlgorithm.setSelection(algorithmIndex, false)
         binding.switchUsbExclusive.isChecked = state.usbExclusiveModeEnabled
         val hasSelectedUsb = state.preferredUsbDeviceId != null
         val canToggleExclusive = hasSelectedUsb
@@ -422,6 +549,38 @@ class SettingsFragment : Fragment() {
         )
         val selectedIndex = usbSpinnerIds.indexOf(state.preferredUsbDeviceId).takeIf { it >= 0 } ?: 0
         binding.spinnerUsbDac.setSelection(selectedIndex, false)
+
+        usbDirectSampleRateOptionsHz = listOf(null) + state.usbDirectSampleRateOptionsHz
+        binding.spinnerUsbDirectSampleRate.adapter = ArrayAdapter(
+            requireContext(),
+            android.R.layout.simple_spinner_dropdown_item,
+            usbDirectSampleRateOptionsHz.map { sampleRate ->
+                if (sampleRate == null) {
+                    getString(R.string.settings_auto_value)
+                } else {
+                    "${sampleRate / 1000.0} kHz"
+                }
+            }
+        )
+        val usbDirectSampleRateIndex = usbDirectSampleRateOptionsHz.indexOf(state.preferredUsbDirectSampleRateHz)
+            .takeIf { it >= 0 } ?: 0
+        binding.spinnerUsbDirectSampleRate.setSelection(usbDirectSampleRateIndex, false)
+
+        usbDirectBitDepthOptions = listOf(null) + state.usbDirectBitDepthOptions
+        binding.spinnerUsbDirectBitDepth.adapter = ArrayAdapter(
+            requireContext(),
+            android.R.layout.simple_spinner_dropdown_item,
+            usbDirectBitDepthOptions.map { bitDepth ->
+                if (bitDepth == null) {
+                    getString(R.string.settings_auto_value)
+                } else {
+                    "${bitDepth}-bit"
+                }
+            }
+        )
+        val usbDirectBitDepthIndex = usbDirectBitDepthOptions.indexOf(state.preferredUsbDirectBitDepth)
+            .takeIf { it >= 0 } ?: 0
+        binding.spinnerUsbDirectBitDepth.setSelection(usbDirectBitDepthIndex, false)
     }
 
     private fun showAudioPipelineDetailsDialog() {
@@ -490,6 +649,7 @@ class SettingsFragment : Fragment() {
         binding.sectionAppearance.visibility = if (section == SettingsSection.APPEARANCE) View.VISIBLE else View.GONE
         binding.sectionPlayback.visibility = if (section == SettingsSection.PLAYBACK) View.VISIBLE else View.GONE
         binding.sectionLyrics.visibility = if (section == SettingsSection.LYRICS) View.VISIBLE else View.GONE
+        binding.sectionVisualization.visibility = if (section == SettingsSection.VISUALIZATION) View.VISIBLE else View.GONE
         binding.sectionLibrary.visibility = if (section == SettingsSection.LIBRARY) View.VISIBLE else View.GONE
         binding.sectionOther.visibility = if (section == SettingsSection.OTHER) View.VISIBLE else View.GONE
         binding.sectionAbout.visibility = if (section == SettingsSection.ABOUT) View.VISIBLE else View.GONE
@@ -499,6 +659,7 @@ class SettingsFragment : Fragment() {
         APPEARANCE,
         PLAYBACK,
         LYRICS,
+        VISUALIZATION,
         LIBRARY,
         OTHER,
         ABOUT;
@@ -508,6 +669,7 @@ class SettingsFragment : Fragment() {
                 APPEARANCE -> R.string.settings_appearance_title
                 PLAYBACK -> R.string.settings_playback_title
                 LYRICS -> R.string.settings_lyrics_title
+                VISUALIZATION -> R.string.settings_visualization_title
                 LIBRARY -> R.string.settings_library_title
                 OTHER -> R.string.settings_other_title
                 ABOUT -> R.string.settings_about_title

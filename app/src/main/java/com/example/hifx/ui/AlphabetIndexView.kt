@@ -18,7 +18,8 @@ class AlphabetIndexView @JvmOverloads constructor(
     attrs: AttributeSet? = null
 ) : View(context, attrs) {
 
-    private var letters: List<String> = DEFAULT_LETTERS
+    private var values: List<String> = DEFAULT_LETTERS
+    private var displayLabels: List<String> = DEFAULT_LETTERS
     private var selectedIndex = -1
     private var touching = false
 
@@ -40,30 +41,38 @@ class AlphabetIndexView @JvmOverloads constructor(
     }
 
     fun setLetters(values: List<String>) {
-        letters = values.ifEmpty { DEFAULT_LETTERS }
+        setEntries(values, values)
+    }
+
+    fun setEntries(values: List<String>, displayLabels: List<String>) {
+        val actualValues = values.ifEmpty { DEFAULT_LETTERS }
+        this.values = actualValues
+        this.displayLabels = if (displayLabels.size == actualValues.size) displayLabels else actualValues
         selectedIndex = -1
         invalidate()
     }
 
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
-        if (letters.isEmpty()) return
+        if (values.isEmpty()) return
 
         val top = paddingTop.toFloat()
         val bottom = (height - paddingBottom).toFloat()
-        val drawHeight = max(1f, bottom - top)
-        val cellHeight = drawHeight / letters.size
+        val rawHeight = max(1f, bottom - top)
+        val drawHeight = rawHeight * 0.9f
+        val drawTop = top + (rawHeight - drawHeight) * 0.5f
+        val cellHeight = drawHeight / values.size
         val centerX = width * 0.5f
 
-        letters.forEachIndexed { index, letter ->
+        displayLabels.forEachIndexed { index, label ->
             val paint = if (touching && index == selectedIndex) selectedPaint else normalPaint
-            val baseline = top + cellHeight * index + cellHeight * 0.5f - (paint.descent() + paint.ascent()) * 0.5f
-            canvas.drawText(letter, centerX, baseline, paint)
+            val baseline = drawTop + cellHeight * index + cellHeight * 0.5f - (paint.descent() + paint.ascent()) * 0.5f
+            canvas.drawText(label, centerX, baseline, paint)
         }
     }
 
     override fun onTouchEvent(event: MotionEvent): Boolean {
-        if (!isEnabled || letters.isEmpty()) {
+        if (!isEnabled || values.isEmpty()) {
             return super.onTouchEvent(event)
         }
 
@@ -98,7 +107,7 @@ class AlphabetIndexView @JvmOverloads constructor(
             selectedIndex = index
             invalidate()
         }
-        val letter = letters.getOrNull(index) ?: return
+        val letter = values.getOrNull(index) ?: return
         onLetterTouch?.invoke(letter, active)
     }
 
@@ -107,8 +116,8 @@ class AlphabetIndexView @JvmOverloads constructor(
         val bottom = (height - paddingBottom).toFloat()
         val clampedY = y.coerceIn(top, bottom)
         val progress = ((clampedY - top) / max(1f, bottom - top)).coerceIn(0f, 1f)
-        val raw = (progress * letters.size).toInt()
-        return min(letters.lastIndex, max(0, raw))
+        val raw = (progress * values.size).toInt()
+        return min(values.lastIndex, max(0, raw))
     }
 
     private fun updateThemeColors() {

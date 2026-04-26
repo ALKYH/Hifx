@@ -1,4 +1,4 @@
-﻿package com.example.hifx.audio
+package com.example.hifx.audio
 
 import android.app.PendingIntent
 import android.content.BroadcastReceiver
@@ -14,6 +14,7 @@ import android.media.AudioDeviceCallback
 import android.media.AudioDeviceInfo
 import android.media.AudioFormat
 import android.media.AudioManager
+import android.media.audiofx.HapticGenerator
 import android.media.audiofx.BassBoost
 import android.media.audiofx.EnvironmentalReverb
 import android.media.audiofx.Equalizer
@@ -28,6 +29,7 @@ import android.provider.DocumentsContract
 import android.provider.MediaStore
 import android.provider.OpenableColumns
 import android.text.format.DateFormat
+import android.widget.Toast
 import androidx.appcompat.app.AppCompatDelegate
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
@@ -47,6 +49,7 @@ import androidx.media3.exoplayer.audio.AudioSink
 import androidx.media3.exoplayer.audio.DefaultAudioSink
 import androidx.media3.exoplayer.mediacodec.MediaCodecSelector
 import androidx.media3.exoplayer.video.VideoRendererEventListener
+import com.example.hifx.R
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -78,6 +81,8 @@ data class LibraryTrack(
     val durationMs: Long,
     val albumId: Long,
     val artworkUri: Uri?,
+    val dateAddedEpochSeconds: Long = 0L,
+    val playCount: Int = 0,
     val discNumber: Int = 1,
     val trackNumber: Int = 0
 )
@@ -116,7 +121,13 @@ data class PlaybackUiState(
     val hasNext: Boolean = false,
     val shuffleEnabled: Boolean = false,
     val repeatMode: Int = Player.REPEAT_MODE_OFF,
-    val sleepTimerRemainingMs: Long = 0L
+    val sleepTimerRemainingMs: Long = 0L,
+    val streamInfoVisible: Boolean = false,
+    val streamInfoLeft: String = "",
+    val streamInfoCenter: String = "",
+    val streamInfoRight: String = "",
+    val streamInfoUseDacAccent: Boolean = false,
+    val streamInfoUseIsoDacTheme: Boolean = false
 )
 
 private val DEFAULT_EQ_BAND_FREQUENCIES_HZ = listOf(32, 64, 125, 250, 500, 1000, 4000, 8000)
@@ -197,18 +208,27 @@ data class SettingsUiState(
     val hiResApiEnabled: Boolean = true,
     val rememberPlaybackSessionEnabled: Boolean = true,
     val hapticFeedbackEnabled: Boolean = true,
+    val hapticAudioEnabled: Boolean = false,
+    val directDacGoldThemeEnabled: Boolean = true,
     val showLyricsPanelEnabled: Boolean = true,
+    val showLyricsScanHeadEnabled: Boolean = true,
+    val showStreamInfoEnabled: Boolean = true,
     val showVisualizationEnabled: Boolean = true,
+    val topBarVisualizationMode: TopBarVisualizationMode = TopBarVisualizationMode.LEVEL_METER,
     val backgroundBlurStrength: Int = 80,
     val backgroundOpacityPercent: Int = 52,
     val backgroundDynamicEnabled: Boolean = true,
     val lyricsFontSizeSp: Int = 18,
+    val lyricsGlowEnabled: Boolean = true,
     val lyricsGlowIntensityPercent: Int = 100,
     val lyricsBoldEnabled: Boolean = false,
     val preferredBitDepth: Int = 32,
     val preferredOutputSampleRateHz: Int? = null,
     val preferredMaxBitrateKbps: Int? = null,
     val preferredUsbDeviceId: Int? = null,
+    val preferredUsbDirectSampleRateHz: Int? = null,
+    val preferredUsbDirectBitDepth: Int? = null,
+    val preferredUsbResampleAlgorithm: Int = USB_RESAMPLER_ALGORITHM_LINEAR,
     val usbExclusiveModeEnabled: Boolean = false,
     val usbExclusiveSupported: Boolean = false,
     val usbExclusiveActive: Boolean = false,
@@ -219,6 +239,9 @@ data class SettingsUiState(
     val usbResolvedSampleRateHz: Int? = null,
     val usbResolvedBitDepth: Int? = null,
     val usbOutputOptions: List<UsbOutputOption> = emptyList(),
+    val usbDirectSampleRateOptionsHz: List<Int> = emptyList(),
+    val usbDirectBitDepthOptions: List<Int> = emptyList(),
+    val usbDirectCapabilitySummary: String = "",
     val activeOutputRouteLabel: String = "绯荤粺榛樿",
     val outputSampleRateHz: Int? = null,
     val outputFramesPerBuffer: Int? = null,
@@ -269,6 +292,15 @@ private data class UsbHostCapability(
     val reason: String
 )
 
+private data class StreamBannerInfo(
+    val visible: Boolean,
+    val left: String,
+    val center: String,
+    val right: String,
+    val useDacAccent: Boolean,
+    val useIsoDacTheme: Boolean
+)
+
 object AudioEngine {
     private const val ACTION_USB_DAC_PERMISSION = "com.example.hifx.action.USB_DAC_PERMISSION"
     private const val PREFS_NAME = "hifx_audio_preferences"
@@ -276,18 +308,27 @@ object AudioEngine {
     private const val KEY_HIRES_API_ENABLED = "key_hires_api_enabled"
     private const val KEY_REMEMBER_PLAYBACK_SESSION = "key_remember_playback_session"
     private const val KEY_HAPTIC_FEEDBACK = "key_haptic_feedback"
+    private const val KEY_HAPTIC_AUDIO_ENABLED = "key_haptic_audio_enabled"
+    private const val KEY_DIRECT_DAC_GOLD_THEME = "key_direct_dac_gold_theme"
     private const val KEY_SHOW_LYRICS_PANEL = "key_show_lyrics_panel"
+    private const val KEY_SHOW_LYRICS_SCAN_HEAD = "key_show_lyrics_scan_head"
+    private const val KEY_SHOW_STREAM_INFO = "key_show_stream_info"
     private const val KEY_SHOW_VISUALIZATION = "key_show_visualization"
+    private const val KEY_TOP_BAR_VISUALIZATION_MODE = "key_top_bar_visualization_mode"
     private const val KEY_BACKGROUND_BLUR_STRENGTH = "key_background_blur_strength"
     private const val KEY_BACKGROUND_OPACITY_PERCENT = "key_background_opacity_percent"
     private const val KEY_BACKGROUND_DYNAMIC_ENABLED = "key_background_dynamic_enabled"
     private const val KEY_LYRICS_FONT_SIZE_SP = "key_lyrics_font_size_sp"
+    private const val KEY_LYRICS_GLOW_ENABLED = "key_lyrics_glow_enabled"
     private const val KEY_LYRICS_GLOW_INTENSITY_PERCENT = "key_lyrics_glow_intensity_percent"
     private const val KEY_LYRICS_BOLD_ENABLED = "key_lyrics_bold_enabled"
     private const val KEY_PREFERRED_BIT_DEPTH = "key_preferred_bit_depth"
     private const val KEY_PREFERRED_OUTPUT_SAMPLE_RATE_HZ = "key_preferred_output_sample_rate_hz"
     private const val KEY_MAX_AUDIO_BITRATE_KBPS = "key_max_audio_bitrate_kbps"
     private const val KEY_PREFERRED_USB_DEVICE_ID = "key_preferred_usb_device_id"
+    private const val KEY_PREFERRED_USB_DIRECT_SAMPLE_RATE_HZ = "key_preferred_usb_direct_sample_rate_hz"
+    private const val KEY_PREFERRED_USB_DIRECT_BIT_DEPTH = "key_preferred_usb_direct_bit_depth"
+    private const val KEY_PREFERRED_USB_RESAMPLE_ALGORITHM = "key_preferred_usb_resample_algorithm"
     private const val KEY_USB_EXCLUSIVE_MODE = "key_usb_exclusive_mode"
     private const val KEY_EFFECT_ENABLED = "key_effect_enabled"
     private const val KEY_LIMITER_ENABLED = "key_limiter_enabled"
@@ -360,6 +401,7 @@ object AudioEngine {
     private const val KEY_LAST_QUEUE_INDEX = "key_last_queue_index"
     private const val KEY_LAST_POSITION_MS = "key_last_position_ms"
     private const val KEY_LAST_PLAY_WHEN_READY = "key_last_play_when_ready"
+    private const val KEY_TRACK_PLAY_COUNTS_JSON = "key_track_play_counts_json"
 
     const val SURROUND_MODE_STEREO = 0
     const val SURROUND_MODE_5_1 = 1
@@ -420,18 +462,30 @@ object AudioEngine {
     private var virtualizer: Virtualizer? = null
     private var loudnessEnhancer: LoudnessEnhancer? = null
     private var environmentalReverb: EnvironmentalReverb? = null
+    private var hapticGenerator: HapticGenerator? = null
     private var hrtfBinauralProcessor: HrtfBinauralProcessor? = null
     private var convolutionReverbProcessor: ConvolutionReverbProcessor? = null
     private var stereoUtilityProcessor: StereoUtilityProcessor? = null
+    private var topBarVisualizationProcessor: TopBarVisualizationProcessor? = null
+    private var hapticAudioProcessor: HapticAudioProcessor? = null
+    private var hapticAudioDriver: HapticAudioDriver? = null
     private var usbHostPassthroughProcessor: UsbHostPassthroughProcessor? = null
-    private var usbHostDirectOutput: UsbHostDirectOutput? = null
+    private var usbHostDirectOutput: UsbPcmOutputBackend? = null
+    private var usbHostDirectBackendLabelCached: String = "none"
+    private var usbHostDirectRouteLabelCached: String = "none"
     private val playbackQueue = mutableListOf<LibraryTrack>()
     private var sleepTimerEndElapsedMs: Long? = null
     private var audioDeviceCallback: AudioDeviceCallback? = null
     private var usbPermissionReceiver: BroadcastReceiver? = null
     private var usbPermissionReceiverRegistered = false
     private var bitPerfectBypassActive: Boolean = false
+    private var lastUsbHostDirectRecoveryAttemptElapsedMs: Long = 0L
+    private var lastUsbTransportToastSignature: String? = null
+    private var lastUsbTransportToastElapsedMs: Long = 0L
+    private var activeToast: Toast? = null
+    private var activeToastCategory: String? = null
     private var eqCustomPresets: MutableList<EqPreset> = mutableListOf()
+    private var trackPlayCounts: MutableMap<Long, Int> = mutableMapOf()
     private var lastPersistSignature: String? = null
     private var lastPersistPositionMs: Long = -1L
     private var lastPersistElapsedRealtimeMs: Long = 0L
@@ -439,6 +493,10 @@ object AudioEngine {
     private val progressTicker = object : Runnable {
         override fun run() {
             checkSleepTimer()
+            val currentPlayer = player
+            if (currentPlayer != null && currentPlayer.playWhenReady) {
+                ensureUsbHostDirectReadyForPlayback()
+            }
             syncPlaybackState()
             syncRealtimeEffectsMeter()
             mainHandler.postDelayed(this, 350L)
@@ -467,6 +525,7 @@ object AudioEngine {
         }
 
         override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
+            incrementTrackPlayCount(mediaItem?.mediaId?.toLongOrNull())
             syncPlaybackState()
             refreshOutputInfo()
         }
@@ -525,6 +584,9 @@ object AudioEngine {
             prefs.getString(KEY_EQ_BAND_CONFIG_JSON, null),
             legacyEqLevels
         )
+        trackPlayCounts = parseTrackPlayCounts(
+            prefs.getString(KEY_TRACK_PLAY_COUNTS_JSON, null)
+        ).toMutableMap()
         eqCustomPresets = parseCustomEqPresets(prefs.getString(KEY_EQ_CUSTOM_PRESETS_JSON, null)).toMutableList()
         val presetNames = buildEqPresetNames(eqCustomPresets)
         val savedActivePreset = prefs.getString(KEY_EQ_ACTIVE_PRESET_NAME, null)
@@ -630,26 +692,53 @@ object AudioEngine {
         val preferredOutputSampleRateHz = normalizeOutputSampleRate(
             prefs.getInt(KEY_PREFERRED_OUTPUT_SAMPLE_RATE_HZ, -1).takeIf { it > 0 }
         )
+        val preferredUsbDirectSampleRateHz = normalizeOutputSampleRate(
+            prefs.getInt(KEY_PREFERRED_USB_DIRECT_SAMPLE_RATE_HZ, -1).takeIf { it > 0 }
+        )
+        val preferredUsbDirectBitDepth = normalizeBitDepth(
+            prefs.getInt(KEY_PREFERRED_USB_DIRECT_BIT_DEPTH, -1).takeIf { it > 0 } ?: BIT_DEPTH_32_FLOAT
+        ).takeIf { prefs.contains(KEY_PREFERRED_USB_DIRECT_BIT_DEPTH) }
+        val preferredUsbResampleAlgorithm = prefs.getInt(
+            KEY_PREFERRED_USB_RESAMPLE_ALGORITHM,
+            USB_RESAMPLER_ALGORITHM_LINEAR
+        ).coerceIn(USB_RESAMPLER_ALGORITHM_NEAREST, USB_RESAMPLER_ALGORITHM_CUBIC)
         val preferredMaxBitrate = prefs.getInt(KEY_MAX_AUDIO_BITRATE_KBPS, -1)
             .takeIf { it in MAX_AUDIO_BITRATE_MIN_KBPS..MAX_AUDIO_BITRATE_MAX_KBPS }
         val preferredUsbDeviceId = prefs.getInt(KEY_PREFERRED_USB_DEVICE_ID, -1).takeIf { it >= 0 }
+        val storedVisualizationMode = TopBarVisualizationMode.fromPrefValue(
+            prefs.getString(KEY_TOP_BAR_VISUALIZATION_MODE, TopBarVisualizationMode.AUDIO_INFO.prefValue)
+        )
+        val topBarVisualizationMode = if (storedVisualizationMode == TopBarVisualizationMode.AUDIO_INFO) {
+            TopBarVisualizationMode.LEVEL_METER
+        } else {
+            storedVisualizationMode
+        }
         _settingsState.value = _settingsState.value.copy(
             hiFiMode = prefs.getBoolean(KEY_HIFI_MODE, true),
             hiResApiEnabled = prefs.getBoolean(KEY_HIRES_API_ENABLED, true),
             rememberPlaybackSessionEnabled = prefs.getBoolean(KEY_REMEMBER_PLAYBACK_SESSION, true),
             hapticFeedbackEnabled = prefs.getBoolean(KEY_HAPTIC_FEEDBACK, true),
+            hapticAudioEnabled = prefs.getBoolean(KEY_HAPTIC_AUDIO_ENABLED, false),
+            directDacGoldThemeEnabled = prefs.getBoolean(KEY_DIRECT_DAC_GOLD_THEME, true),
             showLyricsPanelEnabled = prefs.getBoolean(KEY_SHOW_LYRICS_PANEL, true),
+            showLyricsScanHeadEnabled = prefs.getBoolean(KEY_SHOW_LYRICS_SCAN_HEAD, true),
+            showStreamInfoEnabled = prefs.getBoolean(KEY_SHOW_STREAM_INFO, true),
             showVisualizationEnabled = prefs.getBoolean(KEY_SHOW_VISUALIZATION, true),
-            backgroundBlurStrength = prefs.getInt(KEY_BACKGROUND_BLUR_STRENGTH, 80).coerceIn(0, 100),
+            topBarVisualizationMode = topBarVisualizationMode,
+            backgroundBlurStrength = prefs.getInt(KEY_BACKGROUND_BLUR_STRENGTH, 80).coerceIn(0, 220),
             backgroundOpacityPercent = prefs.getInt(KEY_BACKGROUND_OPACITY_PERCENT, 52).coerceIn(0, 100),
             backgroundDynamicEnabled = prefs.getBoolean(KEY_BACKGROUND_DYNAMIC_ENABLED, true),
             lyricsFontSizeSp = prefs.getInt(KEY_LYRICS_FONT_SIZE_SP, 18).coerceIn(12, 40),
+            lyricsGlowEnabled = prefs.getBoolean(KEY_LYRICS_GLOW_ENABLED, true),
             lyricsGlowIntensityPercent = prefs.getInt(KEY_LYRICS_GLOW_INTENSITY_PERCENT, 100).coerceIn(0, 100),
             lyricsBoldEnabled = prefs.getBoolean(KEY_LYRICS_BOLD_ENABLED, false),
             preferredBitDepth = preferredBitDepth,
             preferredOutputSampleRateHz = preferredOutputSampleRateHz,
             preferredMaxBitrateKbps = preferredMaxBitrate,
             preferredUsbDeviceId = preferredUsbDeviceId,
+            preferredUsbDirectSampleRateHz = preferredUsbDirectSampleRateHz,
+            preferredUsbDirectBitDepth = preferredUsbDirectBitDepth,
+            preferredUsbResampleAlgorithm = preferredUsbResampleAlgorithm,
             usbExclusiveModeEnabled = prefs.getBoolean(KEY_USB_EXCLUSIVE_MODE, false),
             scanFolderUri = scanUri,
             scanFolderLabel = buildScanFolderLabel(scanUri),
@@ -969,6 +1058,7 @@ object AudioEngine {
             currentPlayer.pause()
         } else {
             AudioPlaybackService.start(appContext)
+            ensureUsbHostDirectReadyForPlayback()
             currentPlayer.play()
         }
     }
@@ -979,6 +1069,7 @@ object AudioEngine {
             return
         }
         AudioPlaybackService.start(appContext)
+        ensureUsbHostDirectReadyForPlayback()
         currentPlayer.play()
     }
 
@@ -1119,6 +1210,16 @@ object AudioEngine {
 
     fun isHapticFeedbackEnabled(): Boolean = _settingsState.value.hapticFeedbackEnabled
 
+    fun setHapticAudioEnabled(enabled: Boolean) {
+        val current = _settingsState.value
+        if (current.hapticAudioEnabled == enabled) {
+            return
+        }
+        _settingsState.value = current.copy(hapticAudioEnabled = enabled)
+        prefs.edit().putBoolean(KEY_HAPTIC_AUDIO_ENABLED, enabled).apply()
+        applyHapticAudioState()
+    }
+
     fun setShowLyricsPanelEnabled(enabled: Boolean) {
         val current = _settingsState.value
         if (current.showLyricsPanelEnabled == enabled) {
@@ -1126,6 +1227,24 @@ object AudioEngine {
         }
         _settingsState.value = current.copy(showLyricsPanelEnabled = enabled)
         prefs.edit().putBoolean(KEY_SHOW_LYRICS_PANEL, enabled).apply()
+    }
+
+    fun setDirectDacGoldThemeEnabled(enabled: Boolean) {
+        val current = _settingsState.value
+        if (current.directDacGoldThemeEnabled == enabled) {
+            return
+        }
+        _settingsState.value = current.copy(directDacGoldThemeEnabled = enabled)
+        prefs.edit().putBoolean(KEY_DIRECT_DAC_GOLD_THEME, enabled).apply()
+    }
+
+    fun setShowLyricsScanHeadEnabled(enabled: Boolean) {
+        val current = _settingsState.value
+        if (current.showLyricsScanHeadEnabled == enabled) {
+            return
+        }
+        _settingsState.value = current.copy(showLyricsScanHeadEnabled = enabled)
+        prefs.edit().putBoolean(KEY_SHOW_LYRICS_SCAN_HEAD, enabled).apply()
     }
 
     fun setShowVisualizationEnabled(enabled: Boolean) {
@@ -1137,8 +1256,26 @@ object AudioEngine {
         prefs.edit().putBoolean(KEY_SHOW_VISUALIZATION, enabled).apply()
     }
 
+    fun setShowStreamInfoEnabled(enabled: Boolean) {
+        val current = _settingsState.value
+        if (current.showStreamInfoEnabled == enabled) {
+            return
+        }
+        _settingsState.value = current.copy(showStreamInfoEnabled = enabled)
+        prefs.edit().putBoolean(KEY_SHOW_STREAM_INFO, enabled).apply()
+    }
+
+    fun setTopBarVisualizationMode(mode: TopBarVisualizationMode) {
+        val current = _settingsState.value
+        if (current.topBarVisualizationMode == mode) {
+            return
+        }
+        _settingsState.value = current.copy(topBarVisualizationMode = mode)
+        prefs.edit().putString(KEY_TOP_BAR_VISUALIZATION_MODE, mode.prefValue).apply()
+    }
+
     fun setBackgroundBlurStrength(value: Int) {
-        val normalized = value.coerceIn(0, 100)
+        val normalized = value.coerceIn(0, 220)
         val current = _settingsState.value
         if (current.backgroundBlurStrength == normalized) {
             return
@@ -1174,6 +1311,15 @@ object AudioEngine {
         }
         _settingsState.value = current.copy(lyricsFontSizeSp = normalized)
         prefs.edit().putInt(KEY_LYRICS_FONT_SIZE_SP, normalized).apply()
+    }
+
+    fun setLyricsGlowEnabled(enabled: Boolean) {
+        val current = _settingsState.value
+        if (current.lyricsGlowEnabled == enabled) {
+            return
+        }
+        _settingsState.value = current.copy(lyricsGlowEnabled = enabled)
+        prefs.edit().putBoolean(KEY_LYRICS_GLOW_ENABLED, enabled).apply()
     }
 
     fun setLyricsGlowIntensityPercent(value: Int) {
@@ -1222,6 +1368,7 @@ object AudioEngine {
         }
         editor.apply()
         applyPreferredOutputDevice()
+        refreshUsbDirectTransportConfigNow()
         refreshOutputInfo()
     }
 
@@ -1256,6 +1403,57 @@ object AudioEngine {
         }
         editor.apply()
         applyPreferredOutputDevice()
+        refreshOutputInfo()
+    }
+
+    fun setPreferredUsbDirectSampleRateHz(sampleRateHz: Int?) {
+        val normalized = normalizeOutputSampleRate(sampleRateHz)
+        val current = _settingsState.value
+        if (current.preferredUsbDirectSampleRateHz == normalized) {
+            return
+        }
+        _settingsState.value = current.copy(preferredUsbDirectSampleRateHz = normalized)
+        val editor = prefs.edit()
+        if (normalized == null) {
+            editor.remove(KEY_PREFERRED_USB_DIRECT_SAMPLE_RATE_HZ)
+        } else {
+            editor.putInt(KEY_PREFERRED_USB_DIRECT_SAMPLE_RATE_HZ, normalized)
+        }
+        editor.apply()
+        applyPreferredOutputDevice()
+        refreshUsbDirectTransportConfigNow()
+        refreshOutputInfo()
+    }
+
+    fun setPreferredUsbDirectBitDepth(bitDepth: Int?) {
+        val normalized = bitDepth?.let(::normalizeBitDepth)
+        val current = _settingsState.value
+        if (current.preferredUsbDirectBitDepth == normalized) {
+            return
+        }
+        _settingsState.value = current.copy(preferredUsbDirectBitDepth = normalized)
+        val editor = prefs.edit()
+        if (normalized == null) {
+            editor.remove(KEY_PREFERRED_USB_DIRECT_BIT_DEPTH)
+        } else {
+            editor.putInt(KEY_PREFERRED_USB_DIRECT_BIT_DEPTH, normalized)
+        }
+        editor.apply()
+        applyPreferredOutputDevice()
+        refreshUsbDirectTransportConfigNow()
+        refreshOutputInfo()
+    }
+
+    fun setPreferredUsbResampleAlgorithm(algorithm: Int) {
+        val normalized = algorithm.coerceIn(USB_RESAMPLER_ALGORITHM_NEAREST, USB_RESAMPLER_ALGORITHM_CUBIC)
+        val current = _settingsState.value
+        if (current.preferredUsbResampleAlgorithm == normalized) {
+            return
+        }
+        _settingsState.value = current.copy(preferredUsbResampleAlgorithm = normalized)
+        prefs.edit().putInt(KEY_PREFERRED_USB_RESAMPLE_ALGORITHM, normalized).apply()
+        applyPreferredOutputDevice()
+        refreshUsbDirectTransportConfigNow()
         refreshOutputInfo()
     }
 
@@ -2061,6 +2259,33 @@ object AudioEngine {
         val preferredUsbDeviceInfo = preferredUsbDevice?.let { id ->
             usbDevices.firstOrNull { it.id == id }
         }
+        val usbDirectSampleRateOptions = preferredUsbDeviceInfo
+            ?.sampleRates
+            ?.filter { it > 0 }
+            ?.distinct()
+            ?.sorted()
+            .orEmpty()
+        val usbDirectBitDepthOptions = preferredUsbDeviceInfo
+            ?.encodings
+            ?.toSet()
+            ?.let { encodings ->
+                buildList {
+                    if (encodings.contains(AudioFormat.ENCODING_PCM_16BIT)) add(BIT_DEPTH_16)
+                    if (
+                        encodings.contains(AudioFormat.ENCODING_PCM_FLOAT) ||
+                        encodings.contains(AudioFormat.ENCODING_PCM_32BIT)
+                    ) {
+                        add(BIT_DEPTH_32_FLOAT)
+                    }
+                }
+            }
+            ?.distinct()
+            .orEmpty()
+        val usbDirectCapabilitySummary = buildUsbDirectCapabilitySummary(
+            preferredUsbDeviceInfo,
+            usbDirectSampleRateOptions,
+            usbDirectBitDepthOptions
+        )
         val activeRoute = preferredUsbDevice
             ?.let { id -> usbOptions.firstOrNull { it.id == id }?.label }
             ?: "系统默认"
@@ -2110,7 +2335,78 @@ object AudioEngine {
             usbCompatibilityActive = usbCompatibilityActive,
             usbResolvedSampleRateHz = usbResolvedSampleRateHzCached,
             usbResolvedBitDepth = usbResolvedBitDepthCached,
+            usbDirectSampleRateOptionsHz = usbDirectSampleRateOptions,
+            usbDirectBitDepthOptions = usbDirectBitDepthOptions,
+            usbDirectCapabilitySummary = usbDirectCapabilitySummary,
             audioPipelineDetails = pipelineDetails
+        )
+    }
+
+    private fun buildUsbDirectCapabilitySummary(
+        device: AudioDeviceInfo?,
+        sampleRates: List<Int>,
+        bitDepths: List<Int>
+    ): String {
+        if (device == null) {
+            return "未选择外部 DAC"
+        }
+        val ratesLabel = sampleRates
+            .takeIf { it.isNotEmpty() }
+            ?.joinToString { "${it / 1000.0}k" }
+            ?: "未报告"
+        val bitDepthLabel = bitDepths
+            .takeIf { it.isNotEmpty() }
+            ?.joinToString { "${it}-bit" }
+            ?: "未报告"
+        return "设备能力：采样率[$ratesLabel] 位深[$bitDepthLabel]"
+    }
+
+    private fun usbResamplerAlgorithmLabel(algorithm: Int): String {
+        return when (algorithm) {
+            USB_RESAMPLER_ALGORITHM_NEAREST -> "Nearest"
+            USB_RESAMPLER_ALGORITHM_CUBIC -> "Cubic"
+            else -> "Linear"
+        }
+    }
+
+    private fun encodingBitDepthLabel(encoding: Int): String? {
+        return when (encoding) {
+            AudioFormat.ENCODING_PCM_16BIT, C.ENCODING_PCM_16BIT -> "16bit"
+            AudioFormat.ENCODING_PCM_24BIT_PACKED -> "24bit"
+            AudioFormat.ENCODING_PCM_32BIT, AudioFormat.ENCODING_PCM_FLOAT -> "32bit"
+            else -> null
+        }
+    }
+
+    private fun formatStreamInfo(currentPlayer: ExoPlayer?, playback: PlaybackUiState): StreamBannerInfo {
+        val format = resolveSelectedAudioFormat(currentPlayer)
+        val settings = _settingsState.value
+        val left = encodingBitDepthLabel(format?.pcmEncoding ?: Format.NO_VALUE)
+            ?: format?.bitrate?.takeIf { it > 0 }?.let { "${(it / 1000f).roundToInt()}k" }
+            ?: "--"
+        val right = format?.sampleRate?.takeIf { it > 0 }?.let {
+            val khz = it / 1000f
+            if (khz % 1f == 0f) "${khz.roundToInt()}k" else String.format("%.1fk", khz)
+        } ?: "--"
+        val hostRouteLabel = usbHostDirectRouteLabelCached.substringBefore(' ').trim()
+        val isIsoDac = settings.usbHostDirectActive && hostRouteLabel.equals("ISO", ignoreCase = true)
+        val useDirectDacTheme = settings.usbHostDirectActive
+        val useDacAccent = settings.usbExclusiveActive || settings.usbCompatibilityActive || settings.usbHostDirectActive
+        val center = when {
+            isIsoDac -> appContext.getString(R.string.stream_mode_iso_dac)
+            settings.usbHostDirectActive -> appContext.getString(R.string.stream_mode_direct_dac)
+            settings.usbCompatibilityActive -> appContext.getString(R.string.stream_mode_compat_dac)
+            settings.usbExclusiveActive -> appContext.getString(R.string.stream_mode_bitperfect_dac)
+            playback.isPlaying -> appContext.getString(R.string.stream_mode_android_audio)
+            else -> ""
+        }
+        return StreamBannerInfo(
+            visible = playback.isPlaying && playback.hasMedia,
+            left = left,
+            center = center,
+            right = right,
+            useDacAccent = useDacAccent,
+            useIsoDacTheme = useDirectDacTheme
         )
     }
 
@@ -2153,6 +2449,9 @@ object AudioEngine {
             appendLine("HiFi: ${settings.hiFiMode}  Hi-Res API: ${settings.hiResApiEnabled}")
             appendLine("目标位深: ${settings.preferredBitDepth}-bit")
             appendLine("目标输出采样率: ${settings.preferredOutputSampleRateHz?.let { "${it}Hz" } ?: "Auto"}")
+            appendLine("外部DAC目标位深: ${settings.preferredUsbDirectBitDepth?.let { "${it}-bit" } ?: "Auto"}")
+            appendLine("外部DAC目标采样率: ${settings.preferredUsbDirectSampleRateHz?.let { "${it}Hz" } ?: "Auto"}")
+            appendLine("外部DAC重采样算法: ${usbResamplerAlgorithmLabel(settings.preferredUsbResampleAlgorithm)}")
             appendLine("系统输出采样率: ${systemOutputSampleRateHz?.let { "${it}Hz" } ?: "N/A"}")
             appendLine("输出缓冲帧: ${systemOutputFramesPerBuffer ?: "N/A"}")
             appendLine("硬件Offload支持: $offloadSupported")
@@ -2178,6 +2477,10 @@ object AudioEngine {
             appendLine("SRC旁路严格校验: ${settings.usbSrcBypassGuaranteed}")
             appendLine("USB Host直连能力: 支持=${settings.usbHostDirectSupported}  激活=${settings.usbHostDirectActive}")
             appendLine("USB Host能力说明: $usbHostCapabilityReasonCached")
+            appendLine("USB Host backend: $usbHostDirectBackendLabelCached")
+            appendLine("USB Host route: $usbHostDirectRouteLabelCached")
+            appendLine("USB Host backend状态: ${usbHostDirectOutput?.debugStatus() ?: "inactive"}")
+            appendLine("外部DAC能力: ${settings.usbDirectCapabilitySummary}")
             appendLine("BitPerfect旁路链路: $bitPerfectBypassActive")
             appendLine("USB兼容直通: ${settings.usbCompatibilityActive}  采样率: ${settings.usbResolvedSampleRateHz ?: "N/A"}  位深: ${settings.usbResolvedBitDepth ?: "N/A"}")
             appendLine("安卓版本: API ${Build.VERSION.SDK_INT}")
@@ -2344,7 +2647,7 @@ object AudioEngine {
         }
     }
 
-fun release() {
+    fun release() {
         mainHandler.removeCallbacks(progressTicker)
         unregisterAudioDeviceMonitor()
         unregisterUsbPermissionReceiver()
@@ -2361,11 +2664,44 @@ fun release() {
         hrtfBinauralProcessor = null
         convolutionReverbProcessor = null
         stereoUtilityProcessor = null
+        topBarVisualizationProcessor?.clearSnapshot()
+        topBarVisualizationProcessor = null
         usbHostPassthroughProcessor = null
         releaseAudioEffects()
         AudioPlaybackService.stop(appContext)
         playbackServiceStarted = false
         initialized = false
+    }
+
+    fun writeUsbBypassPcm(
+        bytes: ByteArray,
+        sampleRateHz: Int = _settingsState.value.usbResolvedSampleRateHz
+            ?: effectivePreferredUsbSampleRateHz()
+            ?: 48_000,
+        channelCount: Int = 2,
+        encoding: Int = C.ENCODING_PCM_16BIT
+    ): Boolean {
+        val backend = usbHostDirectOutput ?: return false
+        val format = AudioProcessor.AudioFormat(sampleRateHz, channelCount, encoding)
+        return backend.writePcm(bytes, format)
+    }
+
+    fun isUsbBypassActive(): Boolean {
+        return usbHostDirectActiveCached && usbHostDirectOutput != null
+    }
+
+    fun fillTopBarVisualizationSnapshot(
+        mode: TopBarVisualizationMode,
+        target: FloatArray
+    ) {
+        if (target.isEmpty()) {
+            return
+        }
+        if (!_settingsState.value.showVisualizationEnabled || !_playbackState.value.hasMedia) {
+            target.fill(0f)
+            return
+        }
+        topBarVisualizationProcessor?.fillSnapshot(mode, target) ?: target.fill(0f)
     }
 
     @UnstableApi
@@ -2380,6 +2716,9 @@ fun release() {
         hrtfBinauralProcessor = if (bypassAudioPipeline) null else HrtfBinauralProcessor()
         convolutionReverbProcessor = if (bypassAudioPipeline) null else ConvolutionReverbProcessor()
         stereoUtilityProcessor = if (bypassAudioPipeline) null else StereoUtilityProcessor()
+        topBarVisualizationProcessor = TopBarVisualizationProcessor()
+        hapticAudioDriver = HapticAudioDriver.createOrNull(appContext)
+        hapticAudioProcessor = hapticAudioDriver?.let { HapticAudioProcessor(it) }
         usbHostPassthroughProcessor = UsbHostPassthroughProcessor()
         val renderersFactory = object : DefaultRenderersFactory(appContext) {
             override fun buildAudioSink(
@@ -2394,16 +2733,22 @@ fun release() {
                     .setEnableFloatOutput(floatOutputEnabled)
                     .setEnableAudioTrackPlaybackParams(enableAudioTrackPlaybackParams)
                 if (!bypassAudioPipeline) {
-                    sinkBuilder.setAudioProcessors(
-                        arrayOf<AudioProcessor>(
-                            hrtfBinauralProcessor!!,
-                            convolutionReverbProcessor!!,
-                            stereoUtilityProcessor!!,
-                            usbHostPassthroughProcessor!!
-                        )
+                    val processors = mutableListOf<AudioProcessor>(
+                        hrtfBinauralProcessor!!,
+                        convolutionReverbProcessor!!,
+                        stereoUtilityProcessor!!,
+                        topBarVisualizationProcessor!!
                     )
-                } else if (usbHostPassthroughProcessor != null) {
-                    sinkBuilder.setAudioProcessors(arrayOf<AudioProcessor>(usbHostPassthroughProcessor!!))
+                    hapticAudioProcessor?.let(processors::add)
+                    processors += usbHostPassthroughProcessor!!
+                    sinkBuilder.setAudioProcessors(processors.toTypedArray())
+                } else if (usbHostPassthroughProcessor != null && topBarVisualizationProcessor != null) {
+                    val processors = mutableListOf<AudioProcessor>(
+                        topBarVisualizationProcessor!!
+                    )
+                    hapticAudioProcessor?.let(processors::add)
+                    processors += usbHostPassthroughProcessor!!
+                    sinkBuilder.setAudioProcessors(processors.toTypedArray())
                 }
                 return sinkBuilder.build()
             }
@@ -2562,8 +2907,8 @@ fun release() {
         val bitPerfectCandidates = supported.filter {
             it.mixerBehavior == android.media.AudioMixerAttributes.MIXER_BEHAVIOR_BIT_PERFECT
         }
-        val preferredSampleRate = _settingsState.value.preferredOutputSampleRateHz
-        val preferredBitDepth = _settingsState.value.preferredBitDepth
+        val preferredSampleRate = effectivePreferredUsbSampleRateHz()
+        val preferredBitDepth = effectivePreferredUsbBitDepth()
         usbExclusiveSupportedCached = bitPerfectCandidates.isNotEmpty()
         if (bitPerfectCandidates.isNotEmpty()) {
             val candidates = bitPerfectCandidates.sortedWith(
@@ -2612,10 +2957,10 @@ fun release() {
             return
         }
 
-        val desiredRate = _settingsState.value.preferredOutputSampleRateHz
+        val desiredRate = effectivePreferredUsbSampleRateHz()
             ?: resolveSelectedAudioFormat(player)?.sampleRate?.takeIf { it > 0 }
         val resolvedRate = selectUsbSampleRate(preferredDevice, desiredRate)
-        val resolvedBitDepth = selectUsbBitDepth(preferredDevice, _settingsState.value.preferredBitDepth)
+        val resolvedBitDepth = selectUsbBitDepth(preferredDevice, effectivePreferredUsbBitDepth())
 
         usbResolvedSampleRateHzCached = resolvedRate
         usbResolvedBitDepthCached = resolvedBitDepth
@@ -2623,6 +2968,16 @@ fun release() {
             usbPreferredRouteAppliedCached &&
             resolvedRate != null &&
             resolvedBitDepth != null
+        if (usbCompatibilityActiveCached) {
+            maybeShowUsbTransportToast(
+                signature = "compat:${preferredDevice.id}:$resolvedRate:$resolvedBitDepth",
+                message = buildString {
+                    append("DAC通信模式：系统兼容输出")
+                    resolvedRate?.let { append(" · ${it}Hz") }
+                    resolvedBitDepth?.let { append(" · ${it}-bit") }
+                }
+            )
+        }
     }
 
     private fun selectUsbSampleRate(device: AudioDeviceInfo, desiredSampleRateHz: Int?): Int? {
@@ -2631,10 +2986,20 @@ fun release() {
             .distinct()
             .sorted()
         if (rates.isEmpty()) {
-            return desiredSampleRateHz ?: _settingsState.value.preferredOutputSampleRateHz ?: 48_000
+            return desiredSampleRateHz ?: effectivePreferredUsbSampleRateHz() ?: 48_000
         }
         val target = desiredSampleRateHz ?: rates.first()
         return rates.minByOrNull { kotlin.math.abs(it - target) }
+    }
+
+    private fun effectivePreferredUsbSampleRateHz(): Int? {
+        return _settingsState.value.preferredUsbDirectSampleRateHz
+            ?: _settingsState.value.preferredOutputSampleRateHz
+    }
+
+    private fun effectivePreferredUsbBitDepth(): Int {
+        return _settingsState.value.preferredUsbDirectBitDepth
+            ?: _settingsState.value.preferredBitDepth
     }
 
     private fun selectUsbBitDepth(device: AudioDeviceInfo, preferredBitDepth: Int): Int? {
@@ -2677,27 +3042,29 @@ fun release() {
                 "USB permission not granted for ${preferredUsb.productName ?: preferredUsb.deviceName}"
             )
         }
-        val outEndpoint = findUsbAudioOutEndpoint(preferredUsb)
+        val route = findHostDirectUsbOutRoute(preferredUsb)
             ?: return UsbHostCapability(
                 false,
-                if (hasUsbIsoOutEndpoint(preferredUsb)) {
-                    "Found ISO OUT endpoint only; current host-direct path supports BULK OUT only"
+                if (hasIsoOnlyUsbOutRoute(preferredUsb)) {
+                    "Detected ISO-only USB DAC but no usable host-direct route was selected, fallback to system USB route"
                 } else {
                     "No writable USB audio BULK OUT endpoint found"
                 }
             )
         return UsbHostCapability(
             true,
-            "Found USB audio BULK OUT endpoint maxPacket=${outEndpoint.maxPacketSize}"
+            "Found USB audio ${route.typeLabel.uppercase()} OUT endpoint maxPacket=${route.endpoint.maxPacketSize} alt=${route.alternateSetting}"
         )
     }
 
     private fun updateUsbHostDirectTransport(preferredDevice: AudioDeviceInfo?) {
-        usbHostDirectActiveCached = false
-        usbHostPassthroughProcessor?.attachSink(null)
         if (!usbHostDirectDesiredCached || !usbHostDirectSupportedCached) {
+            usbHostDirectActiveCached = false
+            usbHostPassthroughProcessor?.attachSink(null)
             usbHostDirectOutput?.close()
             usbHostDirectOutput = null
+            usbHostDirectBackendLabelCached = "none"
+            usbHostDirectRouteLabelCached = "none"
             player?.volume = 1f
             return
         }
@@ -2706,6 +3073,8 @@ fun release() {
             usbHostCapabilityReasonCached = "UsbManager unavailable when starting host transport"
             usbHostDirectOutput?.close()
             usbHostDirectOutput = null
+            usbHostDirectBackendLabelCached = "none"
+            usbHostDirectRouteLabelCached = "none"
             return
         }
         val targetDevice = resolveUsbDeviceForHostDirect(usbManager, preferredDevice)
@@ -2713,31 +3082,157 @@ fun release() {
             usbHostCapabilityReasonCached = "No USB DAC matched for host direct transport"
             usbHostDirectOutput?.close()
             usbHostDirectOutput = null
+            usbHostDirectBackendLabelCached = "none"
+            usbHostDirectRouteLabelCached = "none"
             return
         }
         if (!usbManager.hasPermission(targetDevice)) {
+            usbHostDirectActiveCached = false
+            usbHostPassthroughProcessor?.attachSink(null)
             usbHostCapabilityReasonCached =
                 "USB permission missing for ${targetDevice.productName ?: targetDevice.deviceName}"
             usbHostDirectOutput?.close()
             usbHostDirectOutput = null
+            usbHostDirectBackendLabelCached = "none"
+            usbHostDirectRouteLabelCached = "none"
             return
         }
-        val output = usbHostDirectOutput ?: UsbHostDirectOutput(appContext).also { usbHostDirectOutput = it }
-        val started = output.start(targetDevice)
+        val candidateRoutes = findHostDirectUsbOutRoutes(targetDevice)
+        val route = candidateRoutes.firstOrNull()
+        val existing = usbHostDirectOutput
+        if (route != null && existing != null && existing.isOperational() && existing.isForTarget(targetDevice, route)) {
+            usbHostDirectActiveCached = true
+            usbSrcBypassGuaranteedCached = true
+            existing.setTransportConfig(
+                UsbTransportConfig(
+                    targetSampleRateHz = usbResolvedSampleRateHzCached ?: effectivePreferredUsbSampleRateHz(),
+                    targetBitDepth = usbResolvedBitDepthCached ?: effectivePreferredUsbBitDepth(),
+                    resampleAlgorithm = _settingsState.value.preferredUsbResampleAlgorithm
+                )
+            )
+            usbHostDirectBackendLabelCached = existing.javaClass.simpleName
+            usbHostDirectRouteLabelCached =
+                "type=${route.typeLabel} alt=${route.alternateSetting} intf=${route.interfaceNumber} endpoint=0x${route.endpoint.address.toString(16)} maxPacket=${route.endpoint.maxPacketSize}"
+            usbHostCapabilityReasonCached = "USB Host direct PCM transport reused (${targetDevice.deviceName})"
+            usbHostPassthroughProcessor?.attachSink(existing)
+            player?.volume = 1f
+            return
+        }
+        usbHostDirectActiveCached = false
+        usbHostPassthroughProcessor?.attachSink(null)
+        val output = usbHostDirectOutput ?: createUsbHostDirectBackend().also { usbHostDirectOutput = it }
+        var started = false
+        var startedRoute: UsbOutputRoute? = null
+        val failures = mutableListOf<String>()
+        for (candidate in candidateRoutes) {
+            val ok = output.start(targetDevice, candidate)
+            if (ok) {
+                output.setTransportConfig(
+                    UsbTransportConfig(
+                        targetSampleRateHz = usbResolvedSampleRateHzCached ?: effectivePreferredUsbSampleRateHz(),
+                        targetBitDepth = usbResolvedBitDepthCached ?: effectivePreferredUsbBitDepth(),
+                        resampleAlgorithm = _settingsState.value.preferredUsbResampleAlgorithm
+                    )
+                )
+                started = true
+                startedRoute = candidate
+                break
+            }
+            failures += "${candidate.typeLabel}@alt${candidate.alternateSetting}:${output.lastError}"
+        }
         usbHostDirectActiveCached = started
+        usbHostDirectBackendLabelCached = output.javaClass.simpleName
+        usbHostDirectRouteLabelCached = startedRoute?.let {
+            "type=${it.typeLabel} alt=${it.alternateSetting} intf=${it.interfaceNumber} endpoint=0x${it.endpoint.address.toString(16)} maxPacket=${it.endpoint.maxPacketSize}"
+        } ?: route?.let {
+            "type=${it.typeLabel} alt=${it.alternateSetting} intf=${it.interfaceNumber} endpoint=0x${it.endpoint.address.toString(16)} maxPacket=${it.endpoint.maxPacketSize}"
+        } ?: "unknown"
         if (started) {
             usbSrcBypassGuaranteedCached = true
-            usbHostCapabilityReasonCached = "USB Host direct PCM transport started (${targetDevice.deviceName})"
+            val backendName = output.javaClass.simpleName
+            usbHostCapabilityReasonCached = "USB Host direct PCM transport started via $backendName (${targetDevice.deviceName})"
             usbHostPassthroughProcessor?.attachSink(output)
             player?.volume = 1f
+            startedRoute?.let { routeInfo ->
+                maybeShowUsbTransportToast(
+                    signature = "direct:${targetDevice.deviceId}:${routeInfo.toRouteKey()}",
+                    message = buildString {
+                        append("DAC通信模式：")
+                        append(routeInfo.typeLabel.uppercase())
+                        append(" 直连")
+                        append(" · alt ")
+                        append(routeInfo.alternateSetting)
+                    }
+                )
+            }
         } else {
             usbSrcBypassGuaranteedCached = false
             usbHostPassthroughProcessor?.attachSink(null)
             usbHostCapabilityReasonCached = output.lastError.ifBlank {
-                "Failed to start USB Host direct PCM transport"
+                failures.joinToString(prefix = "Failed host-direct candidates: ").ifBlank {
+                    "Failed to start USB Host direct PCM transport"
+                }
             }
             player?.volume = 1f
         }
+    }
+
+    private fun createUsbHostDirectBackend(): UsbPcmOutputBackend {
+        return if (NativeUsbBridge.isAvailable) {
+            NativeUsbDirectOutput(appContext)
+        } else {
+            UsbHostDirectOutput(appContext)
+        }
+    }
+
+    private fun refreshUsbDirectTransportConfigNow() {
+        if (!initialized || !usbHostDirectDesiredCached) {
+            return
+        }
+        val audioManager = appContext.getSystemService(AudioManager::class.java) ?: return
+        val preferredDevice = _settingsState.value.preferredUsbDeviceId?.let { preferredId ->
+            audioManager.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
+                .firstOrNull { it.id == preferredId && it.isUsbOutputDevice() }
+        }
+        updateUsbHostDirectTransport(preferredDevice)
+    }
+
+    private fun maybeShowUsbTransportToast(signature: String, message: String, category: String = "usb_transport") {
+        val now = SystemClock.elapsedRealtime()
+        if (signature == lastUsbTransportToastSignature && now - lastUsbTransportToastElapsedMs < 4_000L) {
+            return
+        }
+        lastUsbTransportToastSignature = signature
+        lastUsbTransportToastElapsedMs = now
+        mainHandler.post {
+            if (activeToastCategory == category) {
+                activeToast?.cancel()
+                activeToast = null
+            }
+            activeToastCategory = category
+        }
+    }
+
+    private fun ensureUsbHostDirectReadyForPlayback(force: Boolean = false) {
+        if (!_settingsState.value.usbExclusiveModeEnabled) {
+            return
+        }
+        val currentPlayer = player ?: return
+        if (currentPlayer.currentMediaItem == null) {
+            return
+        }
+        val now = SystemClock.elapsedRealtime()
+        if (!force && now - lastUsbHostDirectRecoveryAttemptElapsedMs < 1_500L) {
+            return
+        }
+        val backendHealthy = usbHostDirectOutput?.isOperational() == true
+        val needsRecovery = usbHostDirectDesiredCached && (!usbHostDirectActiveCached || !backendHealthy)
+        if (!needsRecovery && !force) {
+            return
+        }
+        lastUsbHostDirectRecoveryAttemptElapsedMs = now
+        applyPreferredOutputDevice()
+        refreshOutputInfo()
     }
 
     private fun resolveUsbDeviceForHostDirect(
@@ -2771,38 +3266,6 @@ fun release() {
         }.sortedByDescending { it.second }
 
         return scored.firstOrNull()?.first
-    }
-
-    private fun findUsbAudioOutEndpoint(device: UsbDevice): android.hardware.usb.UsbEndpoint? {
-        val interfaceCount = device.interfaceCount
-        for (index in 0 until interfaceCount) {
-            val intf = runCatching { device.getInterface(index) }.getOrNull() ?: continue
-            val endpointCount = intf.endpointCount
-            for (endpointIndex in 0 until endpointCount) {
-                val endpoint = runCatching { intf.getEndpoint(endpointIndex) }.getOrNull() ?: continue
-                val isOut = endpoint.direction == UsbConstants.USB_DIR_OUT
-                val isTransferSupported = endpoint.type == UsbConstants.USB_ENDPOINT_XFER_BULK
-                if (isOut && isTransferSupported) {
-                    return endpoint
-                }
-            }
-        }
-        return null
-    }
-
-    private fun hasUsbIsoOutEndpoint(device: UsbDevice): Boolean {
-        for (index in 0 until device.interfaceCount) {
-            val intf = runCatching { device.getInterface(index) }.getOrNull() ?: continue
-            for (endpointIndex in 0 until intf.endpointCount) {
-                val endpoint = runCatching { intf.getEndpoint(endpointIndex) }.getOrNull() ?: continue
-                if (endpoint.direction == UsbConstants.USB_DIR_OUT &&
-                    endpoint.type == UsbConstants.USB_ENDPOINT_XFER_ISOC
-                ) {
-                    return true
-                }
-            }
-        }
-        return false
     }
 
     private fun sampleRateDistanceScore(candidateRate: Int, preferredRate: Int?): Int {
@@ -2867,6 +3330,8 @@ fun release() {
         val snapshot = capturePlayerSnapshot()
         usbHostDirectOutput?.close()
         usbHostDirectOutput = null
+        usbHostDirectBackendLabelCached = "none"
+        usbHostDirectRouteLabelCached = "none"
         usbHostPassthroughProcessor?.attachSink(null)
         player?.removeListener(playerListener)
         player?.release()
@@ -2901,6 +3366,7 @@ fun release() {
         currentPlayer.prepare()
         if (snapshot.playWhenReady) {
             AudioPlaybackService.start(appContext)
+            ensureUsbHostDirectReadyForPlayback(force = true)
             currentPlayer.play()
         }
     }
@@ -2967,6 +3433,7 @@ fun release() {
             )
         }
 
+        applyHapticAudioState()
         applyEffectState()
         syncPlaybackState()
     }
@@ -2977,12 +3444,67 @@ fun release() {
         runCatching { virtualizer?.release() }
         runCatching { loudnessEnhancer?.release() }
         runCatching { environmentalReverb?.release() }
+        runCatching { hapticGenerator?.release() }
+        runCatching { hapticAudioProcessor?.setEnabled(false) }
+        runCatching { hapticAudioDriver?.release() }
         equalizer = null
         bassBoost = null
         virtualizer = null
         loudnessEnhancer = null
         environmentalReverb = null
+        hapticGenerator = null
+        hapticAudioProcessor = null
+        hapticAudioDriver = null
         currentAudioSessionId = C.AUDIO_SESSION_ID_UNSET
+    }
+
+    private fun applyHapticAudioState() {
+        val enabled = _settingsState.value.hapticAudioEnabled
+
+        // 1) System HapticGenerator path: kicks in when the source already carries a haptic
+        //    channel (e.g. ANDROID_HAPTIC=1 OGG on Xiaomi/HyperOS); harmless otherwise.
+        applySystemHapticGenerator(enabled)
+
+        // 2) Software fallback: derive a low-frequency envelope from PCM and drive the LRA
+        //    directly. Active alongside (1) — on devices that ignore HapticGenerator this is
+        //    the only path that produces vibration, on devices that honour it the user gets
+        //    consistent feedback for every track instead of only haptic-tagged ones.
+        applySoftwareHapticAudio(enabled)
+    }
+
+    private fun applySystemHapticGenerator(enabled: Boolean) {
+        if (!enabled || bitPerfectBypassActive) {
+            runCatching { hapticGenerator?.release() }
+            hapticGenerator = null
+            return
+        }
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) {
+            return
+        }
+        val sessionId = player?.audioSessionId ?: C.AUDIO_SESSION_ID_UNSET
+        if (sessionId == C.AUDIO_SESSION_ID_UNSET) {
+            return
+        }
+        val existing = hapticGenerator
+        if (existing != null) {
+            runCatching { existing.setEnabled(true) }
+            return
+        }
+        hapticGenerator = runCatching {
+            HapticGenerator.create(sessionId).apply {
+                setEnabled(true)
+            }
+        }.getOrNull()
+    }
+
+    private fun applySoftwareHapticAudio(enabled: Boolean) {
+        // Disable the software path when bit-perfect bypass is active — that mode exists
+        // specifically to avoid touching the PCM stream, and tapping samples is fine but
+        // generating motor IPC concurrently with USB direct output causes audible jitter on
+        // some devices.
+        val shouldRun = enabled && !bitPerfectBypassActive
+        hapticAudioProcessor?.setEnabled(shouldRun)
+        hapticAudioDriver?.setEnabled(shouldRun)
     }
 
     private fun applyEffectState() {
@@ -4119,6 +4641,15 @@ fun release() {
             _settingsState.value.hiFiMode -> "Hi-Fi 输出模式已开启"
             else -> "标准音频模式"
         }
+        val banner = formatStreamInfo(currentPlayer, _playbackState.value.copy(
+            hasMedia = hasMedia,
+            isPlaying = currentPlayer.isPlaying,
+            title = title,
+            subtitle = subtitle
+        ))
+        if (!hasMedia) {
+            topBarVisualizationProcessor?.clearSnapshot()
+        }
 
         _playbackState.value = _playbackState.value.copy(
             title = title,
@@ -4140,7 +4671,13 @@ fun release() {
             hasNext = currentPlayer.hasNextMediaItem(),
             shuffleEnabled = currentPlayer.shuffleModeEnabled,
             repeatMode = currentPlayer.repeatMode,
-            sleepTimerRemainingMs = sleepRemainingMs
+            sleepTimerRemainingMs = sleepRemainingMs,
+            streamInfoVisible = banner.visible,
+            streamInfoLeft = banner.left,
+            streamInfoCenter = banner.center,
+            streamInfoRight = banner.right,
+            streamInfoUseDacAccent = banner.useDacAccent,
+            streamInfoUseIsoDacTheme = banner.useIsoDacTheme
         )
 
         if (_settingsState.value.rememberPlaybackSessionEnabled) {
@@ -4178,6 +4715,7 @@ fun release() {
             MediaStore.Audio.Media.DURATION,
             MediaStore.Audio.Media.ALBUM_ID,
             MediaStore.Audio.Media.TRACK,
+            MediaStore.Audio.Media.DATE_ADDED,
             MediaStore.Audio.Media.RELATIVE_PATH
         )
         val selection = "${MediaStore.Audio.Media.IS_MUSIC} != 0 AND ${MediaStore.Audio.Media.DURATION} > 10000"
@@ -4194,6 +4732,7 @@ fun release() {
             val durationIndex = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.DURATION)
             val albumIdIndex = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.ALBUM_ID)
             val trackIndex = cursor.getColumnIndex(MediaStore.Audio.Media.TRACK)
+            val dateAddedIndex = cursor.getColumnIndex(MediaStore.Audio.Media.DATE_ADDED)
             val relativePathIndex = cursor.getColumnIndex(MediaStore.Audio.Media.RELATIVE_PATH)
 
             while (cursor.moveToNext()) {
@@ -4221,6 +4760,7 @@ fun release() {
                 } else {
                     null
                 }
+                val dateAddedEpochSeconds = if (dateAddedIndex >= 0) cursor.getLong(dateAddedIndex) else 0L
                 tracks += LibraryTrack(
                     id = id,
                     uri = contentUri,
@@ -4230,6 +4770,8 @@ fun release() {
                     durationMs = cursor.getLong(durationIndex),
                     albumId = albumId,
                     artworkUri = artworkUri,
+                    dateAddedEpochSeconds = dateAddedEpochSeconds,
+                    playCount = trackPlayCounts[id] ?: 0,
                     discNumber = discNumber,
                     trackNumber = trackNumber
                 )
@@ -4257,6 +4799,41 @@ fun release() {
         val docId = runCatching { DocumentsContract.getTreeDocumentId(scanFolderUri) }.getOrNull() ?: return null
         val relative = docId.substringAfter(':', "").trim('/')
         return if (relative.isBlank()) null else "$relative/"
+    }
+
+    private fun incrementTrackPlayCount(trackId: Long?) {
+        val id = trackId ?: return
+        val next = (trackPlayCounts[id] ?: 0) + 1
+        trackPlayCounts[id] = next
+        persistTrackPlayCounts()
+    }
+
+    private fun persistTrackPlayCounts() {
+        val json = JSONObject()
+        trackPlayCounts.toSortedMap().forEach { (trackId, count) ->
+            if (count > 0) {
+                json.put(trackId.toString(), count)
+            }
+        }
+        prefs.edit().putString(KEY_TRACK_PLAY_COUNTS_JSON, json.toString()).apply()
+    }
+
+    private fun parseTrackPlayCounts(raw: String?): Map<Long, Int> {
+        if (raw.isNullOrBlank()) {
+            return emptyMap()
+        }
+        val parsed = runCatching { JSONObject(raw) }.getOrNull() ?: return emptyMap()
+        val result = linkedMapOf<Long, Int>()
+        val iterator = parsed.keys()
+        while (iterator.hasNext()) {
+            val key = iterator.next()
+            val id = key.toLongOrNull() ?: continue
+            val count = parsed.optInt(key, 0).coerceAtLeast(0)
+            if (count > 0) {
+                result[id] = count
+            }
+        }
+        return result
     }
 }
 

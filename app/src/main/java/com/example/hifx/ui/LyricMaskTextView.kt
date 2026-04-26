@@ -32,6 +32,8 @@ class LyricMaskTextView @JvmOverloads constructor(
     private var lineIsCurrent = false
     private var lineDistance = Int.MAX_VALUE
     private var lyricsExpanded = false
+    private var lyricGlowEnabled = true
+    private var scanHeadEnabled = true
     private var glowIntensityFactor = 1f
     private var progressSyncMode = ProgressSyncMode.NONE
     private var bilingualBoundaryIndex = -1
@@ -73,6 +75,18 @@ class LyricMaskTextView @JvmOverloads constructor(
 
     fun setLyricProgress(progress: Float) {
         setLyricProgress(progress = progress, ratePerSec = 0f)
+    }
+
+    fun setScanHeadEnabled(enabled: Boolean) {
+        if (scanHeadEnabled == enabled) return
+        scanHeadEnabled = enabled
+        invalidate()
+    }
+
+    fun setLyricGlowEnabled(enabled: Boolean) {
+        if (lyricGlowEnabled == enabled) return
+        lyricGlowEnabled = enabled
+        invalidate()
     }
 
     fun setGlowIntensityPercent(value: Int) {
@@ -192,6 +206,8 @@ class LyricMaskTextView @JvmOverloads constructor(
         content: CharSequence,
         progress: Float
     ) {
+        if (!lyricGlowEnabled) return
+        if (!scanHeadEnabled) return
         if (!lineIsCurrent || progress <= 0f) return
         val save = canvas.save()
         canvas.clipRect(
@@ -362,7 +378,8 @@ class LyricMaskTextView @JvmOverloads constructor(
                 content = content,
                 fragment = fragment,
                 unitProgressRaw = unitProgressRaw,
-                reveal = reveal
+                reveal = reveal,
+                scanHeadEnabled = true
             )
         }
 
@@ -495,7 +512,8 @@ class LyricMaskTextView @JvmOverloads constructor(
         content: CharSequence,
         fragment: RenderUnitFragment,
         unitProgressRaw: Float,
-        reveal: Float
+        reveal: Float,
+        scanHeadEnabled: Boolean
     ) {
         val width = (fragment.right - fragment.left).coerceAtLeast(textSize * 0.2f)
         val centerX = (fragment.left + fragment.right) * 0.5f
@@ -531,10 +549,9 @@ class LyricMaskTextView @JvmOverloads constructor(
         val scannedTailInflate = textSize * 0.014f * (0.9f + 0.45f * intensityAlpha)
 
         val revealEase = easeOutCubic(reveal)
-        val blurAlpha = if (disableBlurForCurrent) 0f else
+        val blurAlpha = if (!lyricGlowEnabled || disableBlurForCurrent) 0f else
             ((0.03f + (1f - revealEase) * 0.08f + motion.energy * 0.1f) * decay * intensityAlpha).coerceIn(0f, 0.24f)
-        // Keep current-line glow visible without Gaussian blur.
-        val glowAlpha = if (disableBlurForCurrent)
+        val glowAlpha = if (!lyricGlowEnabled) 0f else if (disableBlurForCurrent)
             ((0.08f + motion.energy * 0.08f) * decay * intensityAlpha).coerceIn(0f, 0.24f)
         else
             ((0.08f + motion.energy * if (lineIsCurrent) 0.22f else 0.14f) * decay * intensityAlpha).coerceIn(0f, 0.4f)
@@ -595,7 +612,7 @@ class LyricMaskTextView @JvmOverloads constructor(
             clipInflatePx = clipInflate * 0.5f
         )
 
-        if (scannedTailAlpha > 0f) {
+        if (lyricGlowEnabled && scanHeadEnabled && scannedTailAlpha > 0f) {
             drawGlyphPass(
                 canvas = canvas,
                 content = content,

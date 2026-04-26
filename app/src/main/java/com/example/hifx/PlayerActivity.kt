@@ -133,8 +133,10 @@ class PlayerActivity : AppCompatActivity() {
     private var backgroundScrollAnimator: ValueAnimator? = null
     private val backgroundScrollMatrix = Matrix()
     private var lyricsFontSizeSp = 18
+    private var lyricsGlowEnabled = true
     private var lyricsGlowIntensityPercent = 100
     private var lyricsBoldEnabled = false
+    private var lyricsScanHeadEnabled = true
     private var currentLyricIndex: Int = -1
     private var lastAutoFollowedLyricIndex: Int = -1
     private var lyricInertiaVelocityPxPerSec = 0f
@@ -467,7 +469,7 @@ class PlayerActivity : AppCompatActivity() {
             lastArtworkKey = artworkKey
         }
         if (backgroundDynamicEnabled) {
-            binding.root.post { ensureDynamicBackgroundTiled() }
+            binding.root.post { ensureDynamicBackgroundScrollable() }
         }
         binding.textTrackTitle.text = state.title
         val artistText = state.artist.ifBlank { state.subtitle }
@@ -599,8 +601,10 @@ class PlayerActivity : AppCompatActivity() {
         applyLyricsPanelVisibility(state.showLyricsPanelEnabled)
         applyBackgroundSettings(state)
         applyLyricsFontSize(state.lyricsFontSizeSp)
+        applyLyricsGlowEnabled(state.lyricsGlowEnabled)
         applyLyricsGlowIntensity(state.lyricsGlowIntensityPercent)
         applyLyricsBoldEnabled(state.lyricsBoldEnabled)
+        applyLyricsScanHeadEnabled(state.showLyricsScanHeadEnabled)
     }
 
     private fun applyLyricsFontSize(sizeSp: Int) {
@@ -623,11 +627,27 @@ class PlayerActivity : AppCompatActivity() {
         }
     }
 
+    private fun applyLyricsGlowEnabled(enabled: Boolean) {
+        if (lyricsGlowEnabled == enabled) return
+        lyricsGlowEnabled = enabled
+        if (::lyricsAdapter.isInitialized) {
+            lyricsAdapter.setLyricsGlowEnabled(enabled)
+        }
+    }
+
     private fun applyLyricsBoldEnabled(enabled: Boolean) {
         if (lyricsBoldEnabled == enabled) return
         lyricsBoldEnabled = enabled
         if (::lyricsAdapter.isInitialized) {
             lyricsAdapter.setLyricsBoldEnabled(enabled)
+        }
+    }
+
+    private fun applyLyricsScanHeadEnabled(enabled: Boolean) {
+        if (lyricsScanHeadEnabled == enabled) return
+        lyricsScanHeadEnabled = enabled
+        if (::lyricsAdapter.isInitialized) {
+            lyricsAdapter.setLyricsScanHeadEnabled(enabled)
         }
     }
 
@@ -671,7 +691,7 @@ class PlayerActivity : AppCompatActivity() {
 
         if (dynamicChanged) {
             if (backgroundDynamicEnabled) {
-                ensureDynamicBackgroundTiled()
+                ensureDynamicBackgroundScrollable()
                 startBackgroundDynamicScroll()
             } else {
                 stopBackgroundDynamicScroll()
@@ -681,7 +701,7 @@ class PlayerActivity : AppCompatActivity() {
                 binding.imagePlayerBg.loadArtworkOrDefault(uri)
             }
         } else if (backgroundDynamicEnabled) {
-            ensureDynamicBackgroundTiled()
+            ensureDynamicBackgroundScrollable()
             startBackgroundDynamicScroll()
         }
     }
@@ -2419,46 +2439,69 @@ class PlayerActivity : AppCompatActivity() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) {
             return
         }
-        val radius = (strength.coerceIn(0, 100) / 100f) * 120f
+        val radius = (strength.coerceIn(0, 220) / 220f) * 180f
         binding.imagePlayerBg.setRenderEffect(
             RenderEffect.createBlurEffect(radius, radius, Shader.TileMode.CLAMP)
         )
     }
 
-    private fun ensureDynamicBackgroundTiled() {
+    private fun ensureDynamicBackgroundScrollable() {
         if (!backgroundDynamicEnabled) {
             return
         }
         val current = binding.imagePlayerBg.drawable ?: return
-        val bitmapCurrent = current as? BitmapDrawable
-        val alreadyTiled = bitmapCurrent?.tileModeY == Shader.TileMode.REPEAT &&
-            binding.imagePlayerBg.scaleType == ImageView.ScaleType.MATRIX
-        if (alreadyTiled) {
+        val drawableWidth = current.intrinsicWidth.takeIf { it > 0 } ?: return
+        val drawableHeight = current.intrinsicHeight.takeIf { it > 0 } ?: return
+        val viewWidth = binding.imagePlayerBg.width.takeIf { it > 0 } ?: run {
+            binding.imagePlayerBg.post {
+                ensureDynamicBackgroundScrollable()
+                startBackgroundDynamicScroll()
+            }
             return
         }
-        val tileSize = dp(160f).coerceAtLeast(64)
-        val bitmap = current.toBitmap(width = tileSize, height = tileSize, config = Bitmap.Config.ARGB_8888)
-        val tiled = BitmapDrawable(resources, bitmap).apply {
-            setTileModeXY(Shader.TileMode.REPEAT, Shader.TileMode.REPEAT)
+        val viewHeight = binding.imagePlayerBg.height.takeIf { it > 0 } ?: run {
+            binding.imagePlayerBg.post {
+                ensureDynamicBackgroundScrollable()
+                startBackgroundDynamicScroll()
+            }
+            return
         }
+        val baseScale = max(viewWidth / drawableWidth.toFloat(), viewHeight / drawableHeight.toFloat()) * 1.18f
+        val scaledWidth = drawableWidth * baseScale
+        val scaledHeight = drawableHeight * baseScale
+        val startX = -((scaledWidth - viewWidth) * 0.08f).coerceAtLeast(0f)
+        val centeredY = -((scaledHeight - viewHeight) * 0.5f).coerceAtLeast(0f)
+        backgroundScrollMatrix.reset()
+        backgroundScrollMatrix.setScale(baseScale, baseScale)
+        backgroundScrollMatrix.postTranslate(startX, centeredY)
         binding.imagePlayerBg.scaleType = ImageView.ScaleType.MATRIX
-        binding.imagePlayerBg.setImageDrawable(tiled)
-        startBackgroundDynamicScroll()
+        binding.imagePlayerBg.imageMatrix = backgroundScrollMatrix
     }
 
     private fun startBackgroundDynamicScroll() {
         if (!backgroundDynamicEnabled || backgroundScrollAnimator?.isRunning == true) {
             return
         }
-        val travelY = dp(180f).toFloat()
+        val drawable = binding.imagePlayerBg.drawable ?: return
+        val drawableWidth = drawable.intrinsicWidth.takeIf { it > 0 } ?: return
+        val drawableHeight = drawable.intrinsicHeight.takeIf { it > 0 } ?: return
+        val viewWidth = binding.imagePlayerBg.width.takeIf { it > 0 } ?: return
+        val viewHeight = binding.imagePlayerBg.height.takeIf { it > 0 } ?: return
+        val scale = max(viewWidth / drawableWidth.toFloat(), viewHeight / drawableHeight.toFloat()) * 1.18f
+        val scaledWidth = drawableWidth * scale
+        val scaledHeight = drawableHeight * scale
+        val travelX = (scaledWidth - viewWidth).coerceAtLeast(0f)
+        val offsetY = -((scaledHeight - viewHeight) * 0.5f).coerceAtLeast(0f)
         backgroundScrollAnimator = ValueAnimator.ofFloat(0f, 1f).apply {
-            duration = 16_000L
+            duration = 18_000L
             repeatCount = ValueAnimator.INFINITE
+            repeatMode = ValueAnimator.REVERSE
             interpolator = LinearInterpolator()
             addUpdateListener { animator ->
                 val t = animator.animatedValue as Float
                 backgroundScrollMatrix.reset()
-                backgroundScrollMatrix.setTranslate(0f, travelY * t)
+                backgroundScrollMatrix.setScale(scale, scale)
+                backgroundScrollMatrix.postTranslate(-travelX * t, offsetY)
                 binding.imagePlayerBg.imageMatrix = backgroundScrollMatrix
             }
             start()
@@ -2674,8 +2717,10 @@ class PlayerActivity : AppCompatActivity() {
         private var currentProgressRatePerSec: Float = 0f
         private var expanded: Boolean = false
         private var lyricFontSizeSp: Int = lyricsFontSizeSp
+        private var lyricGlowEnabled: Boolean = lyricsGlowEnabled
         private var lyricGlowIntensityPercent: Int = lyricsGlowIntensityPercent
         private var lyricBoldEnabled: Boolean = lyricsBoldEnabled
+        private var lyricScanHeadEnabled: Boolean = lyricsScanHeadEnabled
         private var translationMode: LyricsTranslationMode = lyricsTranslationMode
 
         fun submitLyrics(lines: List<LyricLine>) {
@@ -2731,9 +2776,21 @@ class PlayerActivity : AppCompatActivity() {
             notifyDataSetChanged()
         }
 
+        fun setLyricsGlowEnabled(enabled: Boolean) {
+            if (lyricGlowEnabled == enabled) return
+            lyricGlowEnabled = enabled
+            notifyDataSetChanged()
+        }
+
         fun setLyricsBoldEnabled(enabled: Boolean) {
             if (lyricBoldEnabled == enabled) return
             lyricBoldEnabled = enabled
+            notifyDataSetChanged()
+        }
+
+        fun setLyricsScanHeadEnabled(enabled: Boolean) {
+            if (lyricScanHeadEnabled == enabled) return
+            lyricScanHeadEnabled = enabled
             notifyDataSetChanged()
         }
 
@@ -2808,7 +2865,9 @@ class PlayerActivity : AppCompatActivity() {
                 textView.text = displayText
                 textView.textSize = lyricFontSizeSp.toFloat()
                 textView.typeface = if (lyricBoldEnabled) Typeface.DEFAULT_BOLD else Typeface.DEFAULT
+                textView.setLyricGlowEnabled(lyricGlowEnabled)
                 textView.setGlowIntensityPercent(lyricGlowIntensityPercent)
+                textView.setScanHeadEnabled(lyricScanHeadEnabled)
                 val targetSpacing = if (expanded && showTranslation) dp(3f).toFloat() else 0f
                 textView.setLineSpacing(targetSpacing, 1f)
                 textView.setProgressSections(

@@ -25,41 +25,21 @@ internal class ConvolutionReverbProcessor : BaseAudioProcessor() {
     private var impulse = FloatArray(0)
 
     @Volatile
-    private var impulseCompensation = 1f
-
-    @Volatile
     private var realtimeMeter = 0f
 
     private val convolutionLock = Any()
-
-    private var blockSize = DEFAULT_BLOCK_SIZE
-    private var fftSize = 0
-    private var tailLength = 0
-
-    private var kernelReal = FloatArray(0)
-    private var kernelImag = FloatArray(0)
-    private var overlapTailLeft = FloatArray(0)
-    private var overlapTailRight = FloatArray(0)
-
-    private var fftWorkReal = FloatArray(0)
-    private var fftWorkImag = FloatArray(0)
-
-    private var limiterGain = 1f
-    private var wetAutoGain = 1f
-    private var wasActive = false
+    private val kotlinFallback = KotlinConvolutionBackend()
+    private var nativeBackend: NativeConvolutionBackend? = NativeConvolutionBackend.createOrNull()
+    private var configuredSampleRate = 0
+    private var configuredChannelCount = 0
 
     fun updateConfig(enabled: Boolean, wetMix: Float) {
         synchronized(convolutionLock) {
-            val previousEnabled = this.enabled
             this.enabled = enabled
             this.wetMix = wetMix.coerceIn(0f, 1f)
-            if (previousEnabled != this.enabled) {
-                clearOverlapState()
-                limiterGain = 1f
-                wetAutoGain = 1f
-                realtimeMeter = 0f
-                wasActive = false
-            }
+            ensureNativeBackend()?.updateConfig(this.enabled, this.wetMix)
+            kotlinFallback.updateConfig(this.enabled, this.wetMix)
+            realtimeMeter = 0f
         }
     }
 
@@ -72,18 +52,20 @@ internal class ConvolutionReverbProcessor : BaseAudioProcessor() {
         synchronized(convolutionLock) {
             val prepared = preprocessImpulse(samples)
             impulse = prepared
-            impulseCompensation = computeImpulseCompensation(prepared)
-            configureConvolutionPlan(prepared)
-            limiterGain = 1f
-            wetAutoGain = 1f
+            ensureNativeBackend()?.updateImpulse(prepared)
+            kotlinFallback.updateImpulse(prepared)
             realtimeMeter = 0f
-            wasActive = false
         }
     }
 
     override fun onConfigure(inputAudioFormat: AudioProcessor.AudioFormat): AudioProcessor.AudioFormat {
         if (inputAudioFormat.encoding != C.ENCODING_PCM_16BIT || inputAudioFormat.channelCount != 2) {
             return AudioProcessor.AudioFormat.NOT_SET
+        }
+        synchronized(convolutionLock) {
+            configuredSampleRate = inputAudioFormat.sampleRate
+            configuredChannelCount = inputAudioFormat.channelCount
+            ensureNativeBackend()?.configure(configuredSampleRate, configuredChannelCount)
         }
         return inputAudioFormat
     }
@@ -97,100 +79,222 @@ internal class ConvolutionReverbProcessor : BaseAudioProcessor() {
         outputBuffer.order(ByteOrder.LITTLE_ENDIAN)
 
         synchronized(convolutionLock) {
-            val localEnabled = enabled && impulse.isNotEmpty() && fftSize > 0 && kernelReal.isNotEmpty()
-            if (localEnabled != wasActive) {
-                clearOverlapState()
-                limiterGain = 1f
-                wetAutoGain = 1f
-                realtimeMeter = 0f
-                wasActive = localEnabled
-            }
+            val localEnabled = enabled && impulse.isNotEmpty()
             if (!localEnabled) {
-                clearOverlapState()
-                limiterGain = 1f
-                wetAutoGain = 1f
+                nativeBackend?.flush()
+                kotlinFallback.flush()
                 realtimeMeter = 0f
-                wasActive = false
                 outputBuffer.put(inputBuffer)
                 outputBuffer.flip()
                 return
             }
 
-            val frameCount = inputBuffer.remaining() / 4
-            if (frameCount <= 0) {
+            val nativeProcessed = ensureNativeBackend()?.process(inputBuffer, outputBuffer)
+            if (nativeProcessed != null) {
+                inputBuffer.position(inputBuffer.limit())
+                outputBuffer.position(outputBuffer.capacity())
+                realtimeMeter = nativeProcessed
                 outputBuffer.flip()
                 return
             }
 
-            val inputLeft = FloatArray(frameCount)
-            val inputRight = FloatArray(frameCount)
-            for (index in 0 until frameCount) {
-                inputLeft[index] = shortToFloat(inputBuffer.short)
-                inputRight[index] = shortToFloat(inputBuffer.short)
-            }
-
-            val wetLeft = convolveChannelOla(inputLeft, overlapTailLeft)
-            val wetRight = convolveChannelOla(inputRight, overlapTailRight)
-
-            val wet = wetMix.coerceIn(0f, 1f)
-            val dry = 1f - wet
-            val irComp = impulseCompensation.coerceIn(0.02f, 1f)
-            val levelCompensation = (1f - wet * 0.32f).coerceIn(0.58f, 1f)
-            val limiterThreshold = 0.92f
-            val limiterRelease = 0.0035f
-            val wetLimiterThreshold = 0.72f
-            val wetLimiterAttack = 0.28f
-            val wetLimiterRelease = 0.0018f
-            var meter = realtimeMeter
-            val meterAttack = 0.18f
-            val meterRelease = 0.025f
-
-            for (index in 0 until frameCount) {
-                var wetLeftSample = wetLeft[index] * wet * irComp
-                var wetRightSample = wetRight[index] * wet * irComp
-                val wetPeak = max(abs(wetLeftSample), abs(wetRightSample))
-                val wetTargetGain = if (wetPeak > wetLimiterThreshold) {
-                    (wetLimiterThreshold / wetPeak).coerceIn(0.05f, 1f)
-                } else {
-                    1f
-                }
-                wetAutoGain = if (wetTargetGain < wetAutoGain) {
-                    wetAutoGain + (wetTargetGain - wetAutoGain) * wetLimiterAttack
-                } else {
-                    wetAutoGain + (wetTargetGain - wetAutoGain) * wetLimiterRelease
-                }
-                wetLeftSample *= wetAutoGain
-                wetRightSample *= wetAutoGain
-                val mixedLeft = (inputLeft[index] * dry + wetLeftSample) * levelCompensation
-                val mixedRight = (inputRight[index] * dry + wetRightSample) * levelCompensation
-
-                val wetEnergy = max(abs(wetLeftSample), abs(wetRightSample)).coerceIn(0f, 1.5f)
-                meter += (wetEnergy - meter) * if (wetEnergy > meter) meterAttack else meterRelease
-
-                val peak = max(abs(mixedLeft), abs(mixedRight))
-                val targetGain = if (peak > limiterThreshold) {
-                    (limiterThreshold / peak).coerceIn(0.05f, 1f)
-                } else {
-                    1f
-                }
-                limiterGain = if (targetGain < limiterGain) {
-                    targetGain
-                } else {
-                    limiterGain + (targetGain - limiterGain) * limiterRelease
-                }
-
-                val limitedLeft = mixedLeft * limiterGain
-                val limitedRight = mixedRight * limiterGain
-                outputBuffer.putShort(floatToShort(softSaturate(limitedLeft)))
-                outputBuffer.putShort(floatToShort(softSaturate(limitedRight)))
-            }
-            realtimeMeter = meter.coerceIn(0f, 1.5f)
+            realtimeMeter = kotlinFallback.process(inputBuffer, outputBuffer, enabled, wetMix, impulse)
             outputBuffer.flip()
         }
     }
 
     override fun onFlush() {
         synchronized(convolutionLock) {
+            nativeBackend?.flush()
+            kotlinFallback.flush()
+            realtimeMeter = 0f
+        }
+    }
+
+    override fun onReset() {
+        synchronized(convolutionLock) {
+            impulse = FloatArray(0)
+            enabled = false
+            wetMix = 0.35f
+            realtimeMeter = 0f
+            nativeBackend?.release()
+            nativeBackend = null
+            kotlinFallback.reset()
+            configuredSampleRate = 0
+            configuredChannelCount = 0
+        }
+    }
+
+    private fun ensureNativeBackend(): NativeConvolutionBackend? {
+        if (nativeBackend == null) {
+            nativeBackend = NativeConvolutionBackend.createOrNull()?.also { backend ->
+                if (configuredSampleRate > 0 && configuredChannelCount > 0) {
+                    backend.configure(configuredSampleRate, configuredChannelCount)
+                }
+                backend.updateConfig(enabled, wetMix)
+                if (impulse.isNotEmpty()) {
+                    backend.updateImpulse(impulse)
+                }
+            }
+        }
+        return nativeBackend
+    }
+
+    private fun preprocessImpulse(samples: FloatArray?): FloatArray {
+        val source = samples ?: return FloatArray(0)
+        if (source.isEmpty()) {
+            return FloatArray(0)
+        }
+        val trimmed = trimSilence(source, IR_TRIM_THRESHOLD)
+        if (trimmed.isEmpty()) {
+            return FloatArray(0)
+        }
+        val cropped = if (trimmed.size > MAX_IR_TAPS) {
+            trimmed.copyOf(MAX_IR_TAPS)
+        } else {
+            trimmed.copyOf()
+        }
+        var peak = 0f
+        for (sample in cropped) {
+            peak = max(peak, abs(sample))
+        }
+        if (peak > 0.000001f) {
+            val normalizeGain = 0.96f / peak
+            for (index in cropped.indices) {
+                cropped[index] = (cropped[index] * normalizeGain).coerceIn(-1f, 1f)
+            }
+        }
+        applyTailFade(cropped)
+        return cropped
+    }
+
+    private fun trimSilence(source: FloatArray, threshold: Float): FloatArray {
+        var start = 0
+        while (start < source.size && abs(source[start]) < threshold) {
+            start++
+        }
+        var end = source.lastIndex
+        while (end >= start && abs(source[end]) < threshold) {
+            end--
+        }
+        if (start > end) {
+            return FloatArray(0)
+        }
+        return source.copyOfRange(start, end + 1)
+    }
+
+    private fun applyTailFade(ir: FloatArray) {
+        if (ir.isEmpty()) return
+        val fadeLength = min(320, max(16, ir.size / 3))
+        if (fadeLength >= ir.size) return
+        val fadeStart = ir.size - fadeLength
+        val denom = max(1f, (fadeLength - 1).toFloat())
+        for (index in fadeStart until ir.size) {
+            val progress = ((index - fadeStart).toFloat() / denom).coerceIn(0f, 1f)
+            val fade = (1f - progress)
+            ir[index] *= fade * fade
+        }
+    }
+
+    companion object {
+        private const val MAX_IR_TAPS = 4096
+        private const val IR_TRIM_THRESHOLD = 0.0004f
+    }
+}
+
+private class NativeConvolutionBackend private constructor(
+    private var handle: Long
+) {
+    fun configure(sampleRate: Int, channelCount: Int) {
+        if (handle == 0L) return
+        NativeConvolutionBridge.nativeConfigure(handle, sampleRate, channelCount)
+    }
+
+    fun updateConfig(enabled: Boolean, wetMix: Float) {
+        if (handle == 0L) return
+        NativeConvolutionBridge.nativeUpdateConfig(handle, enabled, wetMix)
+    }
+
+    fun updateImpulse(impulse: FloatArray) {
+        if (handle == 0L) return
+        NativeConvolutionBridge.nativeUpdateImpulse(handle, impulse)
+    }
+
+    fun process(inputBuffer: ByteBuffer, outputBuffer: ByteBuffer): Float? {
+        if (handle == 0L || !inputBuffer.isDirect || !outputBuffer.isDirect) {
+            return null
+        }
+        val inputBytes = inputBuffer.remaining()
+        if (inputBytes <= 0) {
+            return 0f
+        }
+        return NativeConvolutionBridge.nativeProcess(handle, inputBuffer, outputBuffer, inputBytes)
+            .takeIf { !it.isNaN() }
+    }
+
+    fun flush() {
+        if (handle == 0L) return
+        NativeConvolutionBridge.nativeFlush(handle)
+    }
+
+    fun release() {
+        if (handle == 0L) return
+        NativeConvolutionBridge.nativeRelease(handle)
+        handle = 0L
+    }
+
+    companion object {
+        fun createOrNull(): NativeConvolutionBackend? {
+            if (!NativeConvolutionBridge.isAvailable) {
+                return null
+            }
+            val handle = runCatching { NativeConvolutionBridge.nativeCreate() }.getOrDefault(0L)
+            return handle.takeIf { it != 0L }?.let(::NativeConvolutionBackend)
+        }
+    }
+}
+
+private object NativeConvolutionBridge {
+    val isAvailable: Boolean by lazy {
+        runCatching {
+            System.loadLibrary("hifxaudio")
+            true
+        }.getOrDefault(false)
+    }
+
+    external fun nativeCreate(): Long
+    external fun nativeRelease(handle: Long)
+    external fun nativeConfigure(handle: Long, sampleRate: Int, channelCount: Int)
+    external fun nativeUpdateConfig(handle: Long, enabled: Boolean, wetMix: Float)
+    external fun nativeUpdateImpulse(handle: Long, impulse: FloatArray?)
+    external fun nativeProcess(handle: Long, inputBuffer: ByteBuffer, outputBuffer: ByteBuffer, inputBytes: Int): Float
+    external fun nativeFlush(handle: Long)
+}
+
+private class KotlinConvolutionBackend {
+    private var enabled = false
+    private var wetMix = 0.35f
+    private var impulse = FloatArray(0)
+    private var impulseCompensation = 1f
+    private var realtimeMeter = 0f
+    private var blockSize = DEFAULT_BLOCK_SIZE
+    private var fftSize = 0
+    private var tailLength = 0
+    private var kernelReal = FloatArray(0)
+    private var kernelImag = FloatArray(0)
+    private var overlapTailLeft = FloatArray(0)
+    private var overlapTailRight = FloatArray(0)
+    private var fftWorkReal = FloatArray(0)
+    private var fftWorkImag = FloatArray(0)
+    private var limiterGain = 1f
+    private var wetAutoGain = 1f
+    private var wasActive = false
+
+    fun updateConfig(enabled: Boolean, wetMix: Float) {
+        val previousEnabled = this.enabled
+        this.enabled = enabled
+        this.wetMix = wetMix.coerceIn(0f, 1f)
+        if (previousEnabled != this.enabled) {
             clearOverlapState()
             limiterGain = 1f
             wetAutoGain = 1f
@@ -199,18 +303,130 @@ internal class ConvolutionReverbProcessor : BaseAudioProcessor() {
         }
     }
 
-    override fun onReset() {
-        synchronized(convolutionLock) {
-            impulse = FloatArray(0)
-            impulseCompensation = 1f
-            clearConvolutionPlan()
+    fun updateImpulse(samples: FloatArray) {
+        impulse = samples
+        impulseCompensation = computeImpulseCompensation(samples)
+        configureConvolutionPlan(samples)
+        limiterGain = 1f
+        wetAutoGain = 1f
+        realtimeMeter = 0f
+        wasActive = false
+    }
+
+    fun process(
+        inputBuffer: ByteBuffer,
+        outputBuffer: ByteBuffer,
+        enabled: Boolean,
+        wetMix: Float,
+        impulse: FloatArray
+    ): Float {
+        val localEnabled = enabled && impulse.isNotEmpty() && fftSize > 0 && kernelReal.isNotEmpty()
+        if (localEnabled != wasActive) {
+            clearOverlapState()
             limiterGain = 1f
             wetAutoGain = 1f
             realtimeMeter = 0f
-            enabled = false
-            wetMix = 0.35f
-            wasActive = false
+            wasActive = localEnabled
         }
+        if (!localEnabled) {
+            clearOverlapState()
+            limiterGain = 1f
+            wetAutoGain = 1f
+            realtimeMeter = 0f
+            wasActive = false
+            outputBuffer.put(inputBuffer)
+            return 0f
+        }
+
+        val frameCount = inputBuffer.remaining() / 4
+        if (frameCount <= 0) {
+            return 0f
+        }
+
+        val inputLeft = FloatArray(frameCount)
+        val inputRight = FloatArray(frameCount)
+        for (index in 0 until frameCount) {
+            inputLeft[index] = shortToFloat(inputBuffer.short)
+            inputRight[index] = shortToFloat(inputBuffer.short)
+        }
+
+        val wetLeft = convolveChannelOla(inputLeft, overlapTailLeft)
+        val wetRight = convolveChannelOla(inputRight, overlapTailRight)
+
+        val wet = wetMix.coerceIn(0f, 1f)
+        val dry = 1f - wet
+        val irComp = impulseCompensation.coerceIn(0.02f, 1f)
+        val levelCompensation = (1f - wet * 0.32f).coerceIn(0.58f, 1f)
+        val limiterThreshold = 0.92f
+        val limiterRelease = 0.0035f
+        val wetLimiterThreshold = 0.72f
+        val wetLimiterAttack = 0.28f
+        val wetLimiterRelease = 0.0018f
+        var meter = realtimeMeter
+        val meterAttack = 0.18f
+        val meterRelease = 0.025f
+
+        for (index in 0 until frameCount) {
+            var wetLeftSample = wetLeft[index] * wet * irComp
+            var wetRightSample = wetRight[index] * wet * irComp
+            val wetPeak = max(abs(wetLeftSample), abs(wetRightSample))
+            val wetTargetGain = if (wetPeak > wetLimiterThreshold) {
+                (wetLimiterThreshold / wetPeak).coerceIn(0.05f, 1f)
+            } else {
+                1f
+            }
+            wetAutoGain = if (wetTargetGain < wetAutoGain) {
+                wetAutoGain + (wetTargetGain - wetAutoGain) * wetLimiterAttack
+            } else {
+                wetAutoGain + (wetTargetGain - wetAutoGain) * wetLimiterRelease
+            }
+            wetLeftSample *= wetAutoGain
+            wetRightSample *= wetAutoGain
+            val mixedLeft = (inputLeft[index] * dry + wetLeftSample) * levelCompensation
+            val mixedRight = (inputRight[index] * dry + wetRightSample) * levelCompensation
+
+            val wetEnergy = max(abs(wetLeftSample), abs(wetRightSample)).coerceIn(0f, 1.5f)
+            meter += (wetEnergy - meter) * if (wetEnergy > meter) meterAttack else meterRelease
+
+            val peak = max(abs(mixedLeft), abs(mixedRight))
+            val targetGain = if (peak > limiterThreshold) {
+                (limiterThreshold / peak).coerceIn(0.05f, 1f)
+            } else {
+                1f
+            }
+            limiterGain = if (targetGain < limiterGain) {
+                targetGain
+            } else {
+                limiterGain + (targetGain - limiterGain) * limiterRelease
+            }
+
+            val limitedLeft = mixedLeft * limiterGain
+            val limitedRight = mixedRight * limiterGain
+            outputBuffer.putShort(floatToShort(softSaturate(limitedLeft)))
+            outputBuffer.putShort(floatToShort(softSaturate(limitedRight)))
+        }
+        realtimeMeter = meter.coerceIn(0f, 1.5f)
+        return realtimeMeter
+    }
+
+    fun flush() {
+        clearOverlapState()
+        limiterGain = 1f
+        wetAutoGain = 1f
+        realtimeMeter = 0f
+        wasActive = false
+    }
+
+    fun reset() {
+        impulse = FloatArray(0)
+        impulseCompensation = 1f
+        clearConvolutionPlan()
+        limiterGain = 1f
+        wetAutoGain = 1f
+        realtimeMeter = 0f
+        enabled = false
+        wetMix = 0.35f
+        wasActive = false
     }
 
     private fun convolveChannelOla(input: FloatArray, overlapTail: FloatArray): FloatArray {
@@ -297,62 +513,6 @@ internal class ConvolutionReverbProcessor : BaseAudioProcessor() {
     private fun clearOverlapState() {
         overlapTailLeft.fill(0f)
         overlapTailRight.fill(0f)
-    }
-
-    private fun preprocessImpulse(samples: FloatArray?): FloatArray {
-        val source = samples ?: return FloatArray(0)
-        if (source.isEmpty()) {
-            return FloatArray(0)
-        }
-        val trimmed = trimSilence(source, IR_TRIM_THRESHOLD)
-        if (trimmed.isEmpty()) {
-            return FloatArray(0)
-        }
-        val cropped = if (trimmed.size > MAX_IR_TAPS) {
-            trimmed.copyOf(MAX_IR_TAPS)
-        } else {
-            trimmed.copyOf()
-        }
-        var peak = 0f
-        for (sample in cropped) {
-            peak = max(peak, abs(sample))
-        }
-        if (peak > 0.000001f) {
-            val normalizeGain = 0.96f / peak
-            for (index in cropped.indices) {
-                cropped[index] = (cropped[index] * normalizeGain).coerceIn(-1f, 1f)
-            }
-        }
-        applyTailFade(cropped)
-        return cropped
-    }
-
-    private fun trimSilence(source: FloatArray, threshold: Float): FloatArray {
-        var start = 0
-        while (start < source.size && abs(source[start]) < threshold) {
-            start++
-        }
-        var end = source.lastIndex
-        while (end >= start && abs(source[end]) < threshold) {
-            end--
-        }
-        if (start > end) {
-            return FloatArray(0)
-        }
-        return source.copyOfRange(start, end + 1)
-    }
-
-    private fun applyTailFade(ir: FloatArray) {
-        if (ir.isEmpty()) return
-        val fadeLength = min(320, max(16, ir.size / 3))
-        if (fadeLength >= ir.size) return
-        val fadeStart = ir.size - fadeLength
-        val denom = max(1f, (fadeLength - 1).toFloat())
-        for (index in fadeStart until ir.size) {
-            val progress = ((index - fadeStart).toFloat() / denom).coerceIn(0f, 1f)
-            val fade = (1f - progress)
-            ir[index] *= fade * fade
-        }
     }
 
     private fun selectBlockSize(impulseLength: Int): Int {
@@ -477,7 +637,5 @@ internal class ConvolutionReverbProcessor : BaseAudioProcessor() {
 
     companion object {
         private const val DEFAULT_BLOCK_SIZE = 512
-        private const val MAX_IR_TAPS = 4096
-        private const val IR_TRIM_THRESHOLD = 0.0004f
     }
 }

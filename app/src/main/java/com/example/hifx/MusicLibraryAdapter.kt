@@ -35,10 +35,12 @@ class MusicLibraryAdapter(
     private val rows = mutableListOf<LibraryListRow>()
     private var lastAnimatedPosition = -1
     private val itemInterpolator = FastOutSlowInInterpolator()
+    private var showPlayCount = false
 
-    fun submitRows(newRows: List<LibraryListRow>) {
+    fun submitRows(newRows: List<LibraryListRow>, showPlayCount: Boolean = false) {
         rows.clear()
         rows.addAll(newRows)
+        this.showPlayCount = showPlayCount
         lastAnimatedPosition = -1
         notifyDataSetChanged()
     }
@@ -70,7 +72,7 @@ class MusicLibraryAdapter(
             is LibraryListRow.Header -> (holder as HeaderViewHolder).bind(row)
             is LibraryListRow.EntityRow -> (holder as EntityViewHolder).bind(row, onEntityClick)
             is LibraryListRow.TrackRow -> {
-                (holder as TrackViewHolder).bind(row.track, onTrackClick)
+                (holder as TrackViewHolder).bind(row.track, showPlayCount, onTrackClick)
                 if (position > lastAnimatedPosition) {
                     holder.itemView.alpha = 0f
                     holder.itemView.translationY = 14f
@@ -106,11 +108,15 @@ class MusicLibraryAdapter(
         private val album: TextView = itemView.findViewById(R.id.text_track_album)
         private val duration: TextView = itemView.findViewById(R.id.text_track_duration)
 
-        fun bind(track: LibraryTrack, onTrackClick: (LibraryTrack) -> Unit) {
+        fun bind(track: LibraryTrack, showPlayCount: Boolean, onTrackClick: (LibraryTrack) -> Unit) {
             cover.loadArtworkOrDefault(track.artworkUri)
             title.text = track.title
             artist.text = track.artist
-            album.text = track.album
+            album.text = if (showPlayCount) {
+                itemView.context.getString(R.string.library_play_count_value, track.playCount)
+            } else {
+                track.album
+            }
             duration.text = track.durationMs.toTimeString()
             itemView.setOnClickListener { onTrackClick(track) }
         }

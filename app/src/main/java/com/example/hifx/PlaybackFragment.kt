@@ -9,11 +9,14 @@ import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
 import android.os.SystemClock
+import android.text.format.DateUtils
 import android.view.LayoutInflater
+import android.view.Menu
 import android.view.View
 import android.view.ViewGroup
 import android.view.ViewTreeObserver
 import android.widget.FrameLayout
+import android.widget.PopupMenu
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.ContextCompat
 import androidx.core.view.ViewCompat
@@ -27,6 +30,7 @@ import androidx.lifecycle.repeatOnLifecycle
 import androidx.recyclerview.widget.RecyclerView
 import androidx.recyclerview.widget.LinearLayoutManager
 import com.example.hifx.audio.AudioEngine
+import com.example.hifx.audio.LibraryTrack
 import com.example.hifx.audio.MediaLibraryUiState
 import com.example.hifx.databinding.FragmentPlaybackBinding
 import com.example.hifx.util.AppHaptics
@@ -43,8 +47,11 @@ class PlaybackFragment : Fragment() {
     private var searchQuery: String = ""
     private var currentPlayableTracks: List<com.example.hifx.audio.LibraryTrack> = emptyList()
     private var letterToPosition: Map<String, Int> = emptyMap()
+    private var indexHintLabels: Map<String, String> = emptyMap()
     private var searchPanelExpanded = false
     private var tabsPanelExpanded = false
+    private var currentSortMode: LibrarySortMode = LibrarySortMode.ALPHABETICAL
+    private var randomTrackOrderIds: List<Long> = emptyList()
     private var searchPanelAnimator: ValueAnimator? = null
     private var tabsPanelAnimator: ValueAnimator? = null
     private var miniPlayerLayoutChangeListener: View.OnLayoutChangeListener? = null
@@ -122,6 +129,7 @@ class PlaybackFragment : Fragment() {
         attachMiniPlayerAnchorTracking()
         setupAlphabetIndex()
         setupTabs()
+        setupSortButton()
         binding.editLibrarySearch.doAfterTextChanged { editable ->
             searchQuery = editable?.toString().orEmpty()
             renderRows(AudioEngine.libraryState.value)
@@ -136,7 +144,7 @@ class PlaybackFragment : Fragment() {
 
     override fun onResume() {
         super.onResume()
-        (activity as? MainActivity)?.supportActionBar?.title = getString(R.string.page_playback)
+        (activity as? MainActivity)?.setTopBarTitle(getString(R.string.page_playback))
         if (hasReadAudioPermission()) {
             AudioEngine.refreshLibrary()
         }
@@ -277,16 +285,44 @@ class PlaybackFragment : Fragment() {
 
     private fun updateTopControlButtons() {
         binding.buttonToggleSearch.alpha = if (searchPanelExpanded) 1f else 0.72f
+        binding.buttonSortMode.alpha = if (currentSortMode == LibrarySortMode.ALPHABETICAL) 0.72f else 1f
         binding.buttonToggleTabs.alpha = if (tabsPanelExpanded) 1f else 0.72f
         binding.buttonToggleSearch.contentDescription = if (searchPanelExpanded) {
             getString(R.string.library_toggle_search_collapse)
         } else {
             getString(R.string.library_toggle_search_expand)
         }
+        binding.buttonSortMode.contentDescription = getString(
+            R.string.library_sort_button
+        ) + "：" + getString(currentSortMode.labelRes)
         binding.buttonToggleTabs.contentDescription = if (tabsPanelExpanded) {
             getString(R.string.library_toggle_tabs_collapse)
         } else {
             getString(R.string.library_toggle_tabs_expand)
+        }
+    }
+
+    private fun setupSortButton() {
+        binding.buttonSortMode.setOnClickListener { view ->
+            AppHaptics.click(view)
+            val popup = PopupMenu(requireContext(), view)
+            popup.menu.add(Menu.NONE, LibrarySortMode.ALPHABETICAL.ordinal, Menu.NONE, getString(LibrarySortMode.ALPHABETICAL.labelRes))
+            popup.menu.add(Menu.NONE, LibrarySortMode.RECENT_ADDED.ordinal, Menu.NONE, getString(LibrarySortMode.RECENT_ADDED.labelRes))
+            popup.menu.add(Menu.NONE, LibrarySortMode.MOST_PLAYED.ordinal, Menu.NONE, getString(LibrarySortMode.MOST_PLAYED.labelRes))
+            popup.menu.add(Menu.NONE, LibrarySortMode.SHUFFLED.ordinal, Menu.NONE, getString(LibrarySortMode.SHUFFLED.labelRes))
+            popup.setOnMenuItemClickListener { item ->
+                val mode = LibrarySortMode.entries.getOrNull(item.itemId) ?: return@setOnMenuItemClickListener false
+                if (currentSortMode != mode) {
+                    currentSortMode = mode
+                    if (mode == LibrarySortMode.SHUFFLED) {
+                        randomTrackOrderIds = emptyList()
+                    }
+                    updateTopControlButtons()
+                    renderRows(AudioEngine.libraryState.value)
+                }
+                true
+            }
+            popup.show()
         }
     }
 
@@ -443,7 +479,7 @@ class PlaybackFragment : Fragment() {
         val playableTracks: List<com.example.hifx.audio.LibraryTrack>
         when (selectedTab) {
             LibraryTab.ALL -> {
-                val tracks = state.tracks.filter { trackMatchesQuery(it, normalizedQuery) }
+                val tracks = sortTracks(state.tracks.filter { trackMatchesQuery(it, normalizedQuery) })
                 rows = tracks.map { LibraryListRow.TrackRow(it) }
                 playableTracks = tracks
             }
@@ -461,12 +497,12 @@ class PlaybackFragment : Fragment() {
             }
         }
         currentPlayableTracks = playableTracks
-        adapter.submitRows(rows)
-        rebuildLetterIndex(rows)
+        adapter.submitRows(rows, showPlayCount = currentSortMode == LibrarySortMode.MOST_PLAYED && selectedTab == LibraryTab.ALL)
+        rebuildIndex(rows)
 
         val hasRows = rows.isNotEmpty()
         binding.layoutEmpty.visibility = if (hasRows || state.loading) View.GONE else View.VISIBLE
-        binding.viewAlphaIndex.visibility = if (hasRows) View.VISIBLE else View.GONE
+        binding.viewAlphaIndex.visibility = if (hasRows && shouldShowIndex()) View.VISIBLE else View.GONE
         binding.textEmpty.text = when {
             !hasReadAudioPermission() -> getString(R.string.library_permission_required)
             state.errorMessage != null -> getString(R.string.library_empty_with_error, state.errorMessage)
@@ -537,7 +573,6 @@ class PlaybackFragment : Fragment() {
     }
 
     private fun setupAlphabetIndex() {
-        binding.viewAlphaIndex.setLetters(indexLetters)
         binding.viewAlphaIndex.onLetterTouch = { letter, touching ->
             if (letterToPosition.isEmpty()) {
                 binding.textIndexHint.visibility = View.GONE
@@ -550,7 +585,7 @@ class PlaybackFragment : Fragment() {
                     layoutManager.scrollToPositionWithOffset(targetPosition, 0)
                     maybeTriggerIndexScrubHaptic(letter, touching)
                 }
-                binding.textIndexHint.text = letter
+                binding.textIndexHint.text = indexHintLabels[letter] ?: letter
                 binding.textIndexHint.visibility = if (touching) View.VISIBLE else View.GONE
                 if (!touching) {
                     lastIndexHapticLetter = null
@@ -566,11 +601,27 @@ class PlaybackFragment : Fragment() {
         })
     }
 
-    private fun rebuildLetterIndex(rows: List<LibraryListRow>) {
+    private fun rebuildIndex(rows: List<LibraryListRow>) {
         if (rows.isEmpty()) {
             letterToPosition = emptyMap()
+            indexHintLabels = emptyMap()
             return
         }
+        if (selectedTab != LibraryTab.ALL || currentSortMode == LibrarySortMode.ALPHABETICAL) {
+            binding.viewAlphaIndex.setEntries(indexLetters, indexLetters)
+            rebuildAlphabetIndex(rows)
+            return
+        }
+        if (currentSortMode == LibrarySortMode.RECENT_ADDED) {
+            rebuildRecentAddedIndex(rows)
+            return
+        }
+        binding.viewAlphaIndex.setEntries(emptyList(), emptyList())
+        letterToPosition = emptyMap()
+        indexHintLabels = emptyMap()
+    }
+
+    private fun rebuildAlphabetIndex(rows: List<LibraryListRow>) {
         val map = linkedMapOf<String, Int>()
         rows.forEachIndexed { index, row ->
             val source = when (row) {
@@ -584,6 +635,32 @@ class PlaybackFragment : Fragment() {
             }
         }
         letterToPosition = map
+        indexHintLabels = map.keys.associateWith { it }
+    }
+
+    private fun rebuildRecentAddedIndex(rows: List<LibraryListRow>) {
+        val keys = mutableListOf<String>()
+        val labels = mutableListOf<String>()
+        val positions = linkedMapOf<String, Int>()
+        val hints = linkedMapOf<String, String>()
+        val seenLabels = mutableSetOf<String>()
+        rows.forEachIndexed { index, row ->
+            val track = (row as? LibraryListRow.TrackRow)?.track ?: return@forEachIndexed
+            val label = track.dateAddedEpochSeconds.toRecentIndexLabel()
+            if (label.isBlank()) {
+                return@forEachIndexed
+            }
+            if (seenLabels.add(label)) {
+                val token = "recent_$index"
+                keys += token
+                labels += ""
+                positions[token] = index
+                hints[token] = label
+            }
+        }
+        binding.viewAlphaIndex.setEntries(keys, labels)
+        letterToPosition = positions
+        indexHintLabels = hints
     }
 
     private fun resolveIndexTargetPosition(letter: String): Int {
@@ -622,6 +699,42 @@ class PlaybackFragment : Fragment() {
         return if (upper in 'A'..'Z') upper.toString() else "#"
     }
 
+    private fun sortTracks(tracks: List<LibraryTrack>): List<LibraryTrack> {
+        return when (currentSortMode) {
+            LibrarySortMode.ALPHABETICAL -> tracks.sortedBy { it.title.lowercase() }
+            LibrarySortMode.RECENT_ADDED -> tracks.sortedWith(
+                compareByDescending<LibraryTrack> { it.dateAddedEpochSeconds }
+                    .thenBy { it.title.lowercase() }
+            )
+            LibrarySortMode.MOST_PLAYED -> tracks.sortedWith(
+                compareByDescending<LibraryTrack> { it.playCount }
+                    .thenBy { it.title.lowercase() }
+            )
+            LibrarySortMode.SHUFFLED -> {
+                val ids = tracks.map { it.id }
+                if (randomTrackOrderIds.size != ids.size || !randomTrackOrderIds.containsAll(ids)) {
+                    randomTrackOrderIds = ids.shuffled()
+                }
+                val order = randomTrackOrderIds.withIndex().associate { it.value to it.index }
+                tracks.sortedBy { order[it.id] ?: Int.MAX_VALUE }
+            }
+        }
+    }
+
+    private fun shouldShowIndex(): Boolean {
+        return selectedTab == LibraryTab.ALL && currentSortMode != LibrarySortMode.MOST_PLAYED && currentSortMode != LibrarySortMode.SHUFFLED ||
+            selectedTab != LibraryTab.ALL
+    }
+
+    private fun Long.toRecentIndexLabel(): String {
+        if (this <= 0L) return ""
+        return DateUtils.formatDateTime(
+            requireContext(),
+            this * 1000L,
+            DateUtils.FORMAT_SHOW_DATE or DateUtils.FORMAT_NO_YEAR
+        )
+    }
+
     private fun requestReadAudioPermission() {
         permissionLauncher.launch(requiredReadAudioPermission())
     }
@@ -645,5 +758,12 @@ class PlaybackFragment : Fragment() {
         ALL,
         ALBUM,
         ARTIST
+    }
+
+    private enum class LibrarySortMode(val labelRes: Int) {
+        ALPHABETICAL(R.string.library_sort_alpha),
+        RECENT_ADDED(R.string.library_sort_recent),
+        MOST_PLAYED(R.string.library_sort_most_played),
+        SHUFFLED(R.string.library_sort_shuffle)
     }
 }

@@ -4,6 +4,7 @@ import android.content.Intent
 import android.animation.ValueAnimator
 import android.graphics.Outline
 import android.graphics.Rect
+import android.graphics.drawable.ColorDrawable
 import android.os.Bundle
 import android.view.MotionEvent
 import android.view.View
@@ -22,6 +23,8 @@ import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
 import com.example.hifx.audio.AudioEngine
 import com.example.hifx.audio.PlaybackUiState
+import com.example.hifx.audio.SettingsUiState
+import com.example.hifx.audio.TopBarVisualizationMode
 import com.example.hifx.databinding.ActivityMainBinding
 import com.example.hifx.databinding.LayoutMiniPlayerBinding
 import com.example.hifx.ui.PlayerTransitionState
@@ -34,6 +37,13 @@ import kotlin.math.abs
 import kotlin.math.roundToInt
 
 class MainActivity : AppCompatActivity() {
+    private data class BannerTextModel(
+        val left: String,
+        val center: String,
+        val right: String,
+        val accent: Int
+    )
+
     companion object {
         private const val EXTRA_OPEN_TARGET = "extra_open_target"
         private const val EXTRA_TARGET_NAME = "extra_target_name"
@@ -72,7 +82,13 @@ class MainActivity : AppCompatActivity() {
     private var suppressMiniCardClickOnce = false
     private var miniHorizontalSwitchTriggered = false
     private var bottomNavHiddenForKeyboard = false
+    private var streamBannerVisible = false
     private val standardInterpolator = FastOutSlowInInterpolator()
+    private var latestSettingsState: SettingsUiState = SettingsUiState()
+    private var currentBannerTextModel: BannerTextModel? = null
+    private var lastStableBannerTextModel: BannerTextModel? = null
+    private var lastBannerMeasuredHeight = 0
+    private val isoGoldColor = 0xFFB08A1E.toInt()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -84,11 +100,25 @@ class MainActivity : AppCompatActivity() {
 
         setSupportActionBar(binding.toolbar)
         supportActionBar?.hide()
+        supportFragmentManager.addOnBackStackChangedListener {
+            updateTopBarTitleFromCurrentFragment()
+            updateFragmentBottomInset(animated = false)
+        }
         setupBottomNavigation()
         setupMiniPlayerActions()
         attachPlayerExitWarmupBridge()
         observeMiniPlayerState()
+        observeTopBarSettings()
+        binding.cardStreamBanner.addOnLayoutChangeListener { _, _, top, _, bottom, _, oldTop, _, oldBottom ->
+            val newHeight = bottom - top
+            val oldHeight = oldBottom - oldTop
+            if (newHeight > 0 && newHeight != oldHeight && newHeight != lastBannerMeasuredHeight) {
+                lastBannerMeasuredHeight = newHeight
+                updateFragmentBottomInset(animated = true)
+            }
+        }
         binding.root.post {
+            updateTopChromeOffsets()
             updateMiniPlayerBottomSpacing()
             updateFragmentBottomInset(animated = false)
         }
@@ -156,6 +186,10 @@ class MainActivity : AppCompatActivity() {
         miniPlayerBinding.buttonMiniPlayPause.setOnClickListener {
             AppHaptics.click(it)
             AudioEngine.togglePlayPause()
+        }
+        miniPlayerBinding.buttonMiniNext.setOnClickListener {
+            AppHaptics.click(it)
+            AudioEngine.skipToNextTrack()
         }
         miniPlayerBinding.progressMini.addOnSliderTouchListener(object : Slider.OnSliderTouchListener {
             override fun onStartTrackingTouch(slider: Slider) {
@@ -237,8 +271,186 @@ class MainActivity : AppCompatActivity() {
             repeatOnLifecycle(Lifecycle.State.STARTED) {
                 AudioEngine.playbackState.collect { state ->
                     renderMiniPlayer(state)
+                    renderStreamBanner(state)
                 }
             }
+        }
+    }
+
+    private fun observeTopBarSettings() {
+        lifecycleScope.launch {
+            repeatOnLifecycle(Lifecycle.State.STARTED) {
+                AudioEngine.settingsState.collect { state ->
+                    renderBannerPreferences(state)
+                }
+            }
+        }
+    }
+
+    private fun renderBannerPreferences(state: SettingsUiState) {
+        latestSettingsState = state
+        renderStreamBanner(latestPlaybackState)
+        updateTopChromeOffsets()
+        updateFragmentBottomInset(animated = false)
+    }
+
+    private fun renderStreamBanner(state: PlaybackUiState) {
+        val showInfoLayer = latestSettingsState.showStreamInfoEnabled
+        val showVisualizerLayer = latestSettingsState.showVisualizationEnabled && state.hasMedia
+        val card = binding.cardStreamBanner
+        val useDirectDacTheme = state.streamInfoUseIsoDacTheme && latestSettingsState.directDacGoldThemeEnabled
+        val accent = if (useDirectDacTheme) {
+            0xFF111111.toInt()
+        } else if (state.streamInfoUseDacAccent) {
+            isoGoldColor
+        } else {
+            MaterialColors.getColor(binding.root, com.google.android.material.R.attr.colorOnSurface)
+        }
+        val incomingTextModel = createBannerTextModel(
+            left = state.streamInfoLeft,
+            center = state.streamInfoCenter,
+            right = state.streamInfoRight,
+            accent = accent
+        )
+        if (incomingTextModel != null) {
+            lastStableBannerTextModel = incomingTextModel
+        }
+        val effectiveTextModel = if (showInfoLayer) incomingTextModel ?: lastStableBannerTextModel else null
+        val shouldShow = (showVisualizerLayer || effectiveTextModel != null) && state.hasMedia
+
+        if (effectiveTextModel != null) {
+            updateBannerTextContent(
+                model = effectiveTextModel,
+                animate = streamBannerVisible && card.visibility == View.VISIBLE
+            )
+        }
+        binding.layoutStreamBannerText.visibility = if (effectiveTextModel != null) View.VISIBLE else View.GONE
+        binding.viewStreamBannerVisualizer.applySettings(
+            enabled = showVisualizerLayer,
+            mode = latestSettingsState.topBarVisualizationMode
+        )
+        binding.viewStreamBannerVisualizer.setIsoDacTheme(useDirectDacTheme)
+        applyTopChromeTheme(useDirectDacTheme)
+
+        if (streamBannerVisible == shouldShow) {
+            if (!shouldShow) {
+                card.visibility = View.GONE
+                currentBannerTextModel = null
+            }
+            updateFragmentBottomInset(animated = true)
+            return
+        }
+        streamBannerVisible = shouldShow
+        card.animate().cancel()
+        if (shouldShow) {
+            card.visibility = View.VISIBLE
+            card.alpha = 0f
+            card.translationY = -dp(4f).toFloat()
+            card.animate()
+                .alpha(1f)
+                .translationY(0f)
+                .setInterpolator(standardInterpolator)
+                .setDuration(180L)
+                .start()
+            card.post { updateFragmentBottomInset(animated = true) }
+        } else {
+            card.animate()
+                .alpha(0f)
+                .translationY(-dp(4f).toFloat())
+                .setInterpolator(standardInterpolator)
+                .setDuration(140L)
+                .withEndAction {
+                    card.visibility = View.GONE
+                    card.alpha = 1f
+                    card.translationY = 0f
+                    updateFragmentBottomInset(animated = true)
+                }
+                .start()
+        }
+    }
+
+    private fun createBannerTextModel(
+        left: String,
+        center: String,
+        right: String,
+        accent: Int
+    ): BannerTextModel? {
+        val normalizedLeft = left.trim()
+        val normalizedCenter = center.trim()
+        val normalizedRight = right.trim()
+        if (normalizedLeft.isEmpty() && normalizedCenter.isEmpty() && normalizedRight.isEmpty()) {
+            return null
+        }
+        return BannerTextModel(
+            left = normalizedLeft,
+            center = normalizedCenter,
+            right = normalizedRight,
+            accent = accent
+        )
+    }
+
+    private fun updateBannerTextContent(model: BannerTextModel, animate: Boolean) {
+        if (currentBannerTextModel == model) {
+            return
+        }
+        val content = binding.layoutStreamBannerText
+        content.animate().cancel()
+        if (!animate || content.visibility != View.VISIBLE) {
+            applyBannerTextModel(model)
+            content.alpha = 1f
+            content.translationY = 0f
+            currentBannerTextModel = model
+            return
+        }
+        content.animate()
+            .alpha(0f)
+            .translationY(-dp(3f).toFloat())
+            .setInterpolator(standardInterpolator)
+            .setDuration(80L)
+            .withEndAction {
+                applyBannerTextModel(model)
+                content.translationY = dp(3f).toFloat()
+                content.animate()
+                    .alpha(1f)
+                    .translationY(0f)
+                    .setInterpolator(standardInterpolator)
+                    .setDuration(140L)
+                    .withEndAction {
+                        currentBannerTextModel = model
+                    }
+                    .start()
+            }
+            .start()
+    }
+
+    private fun applyBannerTextModel(model: BannerTextModel) {
+        binding.textStreamBannerLeft.text = model.left
+        binding.textStreamBannerCenter.text = model.center
+        binding.textStreamBannerRight.text = model.right
+        binding.textStreamBannerLeft.setTextColor(model.accent)
+        binding.textStreamBannerCenter.setTextColor(model.accent)
+        binding.textStreamBannerRight.setTextColor(model.accent)
+    }
+
+    private fun applyTopChromeTheme(useIsoDacTheme: Boolean) {
+        val toolbarColor = if (useIsoDacTheme) {
+            isoGoldColor
+        } else {
+            MaterialColors.getColor(binding.root, com.google.android.material.R.attr.colorSurface)
+        }
+        val titleColor = if (useIsoDacTheme) 0xFF111111.toInt()
+        else MaterialColors.getColor(binding.root, com.google.android.material.R.attr.colorOnSurface)
+        binding.appBar.setBackgroundColor(toolbarColor)
+        binding.toolbar.setBackgroundColor(toolbarColor)
+        binding.toolbar.setTitleTextColor(titleColor)
+        binding.cardStreamBanner.setCardBackgroundColor(toolbarColor)
+        window.statusBarColor = toolbarColor
+        if (window.navigationBarColor != android.graphics.Color.TRANSPARENT) {
+            window.navigationBarColor = toolbarColor
+        }
+        val navBackground = binding.bottomNav.background
+        if (navBackground is ColorDrawable) {
+            binding.bottomNav.setBackgroundColor(toolbarColor)
         }
     }
 
@@ -268,6 +480,8 @@ class MainActivity : AppCompatActivity() {
         miniPlayerBinding.buttonMiniPlayPause.setImageResource(
             if (state.isPlaying) android.R.drawable.ic_media_pause else android.R.drawable.ic_media_play
         )
+        miniPlayerBinding.buttonMiniNext.isEnabled = state.hasNext
+        miniPlayerBinding.buttonMiniNext.alpha = if (state.hasNext) 1f else 0.42f
         latestDurationMs = state.durationMs
         val hasDuration = state.durationMs > 0L
         miniPlayerBinding.progressMini.isEnabled = hasDuration
@@ -391,31 +605,79 @@ class MainActivity : AppCompatActivity() {
 
     private fun updateFragmentBottomInset(animated: Boolean) {
         updateMiniPlayerBottomSpacing()
+        updateTopChromeOffsets()
         val navHeight = resolveBottomNavHeight()
 
         val navInset = navHeight + dp(8f)
-        // Keep content layout stable: mini player is an overlay and should not consume content space.
         val targetBottomInset = navInset
+        val targetTopInset = resolveTopChromeInset()
 
         val container = binding.fragmentContainer
-        val current = container.paddingBottom
-        if (!animated || current == targetBottomInset) {
+        val currentBottom = container.paddingBottom
+        val currentTop = container.paddingTop
+        if (!animated || (currentBottom == targetBottomInset && currentTop == targetTopInset)) {
             containerInsetAnimator?.cancel()
-            container.updatePadding(bottom = targetBottomInset)
+            container.updatePadding(top = targetTopInset, bottom = targetBottomInset)
             return
         }
         containerInsetAnimator?.cancel()
-        containerInsetAnimator = ValueAnimator.ofInt(current, targetBottomInset).apply {
+        containerInsetAnimator = ValueAnimator.ofFloat(0f, 1f).apply {
             duration = 200L
             interpolator = standardInterpolator
             addUpdateListener { animator ->
-                container.updatePadding(bottom = animator.animatedValue as Int)
+                val t = animator.animatedValue as Float
+                val top = (currentTop + (targetTopInset - currentTop) * t).roundToInt()
+                val bottom = (currentBottom + (targetBottomInset - currentBottom) * t).roundToInt()
+                container.updatePadding(top = top, bottom = bottom)
             }
             start()
         }
     }
 
+    private fun resolveTopChromeInset(): Int {
+        val currentFragment = supportFragmentManager.findFragmentById(R.id.fragment_container)
+        val baseInset = resolveVisibleBannerInset()
+        if (baseInset <= 0) {
+            return 0
+        }
+        if (currentFragment is PlaybackFragment) {
+            return baseInset
+        }
+        val bannerHeight = binding.cardStreamBanner.height.takeIf { it > 0 }
+            ?: binding.cardStreamBanner.measuredHeight.takeIf { it > 0 }
+            ?: 0
+        val gentleShift = minOf(dp(10f), (bannerHeight * 0.22f).roundToInt()).coerceAtLeast(dp(4f))
+        return baseInset + gentleShift
+    }
+
+    private fun resolveVisibleBannerInset(): Int {
+        val banner = binding.cardStreamBanner
+        if (banner.visibility != View.VISIBLE) {
+            return 0
+        }
+        val lp = banner.layoutParams as? ViewGroup.MarginLayoutParams
+        val topMargin = lp?.topMargin ?: 0
+        val height = banner.height.takeIf { it > 0 } ?: banner.measuredHeight.takeIf { it > 0 } ?: 0
+        return (topMargin + height).coerceAtLeast(0)
+    }
+
     private fun dp(value: Float): Int = (value * resources.displayMetrics.density).roundToInt()
+
+    private fun resolveToolbarHeight(): Int {
+        return binding.appBar.height.takeIf { it > 0 }
+            ?: binding.toolbar.height.takeIf { it > 0 }
+            ?: dp(44f)
+    }
+
+    private fun updateTopChromeOffsets() {
+        val bannerLp = binding.cardStreamBanner.layoutParams as? ViewGroup.MarginLayoutParams ?: return
+        val anchorTop = dp(2f)
+        val targetTop = anchorTop
+        if (bannerLp.topMargin != targetTop) {
+            bannerLp.topMargin = targetTop
+            binding.cardStreamBanner.layoutParams = bannerLp
+        }
+    }
 
     private fun updateMiniPlayerBottomSpacing() {
         val navHeight = resolveBottomNavHeight()
@@ -722,12 +984,13 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun navigateTo(fragment: Fragment, titleRes: Int) {
-        supportActionBar?.title = getString(titleRes)
+        setTopBarTitle(getString(titleRes))
         supportFragmentManager.beginTransaction()
             .setReorderingAllowed(true)
             .replace(R.id.fragment_container, fragment)
             .commit()
         setBottomNavHiddenForKeyboard(false)
+        binding.fragmentContainer.post { updateFragmentBottomInset(animated = false) }
     }
 
     private fun handleExternalNavigationIntent(intent: Intent): Boolean {
@@ -762,12 +1025,26 @@ class MainActivity : AppCompatActivity() {
             fm.executePendingTransactions()
         }
         binding.bottomNav.menu.findItem(R.id.navigation_playback).isChecked = true
-        supportActionBar?.title = title
+        setTopBarTitle(title)
         fm.beginTransaction()
             .setReorderingAllowed(true)
             .replace(R.id.fragment_container, detailFragment)
             .addToBackStack(null)
             .commit()
         setBottomNavHiddenForKeyboard(false)
+        binding.fragmentContainer.post { updateFragmentBottomInset(animated = false) }
+    }
+
+    fun setTopBarTitle(title: CharSequence) {
+        binding.toolbar.title = title
+        supportActionBar?.title = title
+    }
+
+    private fun updateTopBarTitleFromCurrentFragment() {
+        when (supportFragmentManager.findFragmentById(R.id.fragment_container)) {
+            is PlaybackFragment -> setTopBarTitle(getString(R.string.page_playback))
+            is EffectsFragment -> setTopBarTitle(getString(R.string.page_effects))
+            is SettingsFragment -> setTopBarTitle(getString(R.string.page_settings))
+        }
     }
 }

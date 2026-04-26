@@ -53,7 +53,7 @@ class ArtistDetailFragment : Fragment() {
 
     override fun onResume() {
         super.onResume()
-        (activity as? MainActivity)?.supportActionBar?.title = artistName
+        (activity as? MainActivity)?.setTopBarTitle(artistName)
     }
 
     private fun observeState() {

@@ -190,6 +190,21 @@
                     app:iconPadding="0dp" />
 
                 <com.google.android.material.button.MaterialButton
+                    android:id="@+id/button_sort_mode"
+                    style="@style/Widget.Material3.Button.TonalButton"
+                    android:layout_width="40dp"
+                    android:layout_height="40dp"
+                    android:layout_marginStart="10dp"
+                    android:contentDescription="@string/library_sort_button"
+                    android:insetTop="0dp"
+                    android:insetBottom="0dp"
+                    android:minWidth="40dp"
+                    android:text=""
+                    app:icon="@android:drawable/ic_menu_sort_by_size"
+                    app:iconGravity="textStart"
+                    app:iconPadding="0dp" />
+
+                <com.google.android.material.button.MaterialButton
                     android:id="@+id/button_toggle_tabs"
                     style="@style/Widget.Material3.Button.TonalButton"
                     android:layout_width="40dp"
@@ -200,7 +215,7 @@
                     android:insetBottom="0dp"
                     android:minWidth="40dp"
                     android:text=""
-                    app:icon="@android:drawable/ic_menu_sort_by_size"
+                    app:icon="@android:drawable/ic_menu_today"
                     app:iconGravity="textStart"
                     app:iconPadding="0dp" />
             </LinearLayout>

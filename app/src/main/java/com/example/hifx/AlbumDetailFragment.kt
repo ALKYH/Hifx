@@ -58,7 +58,7 @@ class AlbumDetailFragment : Fragment() {
 
     override fun onResume() {
         super.onResume()
-        (activity as? MainActivity)?.supportActionBar?.title = albumName
+        (activity as? MainActivity)?.setTopBarTitle(albumName)
     }
 
     private fun observeState() {

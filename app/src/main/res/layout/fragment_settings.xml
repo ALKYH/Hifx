@@ -72,6 +72,15 @@
                 app:icon="@android:drawable/ic_menu_edit" />
 
             <com.google.android.material.button.MaterialButton
+                android:id="@+id/button_menu_visualization"
+                style="@style/Widget.Material3.Button.TonalButton"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:text="@string/settings_menu_visualization"
+                app:icon="@android:drawable/ic_menu_slideshow" />
+
+            <com.google.android.material.button.MaterialButton
                 android:id="@+id/button_menu_library"
                 style="@style/Widget.Material3.Button.TonalButton"
                 android:layout_width="match_parent"
@@ -121,6 +130,13 @@
                     android:layout_height="wrap_content"
                     android:text="@string/settings_appearance_title"
                     android:textAppearance="?attr/textAppearanceTitleMedium" />
+
+                <com.google.android.material.materialswitch.MaterialSwitch
+                    android:id="@+id/switch_direct_dac_gold_theme"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="10dp"
+                    android:text="@string/settings_direct_dac_gold_theme_switch" />
 
                 <RadioGroup
                     android:id="@+id/group_theme_mode"
@@ -185,14 +201,14 @@
                             android:text="@string/settings_background_blur_value"
                             android:textAppearance="?attr/textAppearanceLabelLarge" />
 
-                        <com.google.android.material.slider.Slider
-                            android:id="@+id/slider_background_blur"
-                            android:layout_width="match_parent"
-                            android:layout_height="wrap_content"
-                            android:layout_marginTop="6dp"
-                            android:stepSize="1"
-                            android:valueFrom="0"
-                            android:valueTo="100" />
+                <com.google.android.material.slider.Slider
+                    android:id="@+id/slider_background_blur"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="6dp"
+                    android:stepSize="1"
+                    android:valueFrom="0"
+                            android:valueTo="220" />
 
                         <TextView
                             android:id="@+id/text_background_opacity_value"
@@ -343,6 +359,53 @@
                     android:layout_height="wrap_content"
                     android:layout_marginTop="6dp" />
 
+                <TextView
+                    android:id="@+id/text_usb_direct_capability"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="6dp"
+                    android:text="@string/settings_usb_direct_capability_default"
+                    android:textAppearance="?attr/textAppearanceBodySmall" />
+
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="10dp"
+                    android:text="@string/settings_usb_direct_sample_rate_title"
+                    android:textAppearance="?attr/textAppearanceLabelLarge" />
+
+                <Spinner
+                    android:id="@+id/spinner_usb_direct_sample_rate"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="6dp" />
+
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="10dp"
+                    android:text="@string/settings_usb_direct_bit_depth_title"
+                    android:textAppearance="?attr/textAppearanceLabelLarge" />
+
+                <Spinner
+                    android:id="@+id/spinner_usb_direct_bit_depth"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="6dp" />
+
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="10dp"
+                    android:text="@string/settings_usb_resample_algorithm_title"
+                    android:textAppearance="?attr/textAppearanceLabelLarge" />
+
+                <Spinner
+                    android:id="@+id/spinner_usb_resample_algorithm"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="6dp" />
+
                 <com.google.android.material.materialswitch.MaterialSwitch
                     android:id="@+id/switch_usb_exclusive"
                     android:layout_width="match_parent"
@@ -416,6 +479,20 @@
                     android:layout_marginTop="10dp"
                     android:text="@string/settings_show_lyrics_panel_switch" />
 
+                <com.google.android.material.materialswitch.MaterialSwitch
+                    android:id="@+id/switch_lyrics_glow"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:text="@string/settings_lyrics_glow_switch" />
+
+                <com.google.android.material.materialswitch.MaterialSwitch
+                    android:id="@+id/switch_show_lyrics_scan_head"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:text="@string/settings_show_lyrics_scan_head_switch" />
+
                 <TextView
                     android:id="@+id/text_lyrics_font_size_value"
                     android:layout_width="match_parent"
@@ -475,6 +552,66 @@
                         android:text="@string/settings_lyrics_font_preview_text"
                         android:textAppearance="?attr/textAppearanceBodyLarge" />
                 </com.google.android.material.card.MaterialCardView>
+            </LinearLayout>
+        </com.google.android.material.card.MaterialCardView>
+
+        <com.google.android.material.card.MaterialCardView
+            android:id="@+id/section_visualization"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:visibility="gone"
+            app:cardBackgroundColor="?attr/colorSurfaceContainer"
+            app:cardCornerRadius="24dp"
+            app:strokeColor="?attr/colorOutlineVariant"
+            app:strokeWidth="1dp">
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:padding="16dp">
+
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="@string/settings_visualization_title"
+                    android:textAppearance="?attr/textAppearanceTitleMedium" />
+
+                <com.google.android.material.materialswitch.MaterialSwitch
+                    android:id="@+id/switch_show_stream_info"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="10dp"
+                    android:text="@string/settings_show_stream_info_switch" />
+
+                <com.google.android.material.materialswitch.MaterialSwitch
+                    android:id="@+id/switch_show_visualization"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:text="@string/settings_show_visualization_switch" />
+
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="10dp"
+                    android:text="@string/settings_visualization_mode_title"
+                    android:textAppearance="?attr/textAppearanceLabelLarge" />
+
+                <Spinner
+                    android:id="@+id/spinner_visualization_mode"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="6dp" />
+
+                <TextView
+                    android:id="@+id/text_visualization_hint"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="10dp"
+                    android:text="@string/settings_visualization_hint"
+                    android:textAppearance="?attr/textAppearanceBodySmall" />
             </LinearLayout>
         </com.google.android.material.card.MaterialCardView>
 
@@ -566,6 +703,13 @@
                     android:layout_height="wrap_content"
                     android:layout_marginTop="8dp"
                     android:text="@string/settings_haptic_feedback_switch" />
+
+                <com.google.android.material.materialswitch.MaterialSwitch
+                    android:id="@+id/switch_haptic_audio"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:text="@string/settings_haptic_audio_switch" />
             </LinearLayout>
         </com.google.android.material.card.MaterialCardView>
 
