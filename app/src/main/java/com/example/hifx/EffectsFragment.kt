@@ -1,4 +1,4 @@
-package com.example.hifx
+﻿package com.example.hifx
 
 import android.content.Intent
 import android.graphics.Color
@@ -14,12 +14,19 @@ import android.view.View
 import android.view.ViewGroup
 import android.widget.ArrayAdapter
 import android.widget.EditText
+import android.widget.FrameLayout
+import android.widget.GridLayout
 import android.widget.ImageView
 import android.widget.LinearLayout
+import android.widget.ScrollView
+import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.ContextCompat
+import androidx.core.view.children
+import androidx.core.view.doOnLayout
 import androidx.core.view.isVisible
+import androidx.core.view.updateLayoutParams
 import androidx.fragment.app.Fragment
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
@@ -28,11 +35,17 @@ import com.example.hifx.audio.AudioEngine
 import com.example.hifx.audio.EffectsUiState
 import com.example.hifx.databinding.FragmentEffectsBinding
 import com.example.hifx.ui.EqCurveView
+import com.example.hifx.ui.KnobView
+import com.example.hifx.ui.PagedHorizontalScrollView
 import com.example.hifx.ui.SpatialPadView
+import com.example.hifx.util.AppHaptics
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
+import com.google.android.material.materialswitch.MaterialSwitch
 import com.google.android.material.button.MaterialButton
+import com.google.android.material.color.MaterialColors
 import com.google.android.material.slider.Slider
-import com.google.android.material.tabs.TabLayout
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlin.math.abs
 import kotlin.math.ln
@@ -50,9 +63,48 @@ class EffectsFragment : Fragment() {
     private var selectedHandle: SpatialPadView.Handle = SpatialPadView.Handle.LEFT
     private var selectedEqBandIndex: Int = 0
     private var currentTabPosition: Int = 0
-    private var lastEqDotsSignature: String = ""
+    private var effectsPager: PagedHorizontalScrollView? = null
+    private var effectsPagesRow: LinearLayout? = null
+    private var lastEqBottomSpacerHeight = Int.MIN_VALUE
+    private var surroundGainHeaderIndicator: TextView? = null
+    private var effectsMasterToggleGlow: GradientDrawable? = null
+    private var effectsMasterToggleCore: GradientDrawable? = null
+    private var vocalRemovalSwitch: MaterialSwitch? = null
+    private var rightChannelPhaseInvertSwitch: MaterialSwitch? = null
+    private var vocalKeySectionView: View? = null
+    private var vocalBandSectionView: View? = null
+    private var vocalKeyValueView: android.widget.TextView? = null
+    private var vocalKeyDownButton: MaterialButton? = null
+    private var vocalKeyUpButton: MaterialButton? = null
+    private var vocalBandLowValueView: android.widget.TextView? = null
+    private var vocalBandHighValueView: android.widget.TextView? = null
+    private var vocalBandLowKnob: KnobView? = null
+    private var vocalBandHighKnob: KnobView? = null
+    private var panKnobControl: KnobControl? = null
+    private var speedKnobControl: KnobControl? = null
+    private var crossfeedKnobControl: KnobControl? = null
+    private var convolutionWetKnobControl: KnobControl? = null
+    private var channelSpacingKnobControl: KnobControl? = null
+    private var radiusKnobControl: KnobControl? = null
+    private var posXKnobControl: KnobControl? = null
+    private var posYKnobControl: KnobControl? = null
+    private var posZKnobControl: KnobControl? = null
+    private val surroundGainKnobControls = linkedMapOf<Int, KnobControl>()
     private val speedRepeatHandler = Handler(Looper.getMainLooper())
     private var speedRepeatTask: Runnable? = null
+    private val eqSpectrumBuffer = FloatArray(64)
+
+    private data class KnobControl(
+        val container: View,
+        val knob: KnobView,
+        val valueView: TextView
+    )
+
+    private data class CollapsibleSection(
+        val body: ViewGroup,
+        val indicator: TextView,
+        var expanded: Boolean
+    )
 
     companion object {
         private const val EQ_FREQ_MIN_HZ = 20f
@@ -99,8 +151,24 @@ class EffectsFragment : Fragment() {
     }
 
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
+        setupEffectsPager()
+        ensureVocalRemovalSwitch()
+        ensureVocalKeyControls()
+        ensureVocalBandControls()
+        ensureRightChannelPhaseInvertSwitch()
+        ensurePanKnobControl()
+        ensurePlaybackSpeedKnobControl()
+        ensureCrossfeedKnobControl()
+        ensureConvolutionKnobControl()
+        ensureChannelKnobControls()
+        ensureSurroundGainKnobControls()
+        setupEffectsSectionHeaders()
+        setupSurroundGainCollapseHeader()
+        setupVocalControlsSection()
+        setupPanAndSpeedSections()
         setupControls()
-        setupTabs()
+        setupEqBottomInsetTracking()
+        setupEqViewportSizing()
         observeEffectState()
     }
 
@@ -110,11 +178,379 @@ class EffectsFragment : Fragment() {
         _binding = null
     }
 
-    private fun setupControls() {
-        binding.switchEffectsEnabled.setOnCheckedChangeListener { _, isChecked ->
-            if (!internalUpdating) {
-                AudioEngine.setEffectsEnabled(isChecked)
+    private fun setupEffectsPager() {
+        if (effectsPager != null) return
+        currentTabPosition = 0
+        binding.tabEffects.isVisible = false
+        val container = binding.effectsContainer
+        val panels = listOf(binding.panelEq, binding.panelReverb, binding.panelOther)
+        container.removeAllViews()
+
+        val pagesRow = LinearLayout(requireContext()).apply {
+            layoutParams = FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+            )
+            orientation = LinearLayout.HORIZONTAL
+        }
+        panels.forEach { panel ->
+            (panel.parent as? ViewGroup)?.removeView(panel)
+            panel.isVisible = true
+            panel.alpha = 1f
+            panel.translationY = 0f
+            val pageHost: View = if (panel === binding.panelEq) {
+                panel
+            } else {
+                ScrollView(requireContext()).apply {
+                    layoutParams = ViewGroup.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.MATCH_PARENT
+                    )
+                    isFillViewport = true
+                    overScrollMode = View.OVER_SCROLL_IF_CONTENT_SCROLLS
+                    addView(
+                        panel,
+                        ViewGroup.LayoutParams(
+                            ViewGroup.LayoutParams.MATCH_PARENT,
+                            ViewGroup.LayoutParams.WRAP_CONTENT
+                        )
+                    )
+                }
             }
+            pagesRow.addView(
+                pageHost,
+                LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.MATCH_PARENT
+                )
+            )
+        }
+
+        val pager = PagedHorizontalScrollView(requireContext()).apply {
+            layoutParams = FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+            )
+            addView(pagesRow)
+            pageCount = panels.size
+            onPageChanged = { page -> currentTabPosition = page }
+        }
+        container.addView(pager)
+        effectsPager = pager
+        effectsPagesRow = pagesRow
+        container.doOnLayout {
+            val width = it.width
+            val height = it.height
+            if (width <= 0 || height <= 0) return@doOnLayout
+            pagesRow.children.forEach { page ->
+                val params = page.layoutParams as LinearLayout.LayoutParams
+                if (params.width != width) {
+                    params.width = width
+                }
+                if (params.height != height) {
+                    params.height = height
+                }
+                page.layoutParams = params
+            }
+            pager.snapToPage(currentTabPosition, smooth = false)
+        }
+        pager.post {
+            if (isAdded) {
+                renderEffectTab(position = 0, animate = false)
+            }
+        }
+    }
+
+    private fun updateEffectsPageHeight() {
+        effectsPager?.requestLayout()
+    }
+
+        private fun setupEffectsSectionHeaders() {
+        (binding.panelEq.getChildAt(0) as? TextView)?.isVisible = true
+        binding.panelEq.getChildAt(1)?.isVisible = false
+        binding.switchEqEnabled.isVisible = true
+
+        val spatialParent = binding.switchSpatialEnabled.parent as LinearLayout
+        if (spatialParent.findViewWithTag<View>("spatial_section_header") == null) {
+            val titleView = spatialParent.getChildAt(0)
+            titleView?.isVisible = false
+            installCollapsibleSection(
+                parent = spatialParent,
+                title = getString(R.string.effects_reverb_title),
+                toggleView = binding.switchSpatialEnabled,
+                bodyViews = spatialParent.children.filter { child ->
+                    child !== titleView && child !== binding.switchSpatialEnabled
+                }.toList(),
+                startExpanded = false,
+                headerTag = "spatial_section_header"
+            )
+        }
+
+        val surroundParent = binding.switchSurroundEnabled.parent as LinearLayout
+        if (surroundParent.findViewWithTag<View>("surround_section_header") == null) {
+            val titleView = surroundParent.getChildAt(0)
+            titleView?.isVisible = false
+            installCollapsibleSection(
+                parent = surroundParent,
+                title = getString(R.string.effects_surround_mode_title),
+                toggleView = binding.switchSurroundEnabled,
+                bodyViews = surroundParent.children.filter { child ->
+                    child !== titleView && child !== binding.switchSurroundEnabled
+                }.toList(),
+                startExpanded = false,
+                headerTag = "surround_section_header"
+            )
+        }
+
+        val convolutionParent = binding.switchConvolutionEnabled.parent as LinearLayout
+        if (convolutionParent.findViewWithTag<View>("convolution_section_header") == null) {
+            val titleView = convolutionParent.getChildAt(0)
+            titleView?.isVisible = false
+            installCollapsibleSection(
+                parent = convolutionParent,
+                title = getString(R.string.effects_convolution_title),
+                toggleView = binding.switchConvolutionEnabled,
+                bodyViews = convolutionParent.children.filter { child ->
+                    child !== titleView && child !== binding.switchConvolutionEnabled
+                }.toList(),
+                startExpanded = false,
+                headerTag = "convolution_section_header"
+            )
+        }
+    }
+
+        private fun installCollapsibleSection(
+        parent: LinearLayout,
+        title: String,
+        toggleView: View?,
+        fillAvailableHeight: Boolean = false,
+        bodyViews: List<View>,
+        startExpanded: Boolean = false,
+        headerTag: String? = null
+    ) {
+        val body = LinearLayout(requireContext()).apply {
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                if (fillAvailableHeight) 0 else ViewGroup.LayoutParams.WRAP_CONTENT,
+                if (fillAvailableHeight) 1f else 0f
+            )
+            orientation = LinearLayout.VERTICAL
+        }
+        bodyViews.forEach { view ->
+            parent.removeView(view)
+            body.addView(view)
+        }
+
+        val indicator = TextView(requireContext()).apply {
+            text = if (startExpanded) "▾" else "▸"
+            setTextAppearance(com.google.android.material.R.style.TextAppearance_Material3_TitleMedium)
+            alpha = 0.82f
+        }
+
+        val header = LinearLayout(requireContext()).apply {
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+            tag = headerTag
+            gravity = android.view.Gravity.CENTER_VERTICAL
+            orientation = LinearLayout.HORIZONTAL
+            minimumHeight = dp(44f)
+            setPadding(0, 0, 0, dp(6f))
+        }
+        header.addView(TextView(requireContext()).apply {
+            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+            text = title
+            setTextAppearance(com.google.android.material.R.style.TextAppearance_Material3_TitleMedium)
+        })
+        toggleView?.let {
+            (it.parent as? ViewGroup)?.removeView(it)
+            header.addView(it, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply {
+                marginEnd = dp(8f)
+            })
+        }
+        header.addView(indicator)
+
+        val section = CollapsibleSection(
+            body = body,
+            indicator = indicator,
+            expanded = startExpanded
+        )
+        body.isVisible = startExpanded
+        header.setOnClickListener {
+            section.expanded = !section.expanded
+            body.isVisible = section.expanded
+            indicator.text = if (section.expanded) "▾" else "▸"
+            body.post { updateEffectsPageHeight() }
+        }
+
+        parent.addView(header, 0)
+        parent.addView(body, 1)
+    }
+
+    private fun setupVocalControlsSection() {
+        val parent = binding.panelOther
+        if (parent.findViewWithTag<View>("vocal_section") != null) return
+
+        val insertIndex = parent.indexOfChild(binding.switchPhaseInvertEnabled).coerceAtLeast(0)
+        val vocalBodyViews = listOfNotNull(
+            vocalRemovalSwitch,
+            vocalKeySectionView,
+            vocalBandSectionView
+        )
+        if (vocalBodyViews.isEmpty()) return
+
+        val section = createInlineCollapsibleSection(
+            title = getString(R.string.effects_vocal_controls_title),
+            bodyViews = vocalBodyViews,
+            startExpanded = false
+        ).apply { tag = "vocal_section" }
+        parent.addView(section, insertIndex)
+    }
+
+    private fun setupPanAndSpeedSections() {
+        val parent = binding.panelOther
+        if (parent.findViewWithTag<View>("pan_section") == null) {
+            val panTitleIndex = (parent.indexOfChild(binding.textPanValue) - 1).coerceAtLeast(0)
+            val panTitleView = parent.getChildAt(panTitleIndex)
+            val crossfeedTitleIndex = (parent.indexOfChild(binding.textCrossfeedValue) - 1).coerceAtLeast(0)
+            val crossfeedTitleView = parent.getChildAt(crossfeedTitleIndex)
+            val insertIndex = panTitleIndex
+            val panBodyViews = listOfNotNull(
+                panKnobControl?.container,
+                binding.switchPanInvertEnabled,
+                crossfeedKnobControl?.container
+            )
+            panTitleView.isVisible = false
+            crossfeedTitleView.isVisible = false
+            val section = createInlineCollapsibleSection(
+                title = getString(R.string.effects_pan_title),
+                bodyViews = panBodyViews,
+                startExpanded = false
+            ).apply { tag = "pan_section" }
+            parent.addView(section, insertIndex)
+        }
+
+        if (parent.findViewWithTag<View>("speed_section") == null) {
+            val speedRow = binding.buttonPlaybackSpeedDown.parent as View
+            val speedTitleIndex = (parent.indexOfChild(speedRow) - 1).coerceAtLeast(0)
+            val speedTitleView = parent.getChildAt(speedTitleIndex)
+            val insertIndex = speedTitleIndex
+            speedRow.isVisible = false
+            speedTitleView.isVisible = false
+            val section = createInlineCollapsibleSection(
+                title = getString(R.string.effects_playback_speed_title),
+                bodyViews = listOfNotNull(
+                    speedKnobControl?.container,
+                    binding.switchPlaybackSpeedPitchCompensationEnabled
+                ),
+                startExpanded = false
+            ).apply { tag = "speed_section" }
+            parent.addView(section, insertIndex)
+        }
+    }
+
+        private fun createInlineCollapsibleSection(
+        title: String,
+        bodyViews: List<View>,
+        startExpanded: Boolean = false
+    ): View {
+        val body = LinearLayout(requireContext()).apply {
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+            orientation = LinearLayout.VERTICAL
+        }
+        bodyViews.forEach { view ->
+            (view.parent as? ViewGroup)?.removeView(view)
+            body.addView(view)
+        }
+        val indicator = TextView(requireContext()).apply {
+            text = if (startExpanded) "▾" else "▸"
+            setTextAppearance(com.google.android.material.R.style.TextAppearance_Material3_TitleMedium)
+            alpha = 0.82f
+        }
+        return LinearLayout(requireContext()).apply {
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply {
+                topMargin = dp(8f)
+            }
+            orientation = LinearLayout.VERTICAL
+            background = ContextCompat.getDrawable(requireContext(), R.drawable.bg_eq_curve_panel)
+            setPadding(dp(12f), dp(12f), dp(12f), dp(12f))
+
+            addView(LinearLayout(requireContext()).apply {
+                layoutParams = LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+                )
+                gravity = android.view.Gravity.CENTER_VERTICAL
+                orientation = LinearLayout.HORIZONTAL
+                addView(TextView(requireContext()).apply {
+                    layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+                    text = title
+                    setTextAppearance(com.google.android.material.R.style.TextAppearance_Material3_TitleSmall)
+                })
+                addView(indicator)
+                setOnClickListener {
+                    body.isVisible = !body.isVisible
+                    indicator.text = if (body.isVisible) "▾" else "▸"
+                    body.post { updateEffectsPageHeight() }
+                }
+            })
+            body.isVisible = startExpanded
+            addView(body)
+        }
+    }
+
+        private fun setupSurroundGainCollapseHeader() {
+        if (surroundGainHeaderIndicator != null) return
+        binding.buttonToggleSurroundGainPanel.isVisible = false
+        binding.textSurroundGainHint.isVisible = false
+        val parent = binding.buttonToggleSurroundGainPanel.parent as LinearLayout
+        val insertIndex = parent.indexOfChild(binding.buttonToggleSurroundGainPanel).coerceAtLeast(0)
+        val indicator = TextView(requireContext()).apply {
+            text = if (surroundGainPanelExpanded) "▾" else "▸"
+            setTextAppearance(com.google.android.material.R.style.TextAppearance_Material3_TitleMedium)
+            alpha = 0.82f
+        }
+        val header = LinearLayout(requireContext()).apply {
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply {
+                topMargin = dp(8f)
+            }
+            gravity = android.view.Gravity.CENTER_VERTICAL
+            orientation = LinearLayout.HORIZONTAL
+            minimumHeight = dp(40f)
+            setOnClickListener {
+                surroundGainPanelExpanded = !surroundGainPanelExpanded
+                updateSurroundGainPanelVisibility()
+                indicator.text = if (surroundGainPanelExpanded) "▾" else "▸"
+            }
+            addView(TextView(requireContext()).apply {
+                layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+                text = getString(R.string.effects_surround_gain_title)
+                setTextAppearance(com.google.android.material.R.style.TextAppearance_Material3_TitleSmall)
+            })
+            addView(indicator)
+        }
+        parent.addView(header, insertIndex)
+        surroundGainHeaderIndicator = indicator
+    }
+
+    private fun setupControls() {
+        binding.layoutEffectsMasterToggle.setOnClickListener {
+            if (internalUpdating) return@setOnClickListener
+            AppHaptics.click(it)
+            AudioEngine.setEffectsEnabled(!AudioEngine.effectsState.value.enabled)
         }
         binding.switchSpatialEnabled.setOnCheckedChangeListener { _, isChecked ->
             if (!internalUpdating) {
@@ -209,9 +645,39 @@ class EffectsFragment : Fragment() {
                 AudioEngine.setMonoEnabled(checked)
             }
         }
+        vocalRemovalSwitch?.setOnCheckedChangeListener { _, checked ->
+            if (!internalUpdating) {
+                AudioEngine.setVocalRemovalEnabled(checked)
+            }
+        }
+        vocalKeyDownButton?.setOnClickListener {
+            if (!internalUpdating) {
+                AudioEngine.adjustVocalKeyShiftSemitonesByStep(-1)
+            }
+        }
+        vocalKeyUpButton?.setOnClickListener {
+            if (!internalUpdating) {
+                AudioEngine.adjustVocalKeyShiftSemitonesByStep(1)
+            }
+        }
+        vocalBandLowKnob?.onValueChange = { value, fromUser ->
+            if (fromUser && !internalUpdating) {
+                AudioEngine.setVocalBandLowCutHz(value.toInt())
+            }
+        }
+        vocalBandHighKnob?.onValueChange = { value, fromUser ->
+            if (fromUser && !internalUpdating) {
+                AudioEngine.setVocalBandHighCutHz(value.toInt())
+            }
+        }
         binding.switchPhaseInvertEnabled.setOnCheckedChangeListener { _, checked ->
             if (!internalUpdating) {
                 AudioEngine.setPhaseInvertEnabled(checked)
+            }
+        }
+        rightChannelPhaseInvertSwitch?.setOnCheckedChangeListener { _, checked ->
+            if (!internalUpdating) {
+                AudioEngine.setRightChannelPhaseInvertEnabled(checked)
             }
         }
         bindSlider(binding.sliderCrossfeed) { AudioEngine.setCrossfeedPercent(it) }
@@ -224,6 +690,13 @@ class EffectsFragment : Fragment() {
 
         binding.switchConvolutionEnabled.setOnCheckedChangeListener { _, checked ->
             if (!internalUpdating) {
+                if (checked && AudioEngine.effectsState.value.convolutionIrUri.isNullOrBlank()) {
+                    internalUpdating = true
+                    binding.switchConvolutionEnabled.isChecked = false
+                    internalUpdating = false
+                    irPickerLauncher.launch(arrayOf("*/*"))
+                    return@setOnCheckedChangeListener
+                }
                 AudioEngine.setConvolutionEnabled(checked)
             }
         }
@@ -328,82 +801,664 @@ class EffectsFragment : Fragment() {
                 Toast.makeText(requireContext(), getString(R.string.effects_eq_preset_delete_empty), Toast.LENGTH_SHORT).show()
             }
         }
-        binding.sliderEqFreq.addOnChangeListener { _, value, fromUser ->
+        binding.knobEqFreq.onValueChange = { value, fromUser ->
             if (fromUser && !internalUpdating) {
                 AudioEngine.setEqBandFrequency(selectedEqBandIndex, sliderValueToFrequencyHz(value))
             }
         }
-        binding.sliderEqQ.addOnChangeListener { _, value, fromUser ->
+        binding.knobEqQ.onValueChange = { value, fromUser ->
             if (fromUser && !internalUpdating) {
                 AudioEngine.setEqBandQ(selectedEqBandIndex, value.roundToInt())
             }
         }
-        binding.sliderEqGain.addOnChangeListener { _, value, fromUser ->
+        binding.knobEqGain.onValueChange = { value, fromUser ->
             if (fromUser && !internalUpdating) {
                 AudioEngine.setEqBandLevel(selectedEqBandIndex, value.roundToInt())
             }
         }
     }
 
-    private fun setupTabs() {
-        binding.tabEffects.addOnTabSelectedListener(object : TabLayout.OnTabSelectedListener {
-            override fun onTabSelected(tab: TabLayout.Tab?) {
-                renderEffectTab(tab?.position ?: 0, animate = true)
+    private fun ensureVocalRemovalSwitch() {
+        if (vocalRemovalSwitch != null) return
+        val container = binding.panelOther
+        val insertIndex = container.indexOfChild(binding.switchPhaseInvertEnabled).coerceAtLeast(0)
+        val switchView = MaterialSwitch(requireContext()).apply {
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply {
+                topMargin = dp(8f)
             }
+            text = getString(R.string.effects_vocal_removal_switch)
+        }
+        container.addView(switchView, insertIndex)
+        vocalRemovalSwitch = switchView
+    }
 
-            override fun onTabUnselected(tab: TabLayout.Tab?) = Unit
-            override fun onTabReselected(tab: TabLayout.Tab?) = Unit
-        })
-        renderEffectTab(0, animate = false)
+    private fun ensureVocalKeyControls() {
+        if (vocalKeySectionView != null) return
+        val container = binding.panelOther
+        val anchorIndex = container.indexOfChild(binding.switchPhaseInvertEnabled).coerceAtLeast(0)
+
+        val titleView = android.widget.TextView(requireContext()).apply {
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply {
+                topMargin = dp(10f)
+            }
+            text = getString(R.string.effects_vocal_key_title)
+            setTextAppearance(com.google.android.material.R.style.TextAppearance_Material3_LabelLarge)
+        }
+
+        val row = LinearLayout(requireContext()).apply {
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply {
+                topMargin = dp(6f)
+            }
+            gravity = android.view.Gravity.CENTER_VERTICAL
+            orientation = LinearLayout.HORIZONTAL
+        }
+
+        val downButton = MaterialButton(requireContext()).apply {
+            layoutParams = LinearLayout.LayoutParams(dp(48f), dp(48f))
+            text = "-"
+            minWidth = dp(48f)
+            insetTop = 0
+            insetBottom = 0
+        }
+
+        val valueView = android.widget.TextView(requireContext()).apply {
+            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
+                marginStart = dp(10f)
+                marginEnd = dp(10f)
+            }
+            background = ContextCompat.getDrawable(requireContext(), R.drawable.bg_eq_curve_panel)
+            gravity = android.view.Gravity.CENTER
+            setPadding(dp(10f), dp(8f), dp(10f), dp(8f))
+            setTextAppearance(com.google.android.material.R.style.TextAppearance_Material3_TitleSmall)
+        }
+
+        val upButton = MaterialButton(requireContext()).apply {
+            layoutParams = LinearLayout.LayoutParams(dp(48f), dp(48f))
+            text = "+"
+            minWidth = dp(48f)
+            insetTop = 0
+            insetBottom = 0
+        }
+
+        row.addView(downButton)
+        row.addView(valueView)
+        row.addView(upButton)
+
+        val sectionView = LinearLayout(requireContext()).apply {
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+            orientation = LinearLayout.VERTICAL
+            addView(titleView)
+            addView(row)
+        }
+
+        container.addView(sectionView, anchorIndex)
+        vocalKeySectionView = sectionView
+        vocalKeyDownButton = downButton
+        vocalKeyUpButton = upButton
+        vocalKeyValueView = valueView
+    }
+
+    private fun ensureRightChannelPhaseInvertSwitch() {
+        if (rightChannelPhaseInvertSwitch != null) return
+        val container = binding.panelOther
+        val phaseInvertIndex = container.indexOfChild(binding.switchPhaseInvertEnabled)
+        val insertIndex = if (phaseInvertIndex >= 0) phaseInvertIndex + 1 else container.childCount
+        val switchView = MaterialSwitch(requireContext()).apply {
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply {
+                topMargin = dp(8f)
+            }
+            text = getString(R.string.effects_right_channel_phase_invert_switch)
+        }
+        container.addView(switchView, insertIndex)
+        rightChannelPhaseInvertSwitch = switchView
+    }
+
+    private fun ensureVocalBandControls() {
+        if (vocalBandSectionView != null) return
+        val container = binding.panelOther
+        val phaseInvertIndex = container.indexOfChild(binding.switchPhaseInvertEnabled)
+        val anchorIndex = if (phaseInvertIndex >= 0) phaseInvertIndex + 1 else container.childCount
+
+        val titleView = android.widget.TextView(requireContext()).apply {
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply {
+                topMargin = dp(10f)
+            }
+            text = getString(R.string.effects_vocal_band_title)
+            setTextAppearance(com.google.android.material.R.style.TextAppearance_Material3_LabelLarge)
+        }
+
+        val knobRow = LinearLayout(requireContext()).apply {
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply {
+                topMargin = dp(10f)
+            }
+            orientation = LinearLayout.HORIZONTAL
+        }
+
+        val lowValueView = android.widget.TextView(requireContext()).apply {
+            gravity = android.view.Gravity.CENTER
+            setTextAppearance(com.google.android.material.R.style.TextAppearance_Material3_BodySmall)
+        }
+
+        val lowKnob = KnobView(requireContext()).apply {
+            layoutParams = LinearLayout.LayoutParams(dp(116f), dp(116f))
+            valueFrom = 60f
+            valueTo = 2000f
+            stepSize = 10f
+        }
+
+        val highValueView = android.widget.TextView(requireContext()).apply {
+            gravity = android.view.Gravity.CENTER
+            setTextAppearance(com.google.android.material.R.style.TextAppearance_Material3_BodySmall)
+        }
+
+        val highKnob = KnobView(requireContext()).apply {
+            layoutParams = LinearLayout.LayoutParams(dp(116f), dp(116f))
+            valueFrom = 800f
+            valueTo = 8000f
+            stepSize = 10f
+        }
+
+        knobRow.addView(
+            createVocalBandKnobGroup(
+                title = getString(R.string.effects_vocal_band_low_knob_title),
+                knob = lowKnob,
+                valueView = lowValueView,
+                addEndMargin = true
+            )
+        )
+        knobRow.addView(
+            createVocalBandKnobGroup(
+                title = getString(R.string.effects_vocal_band_high_knob_title),
+                knob = highKnob,
+                valueView = highValueView,
+                addEndMargin = false
+            )
+        )
+
+        val sectionView = LinearLayout(requireContext()).apply {
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+            orientation = LinearLayout.VERTICAL
+            addView(titleView)
+            addView(knobRow)
+        }
+
+        container.addView(sectionView, anchorIndex)
+
+        vocalBandSectionView = sectionView
+        vocalBandLowValueView = lowValueView
+        vocalBandHighValueView = highValueView
+        vocalBandLowKnob = lowKnob
+        vocalBandHighKnob = highKnob
+    }
+
+    private fun createVocalBandKnobGroup(
+        title: String,
+        knob: KnobView,
+        valueView: android.widget.TextView,
+        addEndMargin: Boolean
+    ): View {
+        return LinearLayout(requireContext()).apply {
+            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
+                if (addEndMargin) {
+                    marginEnd = dp(12f)
+                }
+            }
+            orientation = LinearLayout.VERTICAL
+            gravity = android.view.Gravity.CENTER_HORIZONTAL
+            background = ContextCompat.getDrawable(requireContext(), R.drawable.bg_eq_curve_panel)
+            setPadding(dp(12f), dp(12f), dp(12f), dp(12f))
+
+            addView(android.widget.TextView(requireContext()).apply {
+                layoutParams = LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+                )
+                text = title
+                setTextAppearance(com.google.android.material.R.style.TextAppearance_Material3_LabelMedium)
+            })
+            addView(knob)
+            addView(valueView.apply {
+                layoutParams = LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+                ).apply {
+                    topMargin = dp(4f)
+                }
+            })
+        }
+    }
+
+    private fun ensurePanKnobControl() {
+        if (panKnobControl != null) return
+        binding.textPanValue.isVisible = false
+        binding.sliderPan.isVisible = false
+        panKnobControl = attachKnobCard(
+            parent = binding.panelOther,
+            anchor = binding.sliderPan,
+            title = getString(R.string.effects_pan_knob_title),
+            valueFrom = -100f,
+            valueTo = 100f,
+            stepSize = 1f,
+            defaultValue = 0f,
+            knobSizeDp = 118f,
+            onUserChange = { AudioEngine.setPanPercent(it.toInt()) }
+        )
+    }
+
+    private fun ensureCrossfeedKnobControl() {
+        if (crossfeedKnobControl != null) return
+        binding.textCrossfeedValue.isVisible = false
+        binding.sliderCrossfeed.isVisible = false
+        crossfeedKnobControl = attachKnobCard(
+            parent = binding.panelOther,
+            anchor = binding.sliderCrossfeed,
+            title = getString(R.string.effects_crossfeed_knob_title),
+            valueFrom = 0f,
+            valueTo = 100f,
+            stepSize = 1f,
+            defaultValue = 0f,
+            knobSizeDp = 118f,
+            onUserChange = { AudioEngine.setCrossfeedPercent(it.toInt()) }
+        )
+    }
+
+    private fun ensurePlaybackSpeedKnobControl() {
+        if (speedKnobControl != null) return
+        binding.textPlaybackSpeedValue.isVisible = false
+        val speedRow = binding.buttonPlaybackSpeedDown.parent as LinearLayout
+        val parent = speedRow.parent as LinearLayout
+        speedKnobControl = attachKnobCard(
+            parent = parent,
+            anchor = speedRow,
+            title = getString(R.string.effects_playback_speed_knob_title),
+            valueFrom = 50f,
+            valueTo = 200f,
+            stepSize = 1f,
+            defaultValue = 100f,
+            knobSizeDp = 118f,
+            onUserChange = { AudioEngine.setPlaybackSpeedPercent(it.toInt()) }
+        )
+    }
+
+    private fun ensureConvolutionKnobControl() {
+        if (convolutionWetKnobControl != null) return
+        binding.textConvolutionWetValue.isVisible = false
+        binding.sliderConvolutionWet.isVisible = false
+        val parent = binding.sliderConvolutionWet.parent as LinearLayout
+        convolutionWetKnobControl = attachKnobCard(
+            parent = parent,
+            anchor = binding.sliderConvolutionWet,
+            title = getString(R.string.effects_convolution_wet_knob_title),
+            valueFrom = 0f,
+            valueTo = 100f,
+            stepSize = 1f,
+            defaultValue = 35f,
+            knobSizeDp = 118f,
+            onUserChange = { AudioEngine.setConvolutionWetPercent(it.toInt()) }
+        )
+    }
+
+    private fun ensureChannelKnobControls() {
+        if (channelSpacingKnobControl != null) return
+        binding.layoutChannelSpacing.isVisible = false
+        binding.textRadiusSelected.isVisible = false
+        binding.sliderRadiusSelected.isVisible = false
+        binding.textPosXSelected.isVisible = false
+        binding.sliderPosXSelected.isVisible = false
+        binding.textPosYSelected.isVisible = false
+        binding.sliderPosYSelected.isVisible = false
+        binding.textPosZSelected.isVisible = false
+        binding.sliderPosZSelected.isVisible = false
+
+        val panel = binding.layoutChannelPositionPanel
+        val insertIndex = panel.indexOfChild(binding.layoutChannelSpacing).coerceAtLeast(0)
+        val grid = createKnobGrid(columnCount = 2, topMarginDp = 10f)
+        panel.addView(grid, insertIndex)
+
+        channelSpacingKnobControl = createGridKnobControl(
+            grid = grid,
+            title = getString(R.string.effects_channel_spacing_knob_title),
+            valueFrom = 0f,
+            valueTo = 240f,
+            stepSize = 1f,
+            defaultValue = 24f,
+            knobSizeDp = 92f,
+            onUserChange = { AudioEngine.setLinkedChannelSpacingCm(it.toInt()) }
+        )
+        radiusKnobControl = createGridKnobControl(
+            grid = grid,
+            title = getString(R.string.effects_radius_knob_title),
+            valueFrom = 20f,
+            valueTo = 120f,
+            stepSize = 1f,
+            defaultValue = 100f,
+            knobSizeDp = 92f,
+            onUserChange = { AudioEngine.setSpatialRadiusPercent(it.toInt()) }
+        )
+        posXKnobControl = createGridKnobControl(
+            grid = grid,
+            title = getString(R.string.effects_axis_x_knob_title),
+            valueFrom = -120f,
+            valueTo = 120f,
+            stepSize = 1f,
+            defaultValue = 0f,
+            knobSizeDp = 92f,
+            onUserChange = { applySelectedX(it.toInt()) }
+        )
+        posYKnobControl = createGridKnobControl(
+            grid = grid,
+            title = getString(R.string.effects_axis_y_knob_title),
+            valueFrom = -120f,
+            valueTo = 120f,
+            stepSize = 1f,
+            defaultValue = 0f,
+            knobSizeDp = 92f,
+            onUserChange = { applySelectedY(it.toInt()) }
+        )
+        posZKnobControl = createGridKnobControl(
+            grid = grid,
+            title = getString(R.string.effects_axis_z_knob_title),
+            valueFrom = -120f,
+            valueTo = 120f,
+            stepSize = 1f,
+            defaultValue = 0f,
+            knobSizeDp = 92f,
+            onUserChange = { applySelectedZ(it.toInt()) }
+        )
+    }
+
+    private fun ensureSurroundGainKnobControls() {
+        if (surroundGainKnobControls.isNotEmpty()) return
+        val parent = binding.layoutSurroundGainPanel
+        val grid = createKnobGrid(columnCount = 4, topMarginDp = 10f)
+        val insertIndex = parent.indexOfChild(binding.textSurroundGainFl).let { index ->
+            if (index >= 0) index else parent.childCount
+        }
+        parent.addView(grid, insertIndex)
+
+        hideSurroundGainSliderViews()
+
+        surroundGainKnobControls[AudioEngine.SURROUND_CHANNEL_FRONT_LEFT] = createGridKnobControl(
+            grid = grid,
+            title = getString(R.string.effects_surround_channel_fl_short),
+            valueFrom = 0f,
+            valueTo = 200f,
+            stepSize = 1f,
+            defaultValue = 100f,
+            knobSizeDp = 78f,
+            onUserChange = { AudioEngine.setSurroundChannelGain(AudioEngine.SURROUND_CHANNEL_FRONT_LEFT, it.toInt()) }
+        )
+        surroundGainKnobControls[AudioEngine.SURROUND_CHANNEL_FRONT_RIGHT] = createGridKnobControl(
+            grid = grid,
+            title = getString(R.string.effects_surround_channel_fr_short),
+            valueFrom = 0f,
+            valueTo = 200f,
+            stepSize = 1f,
+            defaultValue = 100f,
+            knobSizeDp = 78f,
+            onUserChange = { AudioEngine.setSurroundChannelGain(AudioEngine.SURROUND_CHANNEL_FRONT_RIGHT, it.toInt()) }
+        )
+        surroundGainKnobControls[AudioEngine.SURROUND_CHANNEL_CENTER] = createGridKnobControl(
+            grid = grid,
+            title = getString(R.string.effects_surround_channel_c_short),
+            valueFrom = 0f,
+            valueTo = 200f,
+            stepSize = 1f,
+            defaultValue = 100f,
+            knobSizeDp = 78f,
+            onUserChange = { AudioEngine.setSurroundChannelGain(AudioEngine.SURROUND_CHANNEL_CENTER, it.toInt()) }
+        )
+        surroundGainKnobControls[AudioEngine.SURROUND_CHANNEL_LFE] = createGridKnobControl(
+            grid = grid,
+            title = getString(R.string.effects_surround_channel_lfe_short),
+            valueFrom = 0f,
+            valueTo = 200f,
+            stepSize = 1f,
+            defaultValue = 100f,
+            knobSizeDp = 78f,
+            onUserChange = { AudioEngine.setSurroundChannelGain(AudioEngine.SURROUND_CHANNEL_LFE, it.toInt()) }
+        )
+        surroundGainKnobControls[AudioEngine.SURROUND_CHANNEL_SIDE_LEFT] = createGridKnobControl(
+            grid = grid,
+            title = getString(R.string.effects_surround_channel_sl_short),
+            valueFrom = 0f,
+            valueTo = 200f,
+            stepSize = 1f,
+            defaultValue = 100f,
+            knobSizeDp = 78f,
+            onUserChange = { AudioEngine.setSurroundChannelGain(AudioEngine.SURROUND_CHANNEL_SIDE_LEFT, it.toInt()) }
+        )
+        surroundGainKnobControls[AudioEngine.SURROUND_CHANNEL_SIDE_RIGHT] = createGridKnobControl(
+            grid = grid,
+            title = getString(R.string.effects_surround_channel_sr_short),
+            valueFrom = 0f,
+            valueTo = 200f,
+            stepSize = 1f,
+            defaultValue = 100f,
+            knobSizeDp = 78f,
+            onUserChange = { AudioEngine.setSurroundChannelGain(AudioEngine.SURROUND_CHANNEL_SIDE_RIGHT, it.toInt()) }
+        )
+        surroundGainKnobControls[AudioEngine.SURROUND_CHANNEL_REAR_LEFT] = createGridKnobControl(
+            grid = grid,
+            title = getString(R.string.effects_surround_channel_rl_short),
+            valueFrom = 0f,
+            valueTo = 200f,
+            stepSize = 1f,
+            defaultValue = 100f,
+            knobSizeDp = 78f,
+            onUserChange = { AudioEngine.setSurroundChannelGain(AudioEngine.SURROUND_CHANNEL_REAR_LEFT, it.toInt()) }
+        )
+        surroundGainKnobControls[AudioEngine.SURROUND_CHANNEL_REAR_RIGHT] = createGridKnobControl(
+            grid = grid,
+            title = getString(R.string.effects_surround_channel_rr_short),
+            valueFrom = 0f,
+            valueTo = 200f,
+            stepSize = 1f,
+            defaultValue = 100f,
+            knobSizeDp = 78f,
+            onUserChange = { AudioEngine.setSurroundChannelGain(AudioEngine.SURROUND_CHANNEL_REAR_RIGHT, it.toInt()) }
+        )
+    }
+
+    private fun hideSurroundGainSliderViews() {
+        listOf(
+            binding.textSurroundGainFl,
+            binding.sliderSurroundGainFl,
+            binding.textSurroundGainFr,
+            binding.sliderSurroundGainFr,
+            binding.textSurroundGainC,
+            binding.sliderSurroundGainC,
+            binding.textSurroundGainLfe,
+            binding.sliderSurroundGainLfe,
+            binding.textSurroundGainSl,
+            binding.sliderSurroundGainSl,
+            binding.textSurroundGainSr,
+            binding.sliderSurroundGainSr,
+            binding.textSurroundGainRl,
+            binding.sliderSurroundGainRl,
+            binding.textSurroundGainRr,
+            binding.sliderSurroundGainRr
+        ).forEach { it.isVisible = false }
+    }
+
+    private fun attachKnobCard(
+        parent: LinearLayout,
+        anchor: View,
+        title: String,
+        valueFrom: Float,
+        valueTo: Float,
+        stepSize: Float,
+        defaultValue: Float,
+        knobSizeDp: Float,
+        onUserChange: (Float) -> Unit
+    ): KnobControl {
+        val control = createKnobControl(
+            title = title,
+            valueFrom = valueFrom,
+            valueTo = valueTo,
+            stepSize = stepSize,
+            defaultValue = defaultValue,
+            knobSizeDp = knobSizeDp,
+            cardMarginTopDp = 6f,
+            onUserChange = onUserChange
+        )
+        val anchorIndex = parent.indexOfChild(anchor)
+        val insertIndex = if (anchorIndex >= 0) anchorIndex + 1 else parent.childCount
+        parent.addView(control.container, insertIndex)
+        return control
+    }
+
+    private fun createKnobGrid(columnCount: Int, topMarginDp: Float): GridLayout {
+        return GridLayout(requireContext()).apply {
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply {
+                topMargin = dp(topMarginDp)
+            }
+            this.columnCount = columnCount
+            useDefaultMargins = false
+            alignmentMode = GridLayout.ALIGN_BOUNDS
+        }
+    }
+
+    private fun createGridKnobControl(
+        grid: GridLayout,
+        title: String,
+        valueFrom: Float,
+        valueTo: Float,
+        stepSize: Float,
+        defaultValue: Float,
+        knobSizeDp: Float,
+        onUserChange: (Float) -> Unit
+    ): KnobControl {
+        val control = createKnobControl(
+            title = title,
+            valueFrom = valueFrom,
+            valueTo = valueTo,
+            stepSize = stepSize,
+            defaultValue = defaultValue,
+            knobSizeDp = knobSizeDp,
+            cardMarginTopDp = 0f,
+            onUserChange = onUserChange
+        )
+        val params = GridLayout.LayoutParams().apply {
+            width = 0
+            height = ViewGroup.LayoutParams.WRAP_CONTENT
+            columnSpec = GridLayout.spec(GridLayout.UNDEFINED, 1f)
+            setMargins(0, 0, dp(8f), dp(8f))
+        }
+        grid.addView(control.container, params)
+        return control
+    }
+
+    private fun createKnobControl(
+        title: String,
+        valueFrom: Float,
+        valueTo: Float,
+        stepSize: Float,
+        defaultValue: Float,
+        knobSizeDp: Float,
+        cardMarginTopDp: Float,
+        onUserChange: (Float) -> Unit
+    ): KnobControl {
+        val valueView = TextView(requireContext()).apply {
+            gravity = android.view.Gravity.CENTER
+            setTextAppearance(com.google.android.material.R.style.TextAppearance_Material3_BodySmall)
+        }
+        val knob = KnobView(requireContext()).apply {
+            layoutParams = LinearLayout.LayoutParams(dp(knobSizeDp), dp(knobSizeDp))
+            this.valueFrom = valueFrom
+            this.valueTo = valueTo
+            this.stepSize = stepSize
+            this.defaultValue = defaultValue
+            value = defaultValue
+            onValueChange = { rawValue, fromUser ->
+                if (fromUser && !internalUpdating) {
+                    onUserChange(rawValue)
+                }
+            }
+        }
+        val container = LinearLayout(requireContext()).apply {
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply {
+                if (cardMarginTopDp > 0f) {
+                    topMargin = dp(cardMarginTopDp)
+                }
+            }
+            orientation = LinearLayout.VERTICAL
+            gravity = android.view.Gravity.CENTER_HORIZONTAL
+            background = ContextCompat.getDrawable(requireContext(), R.drawable.bg_eq_curve_panel)
+            setPadding(dp(10f), dp(10f), dp(10f), dp(10f))
+
+            addView(TextView(requireContext()).apply {
+                layoutParams = LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+                )
+                text = title
+                gravity = android.view.Gravity.CENTER
+                setTextAppearance(com.google.android.material.R.style.TextAppearance_Material3_LabelMedium)
+            })
+            addView(knob)
+            addView(valueView.apply {
+                layoutParams = LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+                ).apply {
+                    topMargin = dp(4f)
+                }
+            })
+        }
+        return KnobControl(container = container, knob = knob, valueView = valueView)
     }
 
     private fun renderEffectTab(position: Int, animate: Boolean) {
-        val panels = listOf(binding.panelEq, binding.panelReverb, binding.panelOther)
-        if (!animate || position == currentTabPosition) {
-            panels.forEachIndexed { index, panel ->
-                panel.isVisible = index == position
-                panel.alpha = 1f
-                panel.translationY = 0f
-            }
-            currentTabPosition = position
-            return
-        }
-        val offsetY = dp(12f).toFloat()
-        panels.forEachIndexed { index, panel ->
-            val show = index == position
-            panel.animate().cancel()
-            if (show) {
-                if (!panel.isVisible) {
-                    panel.alpha = 0f
-                    panel.translationY = offsetY
-                    panel.isVisible = true
-                }
-                panel.animate()
-                    .alpha(1f)
-                    .translationY(0f)
-                    .setDuration(220L)
-                    .start()
-            } else if (panel.isVisible) {
-                panel.animate()
-                    .alpha(0f)
-                    .translationY(offsetY * 0.7f)
-                    .setDuration(160L)
-                    .withEndAction {
-                        panel.isVisible = false
-                        panel.alpha = 1f
-                        panel.translationY = 0f
-                    }
-                    .start()
-            }
-        }
-        currentTabPosition = position
+        currentTabPosition = position.coerceIn(0, 2)
+        effectsPager?.snapToPage(currentTabPosition, smooth = animate)
+        updateEffectsPageHeight()
     }
 
     private fun observeEffectState() {
         viewLifecycleOwner.lifecycleScope.launch {
             viewLifecycleOwner.repeatOnLifecycle(Lifecycle.State.STARTED) {
-                AudioEngine.effectsState.collect { state ->
-                    renderEffectState(state)
+                launch {
+                    AudioEngine.effectsState.collect { state ->
+                        renderEffectState(state)
+                    }
+                }
+                launch {
+                    while (isActive) {
+                        AudioEngine.fillEqVisualizationSpectrumSnapshot(eqSpectrumBuffer)
+                        binding.eqCurveView.setSpectrum(eqSpectrumBuffer)
+                        delay(33L)
+                    }
                 }
             }
         }
@@ -412,31 +1467,58 @@ class EffectsFragment : Fragment() {
     private fun renderEffectState(state: EffectsUiState) {
         internalUpdating = true
 
-        binding.switchEffectsEnabled.isChecked = state.enabled
+        renderEffectsMasterToggle(state.enabled)
         binding.effectsContainer.alpha = if (state.enabled) 1f else 0.45f
         binding.switchEqEnabled.isChecked = state.eqEnabled
         binding.switchSpatialEnabled.isChecked = state.spatialEnabled
         val surroundEnabled = state.surroundMode != AudioEngine.SURROUND_MODE_STEREO
         binding.switchSurroundEnabled.isChecked = surroundEnabled
-        binding.progressReverbMeter.progress = state.realtimeReverbMeterPercent
-        binding.textReverbMeterValue.text = getString(
-            R.string.effects_reverb_meter_value,
-            state.realtimeReverbMeterPercent
-        )
 
         binding.switchLimiterEnabled.isChecked = state.limiterEnabled
         binding.sliderPan.value = state.panPercent.toFloat()
         binding.textPanValue.text = panValueLabel(state.panPercent)
+        panKnobControl?.knob?.value = state.panPercent.toFloat()
+        panKnobControl?.valueView?.text = panValueLabel(state.panPercent)
         binding.switchPanInvertEnabled.isChecked = state.panInvertEnabled
         binding.switchMonoEnabled.isChecked = state.monoEnabled
+        vocalRemovalSwitch?.isChecked = state.vocalRemovalEnabled
+        vocalKeyValueView?.text = getString(
+            R.string.effects_vocal_key_value_format,
+            state.vocalKeyShiftSemitones
+        )
+        vocalKeyDownButton?.isEnabled = state.vocalKeyShiftSemitones > -24
+        vocalKeyUpButton?.isEnabled = state.vocalKeyShiftSemitones < 24
+        vocalBandLowKnob?.valueTo = (state.vocalBandHighCutHz - 100).coerceAtLeast(60).toFloat()
+        vocalBandLowKnob?.value = state.vocalBandLowCutHz.toFloat()
+        vocalBandHighKnob?.valueFrom = (state.vocalBandLowCutHz + 100).coerceAtMost(8000).toFloat()
+        vocalBandHighKnob?.value = state.vocalBandHighCutHz.toFloat()
+        vocalBandLowValueView?.text = getString(
+            R.string.effects_vocal_band_low_value_format,
+            state.vocalBandLowCutHz
+        )
+        vocalBandHighValueView?.text = getString(
+            R.string.effects_vocal_band_high_value_format,
+            state.vocalBandHighCutHz
+        )
         binding.switchPhaseInvertEnabled.isChecked = state.phaseInvertEnabled
+        rightChannelPhaseInvertSwitch?.isChecked = state.rightChannelPhaseInvertEnabled
         binding.sliderCrossfeed.value = state.crossfeedPercent.toFloat()
         binding.textCrossfeedValue.text = getString(
             R.string.effects_crossfeed_value_format,
             state.crossfeedPercent
         )
+        crossfeedKnobControl?.knob?.value = state.crossfeedPercent.toFloat()
+        crossfeedKnobControl?.valueView?.text = getString(
+            R.string.effects_crossfeed_knob_value_format,
+            state.crossfeedPercent
+        )
         binding.switchPlaybackSpeedPitchCompensationEnabled.isChecked = state.playbackSpeedPitchCompensationEnabled
         binding.textPlaybackSpeedValue.text = getString(
+            R.string.effects_playback_speed_value,
+            state.playbackSpeedPercent / 100f
+        )
+        speedKnobControl?.knob?.value = state.playbackSpeedPercent.toFloat()
+        speedKnobControl?.valueView?.text = getString(
             R.string.effects_playback_speed_value,
             state.playbackSpeedPercent / 100f
         )
@@ -465,8 +1547,12 @@ class EffectsFragment : Fragment() {
             R.string.effects_convolution_wet_value,
             state.convolutionWetPercent
         )
+        convolutionWetKnobControl?.knob?.value = state.convolutionWetPercent.toFloat()
+        convolutionWetKnobControl?.valueView?.text = getString(
+            R.string.effects_convolution_wet_knob_value_format,
+            state.convolutionWetPercent
+        )
         binding.buttonClearIrs.isEnabled = !state.convolutionIrUri.isNullOrBlank()
-        binding.switchConvolutionEnabled.isEnabled = !state.convolutionIrUri.isNullOrBlank()
 
         renderSurroundMode(state.surroundMode)
         renderSurroundChannelGains(state)
@@ -475,6 +1561,41 @@ class EffectsFragment : Fragment() {
         renderEqControls(state)
 
         internalUpdating = false
+    }
+
+    private fun renderEffectsMasterToggle(enabled: Boolean) {
+        ensureEffectsMasterToggleVisuals()
+        val primary = MaterialColors.getColor(binding.root, com.google.android.material.R.attr.colorPrimary)
+        val onSurface = MaterialColors.getColor(binding.root, com.google.android.material.R.attr.colorOnSurface)
+        val onSurfaceVariant = MaterialColors.getColor(binding.root, com.google.android.material.R.attr.colorOnSurfaceVariant)
+        val surface = MaterialColors.getColor(binding.root, com.google.android.material.R.attr.colorSurface)
+
+        val strokeWidth = if (enabled) dp(2f) else dp(1.5f)
+        binding.cardEffectsMasterToggle.strokeWidth = strokeWidth
+        binding.cardEffectsMasterToggle.strokeColor = if (enabled) primary else MaterialColors.getColor(
+            binding.root,
+            com.google.android.material.R.attr.colorOutlineVariant
+        )
+        binding.cardEffectsMasterToggle.setCardBackgroundColor(
+            if (enabled) blendColors(surface, primary, 0.12f) else surface
+        )
+
+        effectsMasterToggleCore?.setColor(if (enabled) primary else onSurfaceVariant)
+        binding.viewEffectsMasterCore.alpha = if (enabled) 0.95f else 0.3f
+        binding.cardEffectsMasterToggle.scaleX = 1f
+        binding.cardEffectsMasterToggle.scaleY = 1f
+        binding.cardEffectsMasterToggle.translationY = 0f
+
+        binding.textEffectsMasterTitle.setTextColor(if (enabled) onSurface else onSurface)
+        binding.textEffectsMasterSubtitle.setTextColor(if (enabled) blendColors(primary, Color.WHITE, 0.22f) else onSurfaceVariant)
+        binding.textEffectsMasterSubtitle.text = getString(
+            if (enabled) R.string.effects_master_subtitle_on else R.string.effects_master_subtitle_off
+        )
+        binding.textEffectsMasterState.text = getString(
+            if (enabled) R.string.effects_master_state_on else R.string.effects_master_state_off
+        )
+        binding.textEffectsMasterState.setTextColor(if (enabled) primary else onSurfaceVariant)
+        binding.layoutEffectsMasterToggle.alpha = if (enabled) 1f else 0.94f
     }
 
     private fun panValueLabel(panPercent: Int): String {
@@ -489,6 +1610,7 @@ class EffectsFragment : Fragment() {
         val eqInteractive = state.enabled && state.eqEnabled
         animateAlphaIfNeeded(binding.eqCurveView, if (eqInteractive) 1f else 0.55f)
         animateAlphaIfNeeded(binding.cardEqParams, if (eqInteractive) 1f else 0.65f)
+        updateEqBottomSpacer()
         binding.buttonEqAddPoint.isEnabled = eqInteractive
         binding.buttonEqSavePreset.isEnabled = eqInteractive
         binding.buttonEqDeletePreset.isEnabled = eqInteractive
@@ -496,7 +1618,6 @@ class EffectsFragment : Fragment() {
         if (state.eqBandFrequenciesHz.isEmpty()) {
             setEqParamsVisible(visible = false)
             binding.layoutEqPointDots.removeAllViews()
-            lastEqDotsSignature = ""
             binding.eqCurveView.setData(emptyList(), -1)
             return
         }
@@ -521,73 +1642,100 @@ class EffectsFragment : Fragment() {
             )
         }
         binding.eqCurveView.setData(points, selectedEqBandIndex)
-        rebuildEqPointDots(state)
 
         val freq = state.eqBandFrequenciesHz[selectedEqBandIndex]
         val gainMb = state.eqBandLevelsMb.getOrElse(selectedEqBandIndex) { 0 }
         val q100 = state.eqBandQTimes100.getOrElse(selectedEqBandIndex) { 100 }
-        binding.textEqSelectedPoint.text = getString(R.string.effects_eq_selected_point, selectedEqBandIndex + 1)
-        binding.textEqFreqValue.text = if (freq >= 1000) {
-            getString(R.string.effects_eq_frequency_value_khz, freq / 1000f)
-        } else {
-            getString(R.string.effects_eq_frequency_value_hz, freq)
-        }
-        binding.textEqQValue.text = getString(R.string.effects_eq_q_value, q100 / 100f)
-        binding.textEqGainValue.text = getString(R.string.effects_eq_gain_db_value, gainMb / 100f)
+        binding.textEqSelectedPoint.text = "节点 ${selectedEqBandIndex + 1} / ${state.eqBandFrequenciesHz.size}"
+        binding.textEqFreqValue.text = formatEqFrequencyValue(freq)
+        binding.textEqQValue.text = formatEqQValue(q100)
+        binding.textEqGainValue.text = formatEqGainValue(gainMb)
 
-        if (binding.sliderEqGain.valueFrom != state.eqBandLevelMinMb.toFloat()) {
-            binding.sliderEqGain.valueFrom = state.eqBandLevelMinMb.toFloat()
+        binding.knobEqFreq.value = frequencyHzToSliderValue(freq)
+        binding.knobEqQ.value = q100.toFloat()
+        if (binding.knobEqGain.valueFrom != state.eqBandLevelMinMb.toFloat()) {
+            binding.knobEqGain.valueFrom = state.eqBandLevelMinMb.toFloat()
         }
-        if (binding.sliderEqGain.valueTo != state.eqBandLevelMaxMb.toFloat()) {
-            binding.sliderEqGain.valueTo = state.eqBandLevelMaxMb.toFloat()
+        if (binding.knobEqGain.valueTo != state.eqBandLevelMaxMb.toFloat()) {
+            binding.knobEqGain.valueTo = state.eqBandLevelMaxMb.toFloat()
         }
-        binding.sliderEqFreq.value = frequencyHzToSliderValue(freq)
-        binding.sliderEqQ.value = q100.toFloat()
-        binding.sliderEqGain.value = gainMb.toFloat()
+        binding.knobEqGain.value = gainMb.toFloat()
+        binding.panelEq.post { updateEqViewportLayout() }
     }
 
-    private fun rebuildEqPointDots(state: EffectsUiState) {
-        val signature = "${state.eqBandFrequenciesHz.joinToString(",")}|$selectedEqBandIndex"
-        if (signature == lastEqDotsSignature) return
-        lastEqDotsSignature = signature
-        val container = binding.layoutEqPointDots
-        container.removeAllViews()
-        state.eqBandFrequenciesHz.indices.forEach { index ->
-            val selected = index == selectedEqBandIndex
-            val dot = ImageView(requireContext()).apply {
-                val size = dp(20f)
-                layoutParams = LinearLayout.LayoutParams(size, size).also { lp ->
-                    lp.marginEnd = dp(8f)
-                }
-                alpha = if (selected) 1f else 0.75f
-                scaleX = if (selected) 1.14f else 1f
-                scaleY = if (selected) 1.14f else 1f
-                background = GradientDrawable().apply {
-                    shape = GradientDrawable.OVAL
-                    setColor(eqPointColors[index % eqPointColors.size])
-                    if (selected) {
-                        setStroke(dp(2f), ContextCompat.getColor(requireContext(), android.R.color.white))
-                    } else {
-                        setStroke(dp(1f), ContextCompat.getColor(requireContext(), android.R.color.transparent))
-                    }
-                }
-                setOnClickListener {
-                    if (selectedEqBandIndex != index) {
-                        selectedEqBandIndex = index
-                        renderEqControls(AudioEngine.effectsState.value)
-                    }
-                }
+    private fun updateEqBottomSpacer() {
+        val card = activity?.findViewById<View>(R.id.mini_player_card)
+        val handle = activity?.findViewById<View>(R.id.view_mini_handle)
+        val coverView = when {
+            card?.isVisible == true -> card
+            handle?.isVisible == true -> handle
+            else -> null
+        }
+        val overlayHeight = coverView?.height?.takeIf { it > 0 } ?: 0
+        val overlayMargins = (coverView?.layoutParams as? ViewGroup.MarginLayoutParams)?.let {
+            it.topMargin + it.bottomMargin
+        } ?: 0
+        val targetHeight = (overlayHeight + overlayMargins + dp(8f)).coerceAtLeast(dp(28f))
+        if (lastEqBottomSpacerHeight == targetHeight) {
+            return
+        }
+        lastEqBottomSpacerHeight = targetHeight
+        binding.viewEqBottomSpacer.updateLayoutParams<LinearLayout.LayoutParams> {
+            if (height != targetHeight) {
+                height = targetHeight
             }
-            if (selected) {
-                dot.scaleX = 0.88f
-                dot.scaleY = 0.88f
-                dot.animate()
-                    .scaleX(1.14f)
-                    .scaleY(1.14f)
-                    .setDuration(180L)
-                    .start()
+        }
+    }
+
+    private fun setupEqBottomInsetTracking() {
+        binding.root.post { updateEqBottomSpacer() }
+        listOfNotNull(
+            activity?.findViewById<View>(R.id.mini_player_card),
+            activity?.findViewById<View>(R.id.view_mini_handle)
+        ).forEach { overlay ->
+            overlay.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
+                updateEqBottomSpacer()
             }
-            container.addView(dot)
+        }
+    }
+
+    private fun setupEqViewportSizing() {
+        listOf(
+            binding.effectsContainer,
+            binding.panelEq,
+            binding.cardEqParams,
+            binding.viewEqBottomSpacer,
+            binding.eqCurveView
+        ).forEach { view ->
+            view.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
+                updateEqViewportLayout()
+            }
+        }
+        binding.panelEq.post { updateEqViewportLayout() }
+    }
+
+    private fun updateEqViewportLayout() {
+        val containerHeight = binding.panelEq.height.takeIf { it > 0 }
+            ?: binding.effectsContainer.height.takeIf { it > 0 }
+            ?: return
+        val reservedHeight = binding.panelEq.children
+            .filter { child -> child !== binding.eqCurveView }
+            .sumOf { child ->
+                val params = child.layoutParams as? ViewGroup.MarginLayoutParams
+                val margins = (params?.topMargin ?: 0) + (params?.bottomMargin ?: 0)
+                val measuredHeight = when {
+                    child.visibility == View.GONE -> 0
+                    child.height > 0 -> child.height
+                    else -> child.measuredHeight
+                }
+                measuredHeight + margins
+            }
+        val targetHeight = (containerHeight - reservedHeight).coerceAtLeast(dp(180f))
+        binding.eqCurveView.updateLayoutParams<LinearLayout.LayoutParams> {
+            if (height != targetHeight || weight != 0f) {
+                height = targetHeight
+                weight = 0f
+            }
         }
     }
 
@@ -607,36 +1755,14 @@ class EffectsFragment : Fragment() {
 
         val showRear = mode == AudioEngine.SURROUND_MODE_7_1
 
-        setSurroundGainControlVisible(
-            textView = binding.textSurroundGainC,
-            slider = binding.sliderSurroundGainC,
-            visible = surroundEnabled
-        )
-        setSurroundGainControlVisible(
-            textView = binding.textSurroundGainLfe,
-            slider = binding.sliderSurroundGainLfe,
-            visible = surroundEnabled
-        )
-        setSurroundGainControlVisible(
-            textView = binding.textSurroundGainSl,
-            slider = binding.sliderSurroundGainSl,
-            visible = surroundEnabled
-        )
-        setSurroundGainControlVisible(
-            textView = binding.textSurroundGainSr,
-            slider = binding.sliderSurroundGainSr,
-            visible = surroundEnabled
-        )
-        setSurroundGainControlVisible(
-            textView = binding.textSurroundGainRl,
-            slider = binding.sliderSurroundGainRl,
-            visible = surroundEnabled && showRear
-        )
-        setSurroundGainControlVisible(
-            textView = binding.textSurroundGainRr,
-            slider = binding.sliderSurroundGainRr,
-            visible = surroundEnabled && showRear
-        )
+        setSurroundGainKnobVisible(AudioEngine.SURROUND_CHANNEL_FRONT_LEFT, surroundEnabled)
+        setSurroundGainKnobVisible(AudioEngine.SURROUND_CHANNEL_FRONT_RIGHT, surroundEnabled)
+        setSurroundGainKnobVisible(AudioEngine.SURROUND_CHANNEL_CENTER, surroundEnabled)
+        setSurroundGainKnobVisible(AudioEngine.SURROUND_CHANNEL_LFE, surroundEnabled)
+        setSurroundGainKnobVisible(AudioEngine.SURROUND_CHANNEL_SIDE_LEFT, surroundEnabled)
+        setSurroundGainKnobVisible(AudioEngine.SURROUND_CHANNEL_SIDE_RIGHT, surroundEnabled)
+        setSurroundGainKnobVisible(AudioEngine.SURROUND_CHANNEL_REAR_LEFT, surroundEnabled && showRear)
+        setSurroundGainKnobVisible(AudioEngine.SURROUND_CHANNEL_REAR_RIGHT, surroundEnabled && showRear)
     }
 
     private fun renderSurroundChannelGains(state: EffectsUiState) {
@@ -693,33 +1819,27 @@ class EffectsFragment : Fragment() {
         binding.sliderSurroundGainRl.value = rearLeft.toFloat()
         binding.sliderSurroundGainRr.value = rearRight.toFloat()
 
-        renderSurroundGainLabel(binding.textSurroundGainFl, R.string.effects_surround_channel_fl, frontLeft)
-        renderSurroundGainLabel(binding.textSurroundGainFr, R.string.effects_surround_channel_fr, frontRight)
-        renderSurroundGainLabel(binding.textSurroundGainC, R.string.effects_surround_channel_c, center)
-        renderSurroundGainLabel(binding.textSurroundGainLfe, R.string.effects_surround_channel_lfe, lfe)
-        renderSurroundGainLabel(binding.textSurroundGainSl, R.string.effects_surround_channel_sl, sideLeft)
-        renderSurroundGainLabel(binding.textSurroundGainSr, R.string.effects_surround_channel_sr, sideRight)
-        renderSurroundGainLabel(binding.textSurroundGainRl, R.string.effects_surround_channel_rl, rearLeft)
-        renderSurroundGainLabel(binding.textSurroundGainRr, R.string.effects_surround_channel_rr, rearRight)
+        renderSurroundGainKnob(AudioEngine.SURROUND_CHANNEL_FRONT_LEFT, frontLeft)
+        renderSurroundGainKnob(AudioEngine.SURROUND_CHANNEL_FRONT_RIGHT, frontRight)
+        renderSurroundGainKnob(AudioEngine.SURROUND_CHANNEL_CENTER, center)
+        renderSurroundGainKnob(AudioEngine.SURROUND_CHANNEL_LFE, lfe)
+        renderSurroundGainKnob(AudioEngine.SURROUND_CHANNEL_SIDE_LEFT, sideLeft)
+        renderSurroundGainKnob(AudioEngine.SURROUND_CHANNEL_SIDE_RIGHT, sideRight)
+        renderSurroundGainKnob(AudioEngine.SURROUND_CHANNEL_REAR_LEFT, rearLeft)
+        renderSurroundGainKnob(AudioEngine.SURROUND_CHANNEL_REAR_RIGHT, rearRight)
 
         updateSurroundGainPanelVisibility()
     }
 
-    private fun renderSurroundGainLabel(view: android.widget.TextView, channelRes: Int, value: Int) {
-        view.text = getString(
-            R.string.effects_surround_gain_channel_value,
-            getString(channelRes),
-            value
-        )
+    private fun renderSurroundGainKnob(channel: Int, value: Int) {
+        surroundGainKnobControls[channel]?.let { control ->
+            control.knob.value = value.toFloat()
+            control.valueView.text = getString(R.string.effects_surround_gain_knob_value_format, value)
+        }
     }
 
-    private fun setSurroundGainControlVisible(
-        textView: android.widget.TextView,
-        slider: Slider,
-        visible: Boolean
-    ) {
-        textView.isVisible = visible
-        slider.isVisible = visible
+    private fun setSurroundGainKnobVisible(channel: Int, visible: Boolean) {
+        surroundGainKnobControls[channel]?.container?.isVisible = visible
     }
 
     private fun renderChannelPanel(state: EffectsUiState) {
@@ -727,6 +1847,7 @@ class EffectsFragment : Fragment() {
         updateChannelPanelVisibility()
         binding.layoutChannelSelector.isVisible = state.channelSeparated
         binding.layoutChannelSpacing.isVisible = !state.channelSeparated
+        channelSpacingKnobControl?.container?.isVisible = !state.channelSeparated
 
         val displayRadius = max(state.spatialLeftRadiusPercent, state.spatialRightRadiusPercent).coerceIn(20, 120)
         binding.spatialPadDual.setLinkedMode(!state.channelSeparated)
@@ -750,6 +1871,11 @@ class EffectsFragment : Fragment() {
         )
         binding.textRadiusSelected.text = getString(R.string.effects_radius_scale_value_cm, displayRadius)
         binding.sliderRadiusSelected.value = displayRadius.toFloat()
+        radiusKnobControl?.knob?.value = displayRadius.toFloat()
+        radiusKnobControl?.valueView?.text = getString(
+            R.string.effects_radius_knob_value_format,
+            displayRadius
+        )
         val maxSpacing = (displayRadius * 2).coerceAtLeast(0)
         if (binding.sliderChannelSpacing.valueFrom != 0f) {
             binding.sliderChannelSpacing.valueFrom = 0f
@@ -761,6 +1887,13 @@ class EffectsFragment : Fragment() {
         binding.sliderChannelSpacing.value = spacingForDisplay.toFloat()
         binding.textChannelSpacingValue.text = getString(
             R.string.effects_channel_spacing_value_cm,
+            spacingForDisplay
+        )
+        channelSpacingKnobControl?.knob?.valueFrom = 0f
+        channelSpacingKnobControl?.knob?.valueTo = maxSpacing.toFloat()
+        channelSpacingKnobControl?.knob?.value = spacingForDisplay.toFloat()
+        channelSpacingKnobControl?.valueView?.text = getString(
+            R.string.effects_channel_spacing_knob_value_format,
             spacingForDisplay
         )
 
@@ -795,6 +1928,18 @@ class EffectsFragment : Fragment() {
         bindAxisSliderRange(binding.sliderPosXSelected, displayRadius, selectedX)
         bindAxisSliderRange(binding.sliderPosZSelected, displayRadius, selectedZ)
         binding.sliderPosYSelected.value = selectedY.toFloat()
+        posXKnobControl?.knob?.valueFrom = -displayRadius.toFloat()
+        posXKnobControl?.knob?.valueTo = displayRadius.toFloat()
+        posXKnobControl?.knob?.value = selectedX.toFloat()
+        posXKnobControl?.valueView?.text = getString(R.string.effects_axis_knob_value_format, selectedX)
+        posYKnobControl?.knob?.valueFrom = -displayRadius.toFloat()
+        posYKnobControl?.knob?.valueTo = displayRadius.toFloat()
+        posYKnobControl?.knob?.value = selectedY.toFloat()
+        posYKnobControl?.valueView?.text = getString(R.string.effects_axis_knob_value_format, selectedY)
+        posZKnobControl?.knob?.valueFrom = -displayRadius.toFloat()
+        posZKnobControl?.knob?.valueTo = displayRadius.toFloat()
+        posZKnobControl?.knob?.value = selectedZ.toFloat()
+        posZKnobControl?.valueView?.text = getString(R.string.effects_axis_knob_value_format, selectedZ)
 
         binding.textPosXSelected.text = getString(R.string.effects_pos_x_selected_value_cm, selectedLabel, selectedX)
         binding.textPosYSelected.text = getString(R.string.effects_pos_y_selected_value_cm, selectedLabel, selectedY)
@@ -874,13 +2019,7 @@ class EffectsFragment : Fragment() {
     private fun updateSurroundGainPanelVisibility() {
         val surroundEnabled = AudioEngine.effectsState.value.surroundMode != AudioEngine.SURROUND_MODE_STEREO
         binding.layoutSurroundGainPanel.isVisible = surroundGainPanelExpanded && surroundEnabled
-        binding.buttonToggleSurroundGainPanel.text = getString(
-            if (surroundGainPanelExpanded) {
-                R.string.effects_surround_gain_collapse
-            } else {
-                R.string.effects_surround_gain_expand
-            }
-        )
+        surroundGainHeaderIndicator?.text = if (surroundGainPanelExpanded) "藚" else "藘"
     }
 
     private fun setSurroundEnabled(enabled: Boolean) {
@@ -1027,6 +2166,22 @@ class EffectsFragment : Fragment() {
         return frequency.roundToInt().coerceIn(EQ_FREQ_MIN_HZ.toInt(), EQ_FREQ_MAX_HZ.toInt())
     }
 
+    private fun formatEqFrequencyValue(frequencyHz: Int): String {
+        return when {
+            frequencyHz >= 10_000 -> String.format("%.1f kHz", frequencyHz / 1000f)
+            frequencyHz >= 1000 -> String.format("%.2f kHz", frequencyHz / 1000f)
+            else -> "$frequencyHz Hz"
+        }
+    }
+
+    private fun formatEqQValue(qTimes100: Int): String {
+        return String.format("Q %.2f", qTimes100 / 100f)
+    }
+
+    private fun formatEqGainValue(gainMb: Int): String {
+        return String.format("%+.1f dB", gainMb / 100f)
+    }
+
     private fun setEqParamsVisible(visible: Boolean) {
         val card = binding.cardEqParams
         if (visible == card.isVisible) return
@@ -1060,6 +2215,45 @@ class EffectsFragment : Fragment() {
             .alpha(targetAlpha)
             .setDuration(150L)
             .start()
+    }
+
+    private fun ensureEffectsMasterToggleVisuals() {
+        if (effectsMasterToggleGlow == null) {
+            effectsMasterToggleGlow = GradientDrawable().apply {
+                shape = GradientDrawable.RECTANGLE
+                cornerRadius = dp(28f).toFloat()
+            }
+        }
+        if (effectsMasterToggleCore == null) {
+            effectsMasterToggleCore = GradientDrawable().apply {
+                shape = GradientDrawable.RECTANGLE
+                cornerRadius = dp(5f).toFloat()
+            }
+            binding.viewEffectsMasterCore.background = effectsMasterToggleCore
+        }
+        val primary = MaterialColors.getColor(binding.root, com.google.android.material.R.attr.colorPrimary)
+        effectsMasterToggleGlow?.colors = intArrayOf(
+            adjustAlpha(primary, 0.26f),
+            adjustAlpha(primary, 0.1f),
+            Color.TRANSPARENT
+        )
+        effectsMasterToggleGlow?.gradientType = GradientDrawable.RADIAL_GRADIENT
+        effectsMasterToggleGlow?.gradientRadius = dp(140f).toFloat()
+    }
+
+    private fun blendColors(from: Int, to: Int, ratio: Float): Int {
+        val t = ratio.coerceIn(0f, 1f)
+        val inv = 1f - t
+        val a = ((Color.alpha(from) * inv) + (Color.alpha(to) * t)).roundToInt().coerceIn(0, 255)
+        val r = ((Color.red(from) * inv) + (Color.red(to) * t)).roundToInt().coerceIn(0, 255)
+        val g = ((Color.green(from) * inv) + (Color.green(to) * t)).roundToInt().coerceIn(0, 255)
+        val b = ((Color.blue(from) * inv) + (Color.blue(to) * t)).roundToInt().coerceIn(0, 255)
+        return Color.argb(a, r, g, b)
+    }
+
+    private fun adjustAlpha(color: Int, factor: Float): Int {
+        val alpha = (Color.alpha(color) * factor.coerceIn(0f, 1f)).roundToInt().coerceIn(0, 255)
+        return Color.argb(alpha, Color.red(color), Color.green(color), Color.blue(color))
     }
 
     private fun isIrsFile(uri: Uri): Boolean {

@@ -1,7 +1,7 @@
 package com.example.hifx.audio
 
 import android.content.Context
-import android.media.AudioAttributes
+import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
@@ -9,80 +9,76 @@ import android.os.SystemClock
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
-import androidx.annotation.RequiresApi
-import kotlin.math.max
-import kotlin.math.min
 import kotlin.math.roundToInt
 
 /**
- * Drives the device's linear resonant actuator (LRA) from a low-frequency audio envelope.
+ * Slow haptic consumer that turns coarse bass/kick information into drum-like vibration pulses.
  *
- * Design goals:
- *  - Stable, glitch-free output even on dropped/late envelope frames.
- *  - Never block the audio thread: all dispatch happens on a dedicated background handler.
- *  - Prefer vendor fast-paths (HyperOS / MIUI / OPPO / vivo) that expose continuous-amplitude
- *    APIs, then fall back to AOSP [VibrationEffect] composition. We mirror the behaviour of
- *    OGG files tagged with the `ANDROID_HAPTIC=1` Vorbis comment, where the system feeds the
- *    bass channel into the motor; here we synthesise the same drive signal from any source.
- *
- * The driver receives an envelope value in `[0f, 1f]` at a fixed cadence (≈50 Hz) from
- * [HapticAudioProcessor]. It applies hysteresis, slew limiting and a min-interval cooldown
- * before emitting a vibration command, so very quiet passages do not chatter the motor and
- * very loud passages do not over-saturate it.
+ * Design constraints:
+ *  - asynchronous feedback only
+ *  - max one request every ~100 ms
+ *  - simulate kick drum pulses from low-frequency energy
+ *  - never flood the system vibration service
  */
 internal class HapticAudioDriver private constructor(
     context: Context,
-    private val vibrator: Vibrator
+    private val vibrator: Vibrator,
+    initialDelayMs: Int
 ) {
 
-    private val appContext: Context = context.applicationContext
+    private val appContext = context.applicationContext
     private val workerThread = HandlerThread("HifxHapticAudio").apply {
         priority = Thread.NORM_PRIORITY + 1
         start()
     }
     private val handler = Handler(workerThread.looper)
 
-    @Volatile private var enabled: Boolean = false
-    @Volatile private var released: Boolean = false
+    @Volatile private var enabled = false
+    @Volatile private var released = false
+    @Volatile private var dispatchScheduled = false
+    @Volatile private var delayMs = initialDelayMs.coerceIn(-250, 250)
 
-    /** Last envelope sample we acted on, in `[0f, 1f]`. */
-    private var lastEnvelope: Float = 0f
-    /** Last amplitude we sent to the motor, in `[0, 255]`. */
-    private var lastAmplitude: Int = 0
-    /** Uptime (ms) when we last issued a command — used to throttle. */
-    private var lastDispatchUptimeMs: Long = 0L
-    /** Uptime (ms) until which the most recent vibration is expected to be active. */
-    private var activeUntilUptimeMs: Long = 0L
+    private var pendingBassLevel = 0f
+    private var pendingKickStrength = 0f
+    private var lastBassLevel = 0f
+    private var lastKickStrength = 0f
+    private var lastAmplitude = 0
+    private var lastAmplitudeBucket = 0
+    private var lastDispatchUptimeMs = 0L
+    private var activeUntilUptimeMs = 0L
 
-    private val vendorBackend: VendorBackend? = VendorBackend.detect(appContext, vibrator)
-    private val supportsAmplitudeControl: Boolean =
+    private var submitCount = 0L
+    private var dispatchCount = 0L
+    private var vendorDispatchCount = 0L
+    private var aospDispatchCount = 0L
+
+    private val vendorBackend: VendorBackend? = VendorBackend.detect(appContext)
+    private val supportsAmplitudeControl =
         Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && vibrator.hasAmplitudeControl()
-
-    private val mediaAudioAttributes: AudioAttributes = AudioAttributes.Builder()
-        .setUsage(AudioAttributes.USAGE_MEDIA)
-        .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
-        .build()
+    private val hasVibratePermission =
+        appContext.packageManager.checkPermission(android.Manifest.permission.VIBRATE, appContext.packageName) ==
+            PackageManager.PERMISSION_GRANTED
 
     fun setEnabled(value: Boolean) {
-        if (released) return
-        if (enabled == value) return
+        if (released || enabled == value) return
         enabled = value
         if (!value) {
-            handler.post { stopInternal() }
+            handler.post { stopAllOutput() }
         }
     }
 
-    /**
-     * Submit one envelope sample. May be called from the audio thread; this method does not
-     * block — the actual vibrator IPC runs on the worker handler.
-     */
-    fun submitEnvelope(envelope: Float) {
+    fun setDelayMs(value: Int) {
+        delayMs = value.coerceIn(-250, 250)
+    }
+
+    fun submitPulse(bassLevel: Float, kickStrength: Float) {
         if (!enabled || released) return
-        val clamped = envelope.coerceIn(0f, 1f)
-        // Slew limit: prevent abrupt jumps that would feel like clicks rather than rumble.
-        val slewed = slewLimit(previous = lastEnvelope, target = clamped)
-        lastEnvelope = slewed
-        handler.post { dispatchInternal(slewed) }
+        pendingBassLevel = bassLevel.coerceIn(0f, 1f)
+        pendingKickStrength = kickStrength.coerceIn(0f, 1f)
+        lastBassLevel = pendingBassLevel
+        lastKickStrength = pendingKickStrength
+        submitCount++
+        scheduleDispatch()
     }
 
     fun release() {
@@ -90,82 +86,90 @@ internal class HapticAudioDriver private constructor(
         released = true
         enabled = false
         handler.post {
-            stopInternal()
+            stopAllOutput()
             workerThread.quitSafely()
         }
     }
 
-    // -- internal --------------------------------------------------------------------------
-
-    private fun slewLimit(previous: Float, target: Float): Float {
-        val maxRise = 0.45f   // can ramp up fast (snappy bass hit)
-        val maxFall = 0.20f   // decay must be slower so it feels musical, not stuttery
-        val delta = target - previous
-        return when {
-            delta > maxRise -> previous + maxRise
-            delta < -maxFall -> previous - maxFall
-            else -> target
+    fun debugStatus(): String {
+        return buildString {
+            append("enabled=").append(enabled)
+            append(" released=").append(released)
+            append(" permission=").append(hasVibratePermission)
+            append(" hasVibrator=").append(vibrator.hasVibrator())
+            append(" ampCtl=").append(supportsAmplitudeControl)
+            append(" delayMs=").append(delayMs)
+            append(" backend=").append(vendorBackend?.label ?: "aosp")
+            append(" lastAmp=").append(lastAmplitude)
+            append(" lastBass=").append(lastBassLevel)
+            append(" lastKick=").append(lastKickStrength)
+            append(" submits=").append(submitCount)
+            append(" dispatch=").append(dispatchCount)
+            append(" vendorDispatch=").append(vendorDispatchCount)
+            append(" aospDispatch=").append(aospDispatchCount)
+            append(" scheduled=").append(dispatchScheduled)
+            append(" activeUntil=").append(activeUntilUptimeMs)
+            append(" backendStatus=").append(vendorBackend?.debugStatus() ?: "none")
         }
     }
 
-    private fun dispatchInternal(envelope: Float) {
+    private fun scheduleDispatch() {
+        if (dispatchScheduled || released || !enabled) return
+        dispatchScheduled = true
+        val baseDelayMs = (lastDispatchUptimeMs + MIN_DISPATCH_INTERVAL_MS - SystemClock.uptimeMillis())
+            .coerceAtLeast(0L)
+        val tunedDelayMs = (baseDelayMs + delayMs).coerceAtLeast(0L)
+        handler.postDelayed({ dispatchInternal() }, tunedDelayMs)
+    }
+
+    private fun dispatchInternal() {
+        dispatchScheduled = false
         if (!enabled || released) return
 
-        // Map envelope to [0,255] amplitude using a perceptual curve that emphasises the
-        // bottom of the range (bass usually sits low after RMS averaging).
-        val amplitude = perceptualToAmplitude(envelope)
+        val amplitude = amplitudeFor(pendingBassLevel, pendingKickStrength)
+        val amplitudeBucket = amplitudeBucket(amplitude)
+        if (amplitudeBucket == 0) {
+            return
+        }
+
         val now = SystemClock.uptimeMillis()
-
-        // Hysteresis: if the change is small AND the motor still has time on the clock,
-        // skip dispatch entirely to avoid IPC storms.
-        val amplitudeDelta = kotlin.math.abs(amplitude - lastAmplitude)
-        val stillActive = now < activeUntilUptimeMs
-        if (amplitude == 0 && lastAmplitude == 0) {
+        if (now < activeUntilUptimeMs && amplitudeBucket == lastAmplitudeBucket) {
             return
         }
-        if (stillActive && amplitudeDelta < AMPLITUDE_DELTA_THRESHOLD) {
-            return
-        }
-        // Throttle to MIN_DISPATCH_INTERVAL_MS even if amplitude is volatile.
-        if (now - lastDispatchUptimeMs < MIN_DISPATCH_INTERVAL_MS &&
-            amplitudeDelta < AMPLITUDE_DELTA_THRESHOLD_LARGE
-        ) {
+        if (now - lastDispatchUptimeMs < MIN_DISPATCH_INTERVAL_MS) {
             return
         }
 
-        if (amplitude == 0) {
-            stopInternal()
+        val durationMs = durationFor(amplitudeBucket, pendingKickStrength)
+        val backend = vendorBackend
+        val vendorOk = backend?.tryVibrate(amplitude, durationMs) == true
+        val aospOk = if (backend == null && !vendorOk) dispatchAosp(amplitude, durationMs) else false
+        val ok = vendorOk || aospOk
+        if (!ok) {
             return
         }
 
-        val durationMs = nextDurationMs(envelope)
-        val ok = vendorBackend?.tryVibrate(amplitude, durationMs)
-            ?: dispatchAosp(amplitude, durationMs)
-
-        if (ok) {
-            lastAmplitude = amplitude
-            lastDispatchUptimeMs = now
-            // Add a small overlap so back-to-back commands don't leave audible gaps.
-            activeUntilUptimeMs = now + durationMs + DISPATCH_OVERLAP_MS
-        }
+        dispatchCount++
+        if (vendorOk) vendorDispatchCount++
+        if (aospOk) aospDispatchCount++
+        lastAmplitude = amplitude
+        lastAmplitudeBucket = amplitudeBucket
+        lastDispatchUptimeMs = now
+        activeUntilUptimeMs = now + durationMs
     }
 
     private fun dispatchAosp(amplitude: Int, durationMs: Long): Boolean {
         return runCatching {
             when {
                 Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && supportsAmplitudeControl -> {
-                    val effect = VibrationEffect.createOneShot(durationMs, amplitude)
-                    vibrateWithAttributes(effect)
+                    vibrator.vibrate(VibrationEffect.createOneShot(durationMs, amplitude))
                 }
-
                 Build.VERSION.SDK_INT >= Build.VERSION_CODES.O -> {
-                    // No amplitude control: gate by amplitude threshold to avoid buzzing on
-                    // every tiny change.
                     if (amplitude < AMPLITUDE_FALLBACK_GATE) return@runCatching false
-                    val effect = VibrationEffect.createOneShot(durationMs, VibrationEffect.DEFAULT_AMPLITUDE)
-                    vibrateWithAttributes(effect)
+                    vibrator.vibrate(
+                        VibrationEffect.createOneShot(durationMs, VibrationEffect.DEFAULT_AMPLITUDE)
+                    )
                 }
-
                 else -> {
                     @Suppress("DEPRECATION")
                     vibrator.vibrate(durationMs)
@@ -175,123 +179,131 @@ internal class HapticAudioDriver private constructor(
         }.getOrDefault(false)
     }
 
-    @RequiresApi(Build.VERSION_CODES.O)
-    private fun vibrateWithAttributes(effect: VibrationEffect) {
-        // Tag commands as MEDIA so DnD/silent profiles handle them like the system would
-        // for an ANDROID_HAPTIC OGG (which is also classified under USAGE_MEDIA).
-        vibrator.vibrate(effect, mediaAudioAttributes)
-    }
-
-    private fun stopInternal() {
-        if (lastAmplitude == 0 && activeUntilUptimeMs == 0L) return
+    private fun stopAllOutput() {
+        vendorBackend?.stop()
         runCatching { vibrator.cancel() }
         lastAmplitude = 0
+        lastAmplitudeBucket = 0
         activeUntilUptimeMs = 0L
     }
 
-    /**
-     * Convert a perceptual envelope `[0,1]` to a vibrator amplitude in `[0,255]` with
-     * a soft toe and a hard ceiling so loud passages don't peg the motor.
-     */
-    private fun perceptualToAmplitude(envelope: Float): Int {
-        if (envelope <= ENVELOPE_NOISE_FLOOR) return 0
-        val shaped = ((envelope - ENVELOPE_NOISE_FLOOR) / (1f - ENVELOPE_NOISE_FLOOR))
+    private fun amplitudeFor(bassLevel: Float, kickStrength: Float): Int {
+        val combined = (bassLevel * BASS_BODY_WEIGHT + kickStrength * KICK_ATTACK_WEIGHT)
             .coerceIn(0f, 1f)
-        // gamma 0.65 → emphasise low-mid envelope, ceiling at 220/255 to stay below thermal limit.
-        val curved = Math.pow(shaped.toDouble(), 0.65).toFloat()
-        return (curved * 220f).roundToInt().coerceIn(1, 255)
+        return when {
+            combined < LEVEL_GATE -> 0
+            combined < 0.18f -> 54
+            combined < 0.34f -> 92
+            combined < 0.52f -> 136
+            combined < 0.74f -> 186
+            else -> 232
+        }
     }
 
-    private fun nextDurationMs(envelope: Float): Long {
-        // Stronger bass = longer pulse; clamps avoid both jitter and runaway pulses.
-        val base = MIN_DURATION_MS + ((MAX_DURATION_MS - MIN_DURATION_MS) * envelope).roundToInt()
-        return max(MIN_DURATION_MS, min(MAX_DURATION_MS, base)).toLong()
+    private fun amplitudeBucket(amplitude: Int): Int {
+        return when {
+            amplitude <= 0 -> 0
+            amplitude < 80 -> 1
+            amplitude < 160 -> 2
+            else -> 3
+        }
     }
 
-    // -- vendor fast paths -----------------------------------------------------------------
+    private fun durationFor(amplitudeBucket: Int, kickStrength: Float): Long {
+        val base = when (amplitudeBucket) {
+            1 -> 58
+            2 -> 76
+            else -> 96
+        }
+        val kickBonus = when {
+            kickStrength < 0.18f -> 0
+            kickStrength < 0.42f -> 10
+            kickStrength < 0.68f -> 18
+            else -> 26
+        }
+        return (base + kickBonus).coerceIn(50, 126).toLong()
+    }
 
-    /**
-     * Tries reflective access to vendor-specific continuous-amplitude APIs. None are
-     * documented; we keep the code defensive so a missing class on stock AOSP is a no-op.
-     */
     private class VendorBackend private constructor(
-        private val invoker: (amplitude: Int, durationMs: Long) -> Boolean
+        val label: String,
+        private val invoker: (amplitude: Int, durationMs: Long) -> Boolean,
+        private val stopper: () -> Unit = {}
     ) {
+        private var lastStatus = "idle"
+
         fun tryVibrate(amplitude: Int, durationMs: Long): Boolean = runCatching {
-            invoker(amplitude, durationMs)
-        }.getOrDefault(false)
+            invoker(amplitude, durationMs).also { ok ->
+                lastStatus = if (ok) {
+                    "ok amp=$amplitude dur=$durationMs"
+                } else {
+                    "rejected amp=$amplitude dur=$durationMs"
+                }
+            }
+        }.getOrElse {
+            lastStatus = it.message ?: it.javaClass.simpleName
+            false
+        }
+
+        fun stop() {
+            runCatching {
+                stopper()
+                lastStatus = "stopped"
+            }.onFailure {
+                lastStatus = it.message ?: it.javaClass.simpleName
+            }
+        }
+
+        fun debugStatus(): String = lastStatus
 
         companion object {
-            fun detect(context: Context, vibrator: Vibrator): VendorBackend? {
+            fun detect(context: Context): VendorBackend? {
                 detectMiui(context)?.let { return it }
                 detectOplusLinearMotor(context)?.let { return it }
                 detectVivoFf(context)?.let { return it }
                 return null
             }
 
-            /**
-             * HyperOS / MIUI: [miui.util.HapticFeedbackUtil] exposes a `performExtHapticFeedback`
-             * that accepts a strength int. Newer ROMs also expose
-             * `MiuiVibrator#linearMotorVibrate(int amplitude, int durationMs)` via
-             * [android.os.SystemVibrator] subclassing — we probe for both.
-             */
             private fun detectMiui(context: Context): VendorBackend? {
-                // Path A: miui.util.HapticFeedbackUtil
-                val utilClass = runCatching { Class.forName("miui.util.HapticFeedbackUtil") }
-                    .getOrNull()
+                val utilClass = runCatching { Class.forName("miui.util.HapticFeedbackUtil") }.getOrNull()
                 if (utilClass != null) {
                     val ctor = runCatching {
                         utilClass.getConstructor(Context::class.java, Boolean::class.javaPrimitiveType)
                     }.getOrNull()
                     val instance = runCatching { ctor?.newInstance(context, false) }.getOrNull()
                     val perform = runCatching {
-                        utilClass.getMethod(
-                            "performExtHapticFeedback",
-                            Int::class.javaPrimitiveType
-                        )
+                        utilClass.getMethod("performExtHapticFeedback", Int::class.javaPrimitiveType)
                     }.getOrNull()
                     if (instance != null && perform != null) {
-                        return VendorBackend { amplitude, _ ->
-                            // 200+ are MIUI's "rich" effects; map our amplitude into the
-                            // documented strength range used by the music haptics on Xiaomi.
-                            val strength = miuiStrengthFromAmplitude(amplitude)
-                            perform.invoke(instance, strength)
-                            true
-                        }
+                        return VendorBackend(
+                            label = "miui_reflect_util",
+                            invoker = { amplitude, _ ->
+                                perform.invoke(instance, miuiStrengthFromAmplitude(amplitude))
+                                true
+                            }
+                        )
                     }
                 }
-                // Path B: reflectively reachable linearMotorVibrate on SystemVibrator subclass
+
                 val systemVibratorClass = runCatching {
                     Class.forName("android.os.SystemVibrator")
                 }.getOrNull()
                 val linearMotorMethod = systemVibratorClass?.declaredMethods?.firstOrNull {
-                    it.name.equals("linearMotorVibrate", ignoreCase = true) &&
-                        it.parameterTypes.size >= 2
+                    it.name.equals("linearMotorVibrate", ignoreCase = true) && it.parameterTypes.size >= 2
                 }
                 if (linearMotorMethod != null) {
                     linearMotorMethod.isAccessible = true
                     val service = context.getSystemService(Context.VIBRATOR_SERVICE)
-                    return VendorBackend { amplitude, durationMs ->
-                        linearMotorMethod.invoke(service, amplitude, durationMs.toInt())
-                        true
-                    }
+                    return VendorBackend(
+                        label = "miui_reflect_linear_motor",
+                        invoker = { amplitude, durationMs ->
+                            linearMotorMethod.invoke(service, amplitude, durationMs.toInt())
+                            true
+                        }
+                    )
                 }
                 return null
             }
 
-            private fun miuiStrengthFromAmplitude(amplitude: Int): Int = when {
-                amplitude >= 200 -> 0   // HapticFeedbackConstants.MIUI_TAP_HEAVY-equivalent
-                amplitude >= 140 -> 1
-                amplitude >= 90 -> 2
-                amplitude >= 50 -> 3
-                else -> 4
-            }
-
-            /**
-             * OPPO ColorOS / OnePlus OxygenOS: `com.oplus.os.LinearmotorVibrator` (varies by
-             * OS version). Method signature is `vibrate(int level, int amplitude, int frequency)`
-             * on newer builds.
-             */
             private fun detectOplusLinearMotor(context: Context): VendorBackend? {
                 val candidates = listOf(
                     "com.oplus.os.LinearmotorVibrator",
@@ -299,81 +311,82 @@ internal class HapticAudioDriver private constructor(
                 )
                 for (className in candidates) {
                     val cls = runCatching { Class.forName(className) }.getOrNull() ?: continue
-                    val service = runCatching {
-                        context.getSystemService("linearmotor")
-                    }.getOrNull() ?: continue
+                    val service = runCatching { context.getSystemService("linearmotor") }.getOrNull() ?: continue
                     val vibrate = cls.declaredMethods.firstOrNull {
                         it.name == "vibrate" && it.parameterTypes.size == 3
                     } ?: continue
                     vibrate.isAccessible = true
-                    return VendorBackend { amplitude, _ ->
-                        // (level=2 short, amplitude 0..255, frequency in Hz; LRAs are tuned ~170Hz)
-                        vibrate.invoke(service, /* level */ 2, amplitude, /* freq */ 170)
-                        true
-                    }
+                    return VendorBackend(
+                        label = "oplus_linear_motor",
+                        invoker = { amplitude, _ ->
+                            vibrate.invoke(service, 2, amplitude, 170)
+                            true
+                        }
+                    )
                 }
                 return null
             }
 
-            /**
-             * vivo FunTouch / Origin OS: `android.os.FtFeature` + `Vibrator.vibratorPro` paths
-             * exist on newer devices. Their signatures shift, so we only attempt the most
-             * commonly seen one.
-             */
             private fun detectVivoFf(context: Context): VendorBackend? {
                 val vibratorService = context.getSystemService(Context.VIBRATOR_SERVICE) ?: return null
                 val method = vibratorService.javaClass.declaredMethods.firstOrNull {
                     it.name == "vibratorPro" && it.parameterTypes.size >= 3
                 } ?: return null
                 method.isAccessible = true
-                return VendorBackend { amplitude, durationMs ->
-                    method.invoke(
-                        vibratorService,
-                        /* effectId */ -1,
-                        /* amplitude */ amplitude,
-                        /* freq */ 170,
-                        durationMs
-                    )
-                    true
-                }
+                return VendorBackend(
+                    label = "vivo_vibrator_pro",
+                    invoker = { amplitude, durationMs ->
+                        method.invoke(vibratorService, -1, amplitude, 170, durationMs)
+                        true
+                    }
+                )
+            }
+
+            private fun miuiStrengthFromAmplitude(amplitude: Int): Int = when {
+                amplitude >= 190 -> 0
+                amplitude >= 135 -> 1
+                amplitude >= 85 -> 2
+                amplitude >= 45 -> 3
+                else -> 4
             }
         }
     }
 
     companion object {
-        // Envelope under this fraction is treated as silence to avoid motor whine on near-zero
-        // signals. Tuned against typical streaming masters where the bass noise floor sits at
-        // about -50 dBFS after the low-pass.
-        private const val ENVELOPE_NOISE_FLOOR = 0.06f
+        private const val LEVEL_GATE = 0.05f
+        private const val MIN_DISPATCH_INTERVAL_MS = 100L
+        private const val AMPLITUDE_FALLBACK_GATE = 48
+        private const val BASS_BODY_WEIGHT = 0.56f
+        private const val KICK_ATTACK_WEIGHT = 0.88f
 
-        // Minimum gap between successive dispatches. The motor can comfortably handle ~50 Hz
-        // updates; anything tighter than this just generates redundant IPC.
-        private const val MIN_DISPATCH_INTERVAL_MS = 18L
+        @Volatile
+        private var lastCreateStatus: String = "not-created"
 
-        // Per-pulse duration limits. Pulses overlap by [DISPATCH_OVERLAP_MS] so the LRA never
-        // fully decays between commands during sustained bass.
-        private const val MIN_DURATION_MS = 28
-        private const val MAX_DURATION_MS = 90
-        private const val DISPATCH_OVERLAP_MS = 6L
+        fun lastStatus(): String = lastCreateStatus
 
-        // If amplitude moved by less than this, treat as "no change" (hysteresis).
-        private const val AMPLITUDE_DELTA_THRESHOLD = 12
-        // Above this delta, allow an early dispatch even if we're inside the throttle window.
-        private const val AMPLITUDE_DELTA_THRESHOLD_LARGE = 60
-        // For devices without amplitude control, gate by minimum amplitude so we don't buzz
-        // for every quiet kick.
-        private const val AMPLITUDE_FALLBACK_GATE = 80
-
-        fun createOrNull(context: Context): HapticAudioDriver? {
+        fun createOrNull(context: Context, delayMs: Int): HapticAudioDriver? {
+            lastCreateStatus = "initializing"
+            val hasPermission = context.packageManager.checkPermission(
+                android.Manifest.permission.VIBRATE,
+                context.packageName
+            ) == PackageManager.PERMISSION_GRANTED
+            if (!hasPermission) {
+                lastCreateStatus = "missing android.permission.VIBRATE"
+                return null
+            }
             val vibrator = resolveVibrator(context) ?: return null
-            if (!vibrator.hasVibrator()) return null
-            return HapticAudioDriver(context, vibrator)
+            if (!vibrator.hasVibrator()) {
+                lastCreateStatus = "device reports no vibrator"
+                return null
+            }
+            val driver = HapticAudioDriver(context, vibrator, delayMs)
+            lastCreateStatus = "created backend=${driver.vendorBackend?.label ?: "aosp"}"
+            return driver
         }
 
         private fun resolveVibrator(context: Context): Vibrator? {
             return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                val manager = context.getSystemService(VibratorManager::class.java)
-                manager?.defaultVibrator
+                context.getSystemService(VibratorManager::class.java)?.defaultVibrator
             } else {
                 @Suppress("DEPRECATION")
                 context.getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator

@@ -22,8 +22,17 @@ internal class TopBarVisualizationProcessor : BaseAudioProcessor() {
         nativeBackend?.reset()
     }
 
+    fun fillEqSpectrumSnapshot(target: FloatArray) {
+        if (target.isEmpty()) {
+            return
+        }
+        target.fill(0f)
+        nativeBackend?.fillEqSpectrumSnapshot(target)
+    }
+
     override fun onConfigure(inputAudioFormat: AudioProcessor.AudioFormat): AudioProcessor.AudioFormat {
         configuredFormat = inputAudioFormat
+        nativeBackend?.setSampleRateHz(inputAudioFormat.sampleRate)
         return when (inputAudioFormat.encoding) {
             C.ENCODING_PCM_16BIT,
             C.ENCODING_PCM_FLOAT -> inputAudioFormat
@@ -73,6 +82,13 @@ internal class TopBarVisualizationProcessor : BaseAudioProcessor() {
 private class NativeTopBarVisualizerBackend private constructor(
     private var handle: Long
 ) {
+    fun setSampleRateHz(sampleRateHz: Int) {
+        if (handle == 0L || sampleRateHz <= 0) {
+            return
+        }
+        NativeTopBarVisualizerBridge.nativeSetSampleRateHz(handle, sampleRateHz)
+    }
+
     fun analyzePcm16(buffer: ByteBuffer, lengthBytes: Int, channelCount: Int) {
         if (handle == 0L || !buffer.isDirect) {
             return
@@ -96,6 +112,13 @@ private class NativeTopBarVisualizerBackend private constructor(
             return
         }
         NativeTopBarVisualizerBridge.nativeFillSnapshot(handle, nativeMode, target)
+    }
+
+    fun fillEqSpectrumSnapshot(target: FloatArray) {
+        if (handle == 0L || target.isEmpty()) {
+            return
+        }
+        NativeTopBarVisualizerBridge.nativeFillEqSpectrumSnapshot(handle, target)
     }
 
     fun reset() {
@@ -133,7 +156,9 @@ private object NativeTopBarVisualizerBridge {
     external fun nativeCreate(): Long
     external fun nativeRelease(handle: Long)
     external fun nativeReset(handle: Long)
+    external fun nativeSetSampleRateHz(handle: Long, sampleRateHz: Int)
     external fun nativeAnalyzePcm16(handle: Long, buffer: ByteBuffer, lengthBytes: Int, channelCount: Int)
     external fun nativeAnalyzeFloat(handle: Long, buffer: ByteBuffer, sampleCount: Int, channelCount: Int)
     external fun nativeFillSnapshot(handle: Long, mode: Int, target: FloatArray)
+    external fun nativeFillEqSpectrumSnapshot(handle: Long, target: FloatArray)
 }

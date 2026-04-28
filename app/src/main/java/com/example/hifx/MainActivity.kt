@@ -2,10 +2,14 @@ package com.example.hifx
 
 import android.content.Intent
 import android.animation.ValueAnimator
+import android.graphics.Bitmap
+import android.graphics.Canvas
 import android.graphics.Outline
 import android.graphics.Rect
 import android.graphics.drawable.ColorDrawable
+import android.net.Uri
 import android.os.Bundle
+import android.provider.OpenableColumns
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
@@ -125,7 +129,7 @@ class MainActivity : AppCompatActivity() {
 
         if (savedInstanceState == null) {
             binding.bottomNav.menu.findItem(R.id.navigation_playback).isChecked = true
-            if (!handleExternalNavigationIntent(intent)) {
+            if (!handleIncomingIntent(intent)) {
                 navigateByItem(R.id.navigation_playback)
             }
         }
@@ -135,14 +139,17 @@ class MainActivity : AppCompatActivity() {
         super.onNewIntent(intent)
         if (intent != null) {
             setIntent(intent)
-            handleExternalNavigationIntent(intent)
+            handleIncomingIntent(intent)
         }
     }
 
     override fun onResume() {
         super.onResume()
-        AudioEngine.refreshPlaybackStateNow()
-        AudioEngine.requestExternalDacExclusiveAccess(this)
+        val returningFromPlayer = PlayerTransitionState.consumeReturningFromPlayer()
+        if (!returningFromPlayer) {
+            AudioEngine.refreshPlaybackStateNow()
+            AudioEngine.requestExternalDacExclusiveAccess(this)
+        }
         if (PlayerTransitionState.consumeMainUiWarmupRequest()) {
             prewarmHomeUiForPlayerExit()
         }
@@ -766,8 +773,8 @@ class MainActivity : AppCompatActivity() {
         }
 
         val duration = 300L
-        val startCorner = dp(2f).toFloat()
-        val endCorner = dp(20f).toFloat()
+        val startCorner = payload.startCornerRadiusPx
+        val endCorner = payload.endCornerRadiusPx
         var currentCorner = startCorner
         var clipWidth = source.width()
         var clipHeight = source.height()
@@ -790,18 +797,7 @@ class MainActivity : AppCompatActivity() {
             scaleType = ImageView.ScaleType.FIT_XY
             layoutParams = FrameLayout.LayoutParams(source.width(), source.height())
         }
-        val snapshotMask = View(this).apply {
-            layoutParams = FrameLayout.LayoutParams(source.width(), source.height())
-            setBackgroundColor(
-                MaterialColors.getColor(
-                    binding.root,
-                    com.google.android.material.R.attr.colorSurface
-                )
-            )
-            alpha = 0.58f
-        }
         maskedSnapshot.addView(snapshotImage)
-        maskedSnapshot.addView(snapshotMask)
         overlayHost.addView(maskedSnapshot)
 
         ValueAnimator.ofFloat(0f, 1f).apply {
@@ -826,8 +822,6 @@ class MainActivity : AppCompatActivity() {
                 maskedSnapshot.invalidateOutline()
                 snapshotImage.x = source.left.toFloat() - x
                 snapshotImage.y = source.top.toFloat() - y
-                snapshotMask.x = source.left.toFloat() - x
-                snapshotMask.y = source.top.toFloat() - y
             }
             doOnEnd {
                 maskedSnapshot.setLayerType(View.LAYER_TYPE_NONE, null)
@@ -938,9 +932,21 @@ class MainActivity : AppCompatActivity() {
     private fun openPlayerDetailWithAnimation() {
         updateMiniPlayerTransitionState()
         PlayerTransitionState.updatePrewarmedPlaybackState(latestPlaybackState)
+        PlayerTransitionState.updateBackgroundSnapshot(createPlayerTransitionSnapshot())
         val intent = Intent(this, PlayerActivity::class.java)
         startActivity(intent)
         overridePendingTransition(0, 0)
+    }
+
+    private fun createPlayerTransitionSnapshot(): Bitmap? {
+        val root = binding.root
+        if (root.width <= 0 || root.height <= 0) return null
+        return runCatching {
+            Bitmap.createBitmap(root.width, root.height, Bitmap.Config.ARGB_8888).also { bitmap ->
+                val canvas = Canvas(bitmap)
+                root.draw(canvas)
+            }
+        }.getOrNull()
     }
 
     private fun updateMiniPlayerTransitionState() {
@@ -950,6 +956,9 @@ class MainActivity : AppCompatActivity() {
             else -> null
         } ?: run {
             PlayerTransitionState.miniPlayerRectOnScreen = null
+            PlayerTransitionState.miniPlayerCoverRectOnScreen = null
+            PlayerTransitionState.miniPlayerTitleRectOnScreen = null
+            PlayerTransitionState.miniPlayerSubtitleRectOnScreen = null
             return
         }
         val loc = IntArray(2)
@@ -960,6 +969,45 @@ class MainActivity : AppCompatActivity() {
             loc[0] + target.width,
             loc[1] + target.height
         )
+        val cover = miniPlayerBinding.imageMiniCover
+        if (cover.visibility == View.VISIBLE && cover.width > 0 && cover.height > 0) {
+            val coverLoc = IntArray(2)
+            cover.getLocationOnScreen(coverLoc)
+            PlayerTransitionState.miniPlayerCoverRectOnScreen = Rect(
+                coverLoc[0],
+                coverLoc[1],
+                coverLoc[0] + cover.width,
+                coverLoc[1] + cover.height
+            )
+        } else {
+            PlayerTransitionState.miniPlayerCoverRectOnScreen = null
+        }
+        val title = miniPlayerBinding.textMiniTitle
+        if (title.visibility == View.VISIBLE && title.width > 0 && title.height > 0) {
+            val titleLoc = IntArray(2)
+            title.getLocationOnScreen(titleLoc)
+            PlayerTransitionState.miniPlayerTitleRectOnScreen = Rect(
+                titleLoc[0],
+                titleLoc[1],
+                titleLoc[0] + title.width,
+                titleLoc[1] + title.height
+            )
+        } else {
+            PlayerTransitionState.miniPlayerTitleRectOnScreen = null
+        }
+        val subtitle = miniPlayerBinding.textMiniSubtitle
+        if (subtitle.visibility == View.VISIBLE && subtitle.width > 0 && subtitle.height > 0) {
+            val subtitleLoc = IntArray(2)
+            subtitle.getLocationOnScreen(subtitleLoc)
+            PlayerTransitionState.miniPlayerSubtitleRectOnScreen = Rect(
+                subtitleLoc[0],
+                subtitleLoc[1],
+                subtitleLoc[0] + subtitle.width,
+                subtitleLoc[1] + subtitle.height
+            )
+        } else {
+            PlayerTransitionState.miniPlayerSubtitleRectOnScreen = null
+        }
     }
 
     private fun navigateByItem(itemId: Int): Boolean {
@@ -991,6 +1039,57 @@ class MainActivity : AppCompatActivity() {
             .commit()
         setBottomNavHiddenForKeyboard(false)
         binding.fragmentContainer.post { updateFragmentBottomInset(animated = false) }
+    }
+
+    private fun handleIncomingIntent(intent: Intent): Boolean {
+        if (handleExternalAudioViewIntent(intent)) {
+            return true
+        }
+        return handleExternalNavigationIntent(intent)
+    }
+
+    private fun handleExternalAudioViewIntent(intent: Intent): Boolean {
+        if (intent.action != Intent.ACTION_VIEW) {
+            return false
+        }
+        val uri = intent.data ?: return false
+        val mimeType = intent.type.orEmpty()
+        val isAudio = mimeType.startsWith("audio/") ||
+            contentResolver.getType(uri).orEmpty().startsWith("audio/")
+        if (!isAudio) {
+            return false
+        }
+        runCatching {
+            contentResolver.takePersistableUriPermission(
+                uri,
+                Intent.FLAG_GRANT_READ_URI_PERMISSION
+            )
+        }
+        AudioEngine.loadTrack(uri, resolveExternalAudioTitle(uri))
+        binding.bottomNav.menu.findItem(R.id.navigation_playback).isChecked = true
+        if (supportFragmentManager.findFragmentById(R.id.fragment_container) !is PlaybackFragment) {
+            navigateByItem(R.id.navigation_playback)
+        }
+        return true
+    }
+
+    private fun resolveExternalAudioTitle(uri: Uri): String? {
+        val fromColumns = runCatching {
+            contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)
+                ?.use { cursor ->
+                    if (cursor.moveToFirst()) {
+                        val index = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                        if (index >= 0) cursor.getString(index) else null
+                    } else {
+                        null
+                    }
+                }
+        }.getOrNull()?.trim().orEmpty()
+        if (fromColumns.isNotBlank()) {
+            return fromColumns
+        }
+        val path = uri.lastPathSegment.orEmpty()
+        return path.substringAfterLast('/').ifBlank { null }
     }
 
     private fun handleExternalNavigationIntent(intent: Intent): Boolean {

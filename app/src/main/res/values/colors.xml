@@ -10,7 +10,9 @@
     <color name="icon_bg_start">#FF151A2E</color>
     <color name="icon_bg_end">#FF2A325F</color>
     <color name="icon_bg_dynamic">#FF20284A</color>
-    <color name="icon_fg_primary">#FFF3F6FF</color>
+    <color name="glow_toggle_green">#72FF8B</color>
+    <color name="glow_toggle_green_soft">#5072FF8B</color>
+    <color name="icon_fg_primary">#FFF3F5F7</color>
     <color name="icon_fg_accent">#FF66E2FF</color>
-    <color name="icon_fg_x_dynamic">#FF66E2FF</color>
+    <color name="icon_fg_x_dynamic">#72FF8B</color>
 </resources>

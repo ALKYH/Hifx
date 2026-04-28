@@ -23,7 +23,13 @@ internal class StereoUtilityProcessor : BaseAudioProcessor() {
     private var monoEnabled = false
 
     @Volatile
+    private var vocalRemovalEnabled = false
+
+    @Volatile
     private var phaseInvertEnabled = false
+
+    @Volatile
+    private var rightChannelPhaseInvertEnabled = false
 
     @Volatile
     private var crossfeedMix = 0f
@@ -35,14 +41,18 @@ internal class StereoUtilityProcessor : BaseAudioProcessor() {
         panBalance: Float,
         panInvertEnabled: Boolean,
         monoEnabled: Boolean,
+        vocalRemovalEnabled: Boolean,
         phaseInvertEnabled: Boolean,
+        rightChannelPhaseInvertEnabled: Boolean,
         crossfeedMix: Float
     ) {
         this.limiterEnabled = limiterEnabled
         this.panBalance = panBalance.coerceIn(-1f, 1f)
         this.panInvertEnabled = panInvertEnabled
         this.monoEnabled = monoEnabled
+        this.vocalRemovalEnabled = vocalRemovalEnabled
         this.phaseInvertEnabled = phaseInvertEnabled
+        this.rightChannelPhaseInvertEnabled = rightChannelPhaseInvertEnabled
         this.crossfeedMix = crossfeedMix.coerceIn(0f, 1f)
         if (!limiterEnabled) {
             limiterGain = 1f
@@ -65,7 +75,8 @@ internal class StereoUtilityProcessor : BaseAudioProcessor() {
         outputBuffer.order(ByteOrder.LITTLE_ENDIAN)
 
         val applyAny =
-            limiterEnabled || abs(panBalance) > 0.0001f || panInvertEnabled || monoEnabled || phaseInvertEnabled || crossfeedMix > 0.0001f
+            limiterEnabled || abs(panBalance) > 0.0001f || panInvertEnabled || monoEnabled ||
+                vocalRemovalEnabled || phaseInvertEnabled || rightChannelPhaseInvertEnabled || crossfeedMix > 0.0001f
         if (!applyAny) {
             outputBuffer.put(inputBuffer)
             outputBuffer.flip()
@@ -105,8 +116,18 @@ internal class StereoUtilityProcessor : BaseAudioProcessor() {
                 right = mono
             }
 
+            if (vocalRemovalEnabled) {
+                val removed = ((right - left) * 0.5f).coerceIn(-1f, 1f)
+                left = removed
+                right = removed
+            }
+
             if (phaseInvertEnabled) {
                 left = -left
+                right = -right
+            }
+
+            if (rightChannelPhaseInvertEnabled) {
                 right = -right
             }
 
@@ -142,7 +163,9 @@ internal class StereoUtilityProcessor : BaseAudioProcessor() {
         panBalance = 0f
         panInvertEnabled = false
         monoEnabled = false
+        vocalRemovalEnabled = false
         phaseInvertEnabled = false
+        rightChannelPhaseInvertEnabled = false
         crossfeedMix = 0f
     }
 

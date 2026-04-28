@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <declare-styleable name="KnobView">
+        <attr name="valueFrom" format="float" />
+        <attr name="valueTo" format="float" />
+        <attr name="value" format="float" />
+        <attr name="stepSize" format="float" />
+    </declare-styleable>
+</resources>

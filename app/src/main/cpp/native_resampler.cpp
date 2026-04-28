@@ -3,13 +3,19 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
+#include <memory>
+#include <string>
 #include <vector>
+
+#include "soxr.h"
 
 namespace {
 
 constexpr int kAlgoNearest = 0;
 constexpr int kAlgoLinear = 1;
 constexpr int kAlgoCubic = 2;
+constexpr int kAlgoSoxrHq = 3;
 
 struct StereoFrame {
     float left = 0.0f;
@@ -22,6 +28,10 @@ struct NativeUsbResampler {
     int algorithm = kAlgoLinear;
     double source_position = 0.0;
     std::vector<StereoFrame> history;
+    soxr_t soxr = nullptr;
+    std::vector<int16_t> input_pcm;
+    std::vector<int16_t> output_pcm;
+    std::string last_error;
 };
 
 inline float short_to_float(int16_t value) {
@@ -76,6 +86,114 @@ NativeUsbResampler* from_handle(jlong handle) {
     return reinterpret_cast<NativeUsbResampler*>(handle);
 }
 
+void reset_manual_state(NativeUsbResampler* resampler) {
+    if (resampler == nullptr) {
+        return;
+    }
+    resampler->source_position = 0.0;
+    resampler->history.clear();
+}
+
+void release_soxr_state(NativeUsbResampler* resampler) {
+    if (resampler == nullptr || resampler->soxr == nullptr) {
+        return;
+    }
+    soxr_delete(resampler->soxr);
+    resampler->soxr = nullptr;
+}
+
+bool ensure_soxr_state(NativeUsbResampler* resampler) {
+    if (resampler == nullptr) {
+        return false;
+    }
+    if (resampler->soxr != nullptr) {
+        return true;
+    }
+    soxr_error_t error = nullptr;
+    const soxr_io_spec_t io_spec = soxr_io_spec(SOXR_INT16_I, SOXR_INT16_I);
+    const soxr_quality_spec_t quality_spec = soxr_quality_spec(SOXR_HQ, 0);
+    const soxr_runtime_spec_t runtime_spec = soxr_runtime_spec(1);
+    resampler->soxr = soxr_create(
+        static_cast<double>(resampler->input_rate_hz),
+        static_cast<double>(resampler->output_rate_hz),
+        2,
+        &error,
+        &io_spec,
+        &quality_spec,
+        &runtime_spec
+    );
+    if (error != nullptr || resampler->soxr == nullptr) {
+        resampler->last_error = error != nullptr ? error : "soxr_create failed";
+        release_soxr_state(resampler);
+        return false;
+    }
+    return true;
+}
+
+bool process_with_soxr(
+    JNIEnv* env,
+    NativeUsbResampler* resampler,
+    jbyteArray input,
+    jsize input_size,
+    int input_frame_count,
+    jbyteArray* output_array
+) {
+    if (!ensure_soxr_state(resampler)) {
+        return false;
+    }
+    resampler->input_pcm.resize(static_cast<size_t>(input_size / 2));
+    env->GetByteArrayRegion(input, 0, input_size, reinterpret_cast<jbyte*>(resampler->input_pcm.data()));
+
+    const double ratio = static_cast<double>(resampler->output_rate_hz) / static_cast<double>(resampler->input_rate_hz);
+    const size_t estimated_output_frames = static_cast<size_t>(std::ceil(input_frame_count * ratio)) + 64U;
+    resampler->output_pcm.assign(estimated_output_frames * 2U, 0);
+
+    size_t total_input_done = 0;
+    size_t total_output_done = 0;
+    while (total_input_done < static_cast<size_t>(input_frame_count)) {
+        size_t input_done = 0;
+        size_t output_done = 0;
+        const size_t output_capacity_frames = (resampler->output_pcm.size() / 2U) - total_output_done;
+        if (output_capacity_frames == 0) {
+            const size_t previous_size = resampler->output_pcm.size();
+            resampler->output_pcm.resize(previous_size + std::max<size_t>(128U, previous_size / 2U + 2U));
+            continue;
+        }
+        soxr_error_t error = soxr_process(
+            resampler->soxr,
+            resampler->input_pcm.data() + total_input_done * 2U,
+            static_cast<size_t>(input_frame_count) - total_input_done,
+            &input_done,
+            resampler->output_pcm.data() + total_output_done * 2U,
+            output_capacity_frames,
+            &output_done
+        );
+        if (error != nullptr) {
+            resampler->last_error = error;
+            soxr_clear(resampler->soxr);
+            return false;
+        }
+        total_input_done += input_done;
+        total_output_done += output_done;
+        if (input_done == 0 && output_done == 0) {
+            break;
+        }
+    }
+
+    const jsize output_size = static_cast<jsize>(total_output_done * 2U * sizeof(int16_t));
+    *output_array = env->NewByteArray(output_size);
+    if (*output_array == nullptr) {
+        return false;
+    }
+    env->SetByteArrayRegion(
+        *output_array,
+        0,
+        output_size,
+        reinterpret_cast<const jbyte*>(resampler->output_pcm.data())
+    );
+    return true;
+}
+
 }  // namespace
 
 extern "C" JNIEXPORT jlong JNICALL
@@ -99,8 +217,9 @@ Java_com_example_hifx_audio_NativeUsbResamplerBridge_nativeConfigure(
     resampler->input_rate_hz = std::max(1, static_cast<int>(input_sample_rate_hz));
     resampler->output_rate_hz = std::max(1, static_cast<int>(output_sample_rate_hz));
     resampler->algorithm = algorithm;
-    resampler->source_position = 0.0;
-    resampler->history.clear();
+    resampler->last_error.clear();
+    release_soxr_state(resampler);
+    reset_manual_state(resampler);
 }
 
 extern "C" JNIEXPORT jbyteArray JNICALL
@@ -119,29 +238,37 @@ Java_com_example_hifx_audio_NativeUsbResamplerBridge_nativeProcessPcm16Stereo(
         return env->NewByteArray(0);
     }
     const int input_frame_count = input_size / 4;
-    std::vector<int16_t> input_pcm(static_cast<size_t>(input_size / 2));
-    env->GetByteArrayRegion(input, 0, input_size, reinterpret_cast<jbyte*>(input_pcm.data()));
+
+    if (resampler->algorithm == kAlgoSoxrHq) {
+        jbyteArray output = nullptr;
+        if (process_with_soxr(env, resampler, input, input_size, input_frame_count, &output)) {
+            return output;
+        }
+    }
+
+    resampler->input_pcm.resize(static_cast<size_t>(input_size / 2));
+    env->GetByteArrayRegion(input, 0, input_size, reinterpret_cast<jbyte*>(resampler->input_pcm.data()));
 
     std::vector<StereoFrame> frames;
     frames.reserve(resampler->history.size() + static_cast<size_t>(input_frame_count));
     frames.insert(frames.end(), resampler->history.begin(), resampler->history.end());
     for (int i = 0; i < input_frame_count; ++i) {
         frames.push_back(StereoFrame{
-            short_to_float(input_pcm[i * 2]),
-            short_to_float(input_pcm[i * 2 + 1])
+            short_to_float(resampler->input_pcm[i * 2]),
+            short_to_float(resampler->input_pcm[i * 2 + 1])
         });
     }
 
     if (frames.size() < 2 || resampler->input_rate_hz == resampler->output_rate_hz) {
         jbyteArray output = env->NewByteArray(input_size);
-        env->SetByteArrayRegion(output, 0, input_size, reinterpret_cast<const jbyte*>(input_pcm.data()));
+        env->SetByteArrayRegion(output, 0, input_size, reinterpret_cast<const jbyte*>(resampler->input_pcm.data()));
         resampler->history.assign(frames.end() - std::min<size_t>(frames.size(), 4), frames.end());
         return output;
     }
 
     const double step = static_cast<double>(resampler->input_rate_hz) / static_cast<double>(resampler->output_rate_hz);
-    std::vector<int16_t> output_pcm;
-    output_pcm.reserve(static_cast<size_t>((input_frame_count / step) + 8) * 2U);
+    resampler->output_pcm.clear();
+    resampler->output_pcm.reserve(static_cast<size_t>((input_frame_count / step) + 8) * 2U);
 
     while (resampler->source_position + 1.0 < static_cast<double>(frames.size())) {
         StereoFrame sample;
@@ -157,8 +284,8 @@ Java_com_example_hifx_audio_NativeUsbResamplerBridge_nativeProcessPcm16Stereo(
                 sample = sample_linear(frames, resampler->source_position);
                 break;
         }
-        output_pcm.push_back(float_to_short(sample.left));
-        output_pcm.push_back(float_to_short(sample.right));
+        resampler->output_pcm.push_back(float_to_short(sample.left));
+        resampler->output_pcm.push_back(float_to_short(sample.right));
         resampler->source_position += step;
     }
 
@@ -169,9 +296,9 @@ Java_com_example_hifx_audio_NativeUsbResamplerBridge_nativeProcessPcm16Stereo(
         resampler->source_position = 0.0;
     }
 
-    const jsize output_size = static_cast<jsize>(output_pcm.size() * sizeof(int16_t));
+    const jsize output_size = static_cast<jsize>(resampler->output_pcm.size() * sizeof(int16_t));
     jbyteArray output = env->NewByteArray(output_size);
-    env->SetByteArrayRegion(output, 0, output_size, reinterpret_cast<const jbyte*>(output_pcm.data()));
+    env->SetByteArrayRegion(output, 0, output_size, reinterpret_cast<const jbyte*>(resampler->output_pcm.data()));
     return output;
 }
 
@@ -181,11 +308,16 @@ Java_com_example_hifx_audio_NativeUsbResamplerBridge_nativeReset(JNIEnv*, jobjec
     if (resampler == nullptr) {
         return;
     }
-    resampler->source_position = 0.0;
-    resampler->history.clear();
+    resampler->last_error.clear();
+    if (resampler->soxr != nullptr) {
+        soxr_clear(resampler->soxr);
+    }
+    reset_manual_state(resampler);
 }
 
 extern "C" JNIEXPORT void JNICALL
 Java_com_example_hifx_audio_NativeUsbResamplerBridge_nativeRelease(JNIEnv*, jobject, jlong handle) {
-    delete from_handle(handle);
+    auto* resampler = from_handle(handle);
+    release_soxr_state(resampler);
+    delete resampler;
 }

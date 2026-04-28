@@ -84,9 +84,17 @@ internal data class UsbMappedTransportFormat(
     val note: String
 )
 
+private data class NativeUsbQueuedPacket(
+    val bytes: ByteArray,
+    val inputSampleRateHz: Int,
+    val outputSampleRateHz: Int,
+    val resampleAlgorithm: Int
+)
+
 internal const val USB_RESAMPLER_ALGORITHM_NEAREST = 0
 internal const val USB_RESAMPLER_ALGORITHM_LINEAR = 1
 internal const val USB_RESAMPLER_ALGORITHM_CUBIC = 2
+internal const val USB_RESAMPLER_ALGORITHM_SOXR_HQ = 3
 
 internal class UsbHostDirectOutput(
     private val context: Context
@@ -254,12 +262,11 @@ internal class NativeUsbDirectOutput(
     @Volatile
     private var running = false
     private var worker: Thread? = null
-    private val packetQueue = ArrayBlockingQueue<ByteArray>(48)
+    private val packetQueue = ArrayBlockingQueue<NativeUsbQueuedPacket>(48)
     private val queuedBytes = AtomicInteger(0)
     private val droppedPackets = AtomicInteger(0)
     private val submittedPackets = AtomicInteger(0)
     private var transportConfig: UsbTransportConfig = UsbTransportConfig(null, null, USB_RESAMPLER_ALGORITHM_LINEAR)
-    private val resampler = NativeUsbResamplerEngine()
 
     override fun start(device: UsbDevice, route: UsbOutputRoute): Boolean {
         close()
@@ -336,44 +343,49 @@ internal class NativeUsbDirectOutput(
             return false
         }
         val mapped = mapUsbTransportFormat(audioFormat, transportConfig)
-        val processed = resampler.processIfNeeded(
-            input = bytes,
+        val packet = NativeUsbQueuedPacket(
+            bytes = bytes,
             inputSampleRateHz = audioFormat.sampleRate,
             outputSampleRateHz = mapped.sampleRateHz,
-            algorithm = transportConfig.resampleAlgorithm
-        ) ?: bytes
-        val copied = processed.copyOf()
-        if (!packetQueue.offer(copied)) {
+            resampleAlgorithm = transportConfig.resampleAlgorithm
+        )
+        if (!packetQueue.offer(packet)) {
             val removed = packetQueue.poll()
             if (removed != null) {
-                queuedBytes.addAndGet(-removed.size)
+                queuedBytes.addAndGet(-removed.bytes.size)
             }
             droppedPackets.incrementAndGet()
-            if (!packetQueue.offer(copied)) {
+            if (!packetQueue.offer(packet)) {
                 lastError = "Native USB queue saturated"
                 return false
             }
         }
-        queuedBytes.addAndGet(copied.size)
+        queuedBytes.addAndGet(packet.bytes.size)
         return true
     }
 
     override fun setTransportConfig(config: UsbTransportConfig) {
         transportConfig = config
-        resampler.reset()
     }
 
     private fun pumpLoop() {
         while (running) {
             try {
                 val packet = packetQueue.take()
-                queuedBytes.addAndGet(-packet.size)
+                queuedBytes.addAndGet(-packet.bytes.size)
                 val handle = nativeHandle
                 if (handle == 0L) {
                     continue
                 }
                 val written = runCatching {
-                    NativeUsbBridge.nativeWrite(handle, packet, 100)
+                    NativeUsbBridge.nativeWrite(
+                        handle = handle,
+                        pcmBytes = packet.bytes,
+                        inputSampleRateHz = packet.inputSampleRateHz,
+                        outputSampleRateHz = packet.outputSampleRateHz,
+                        resampleAlgorithm = packet.resampleAlgorithm,
+                        timeoutMs = 100
+                    )
                 }.getOrElse {
                     lastError = it.message ?: "Native USB write failed"
                     -1
@@ -430,7 +442,6 @@ internal class NativeUsbDirectOutput(
         this.endpoint = null
         this.selectedRoute = null
         this.currentDeviceId = null
-        resampler.release()
         if (lastError.isBlank()) {
             lastError = "closed"
         }
@@ -553,7 +564,14 @@ internal object NativeUsbBridge {
         interfaceNumber: Int,
         alternateSetting: Int
     ): Long
-    external fun nativeWrite(handle: Long, pcmBytes: ByteArray, timeoutMs: Int): Int
+    external fun nativeWrite(
+        handle: Long,
+        pcmBytes: ByteArray,
+        inputSampleRateHz: Int,
+        outputSampleRateHz: Int,
+        resampleAlgorithm: Int,
+        timeoutMs: Int
+    ): Int
     external fun nativeGetLastError(handle: Long): String
     external fun nativeClose(handle: Long)
 }

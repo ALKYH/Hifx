@@ -6,12 +6,14 @@ import android.net.Uri
 import android.os.Handler
 import android.os.Looper
 import android.util.LruCache
+import android.view.ViewGroup
 import android.widget.ImageView
 import com.example.hifx.R
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
+import java.lang.ref.WeakReference
 
 fun Long.toTimeString(): String {
     val totalSeconds = (coerceAtLeast(0L) / 1000L).toInt()
@@ -21,65 +23,199 @@ fun Long.toTimeString(): String {
 }
 
 fun ImageView.loadArtworkOrDefault(uri: Uri?) {
-    val requestKey = uri?.toString()
-    val appliedKey = getTag(R.id.tag_artwork_applied_uri) as? String
-    if (requestKey == appliedKey) {
-        return
-    }
-    setTag(R.id.tag_artwork_request_uri, requestKey)
-
     if (uri == null) {
         setImageResource(R.drawable.ic_music_note)
         setTag(R.id.tag_artwork_applied_uri, null)
+        setTag(R.id.tag_artwork_request_uri, null)
         return
     }
 
-    if (requestKey != null) {
-        ArtworkLoader.getBitmap(requestKey)?.let { cached ->
-            setImageBitmap(cached)
-            setTag(R.id.tag_artwork_applied_uri, requestKey)
-            return
-        }
-        // Keep existing drawable until new artwork is decoded to avoid placeholder flicker.
-        ArtworkLoader.decodeAsync(this, uri, requestKey)
+    val request = ArtworkLoader.buildRequest(this, uri)
+    val appliedKey = getTag(R.id.tag_artwork_applied_uri) as? String
+    val requestKey = getTag(R.id.tag_artwork_request_uri) as? String
+    if (request.uriKey == appliedKey && request.cacheKey == requestKey) {
+        return
     }
+    setTag(R.id.tag_artwork_request_uri, request.cacheKey)
+
+    ArtworkLoader.getBitmap(request.cacheKey)?.let { cached ->
+        setImageBitmap(cached)
+        setTag(R.id.tag_artwork_applied_uri, request.uriKey)
+        return
+    }
+    // Keep existing drawable until new artwork is decoded to avoid placeholder flicker.
+    ArtworkLoader.decodeAsync(this, request)
 }
+
+private data class ArtworkRequest(
+    val uri: Uri,
+    val uriKey: String,
+    val cacheKey: String,
+    val targetWidthPx: Int,
+    val targetHeightPx: Int
+)
+
+private data class PendingTarget(
+    val imageView: WeakReference<ImageView>,
+    val expectedRequestKey: String
+)
 
 private object ArtworkLoader {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val mainHandler = Handler(Looper.getMainLooper())
-    private val cache = object : LruCache<String, Bitmap>(16 * 1024 * 1024) {
+    private val cache = object : LruCache<String, Bitmap>(resolveCacheSizeBytes()) {
         override fun sizeOf(key: String, value: Bitmap): Int {
             return value.byteCount
         }
     }
+    private val inFlightRequests = LinkedHashMap<String, MutableList<PendingTarget>>()
 
     fun getBitmap(key: String): Bitmap? = cache.get(key)
 
-    fun decodeAsync(imageView: ImageView, uri: Uri, requestKey: String) {
+    fun buildRequest(imageView: ImageView, uri: Uri): ArtworkRequest {
+        val targetWidth = resolveTargetDimensionPx(
+            primary = imageView.width,
+            secondary = imageView.measuredWidth,
+            layoutParam = imageView.layoutParams?.width ?: ViewGroup.LayoutParams.WRAP_CONTENT,
+            fallback = imageView.resources.displayMetrics.widthPixels
+        )
+        val targetHeight = resolveTargetDimensionPx(
+            primary = imageView.height,
+            secondary = imageView.measuredHeight,
+            layoutParam = imageView.layoutParams?.height ?: ViewGroup.LayoutParams.WRAP_CONTENT,
+            fallback = imageView.resources.displayMetrics.heightPixels
+        )
+        val bucketWidth = bucketSizePx(targetWidth)
+        val bucketHeight = bucketSizePx(targetHeight)
+        return ArtworkRequest(
+            uri = uri,
+            uriKey = uri.toString(),
+            cacheKey = uri.toString() + "#" + bucketWidth + "x" + bucketHeight,
+            targetWidthPx = bucketWidth,
+            targetHeightPx = bucketHeight
+        )
+    }
+
+    fun decodeAsync(imageView: ImageView, request: ArtworkRequest) {
         val resolver = imageView.context.applicationContext.contentResolver
+        val pendingTarget = PendingTarget(
+            imageView = WeakReference(imageView),
+            expectedRequestKey = request.cacheKey
+        )
+        val shouldLaunch = synchronized(inFlightRequests) {
+            val waiters = inFlightRequests.getOrPut(request.cacheKey) { mutableListOf() }
+            waiters += pendingTarget
+            waiters.size == 1
+        }
+        if (!shouldLaunch) {
+            return
+        }
         scope.launch {
             val bitmap = runCatching {
-                resolver.openInputStream(uri)?.use { input ->
-                    BitmapFactory.decodeStream(input)
-                }
+                decodeSampledBitmap(
+                    resolver = resolver,
+                    request = request
+                )
             }.getOrNull()
             if (bitmap != null) {
-                cache.put(requestKey, bitmap)
+                cache.put(request.cacheKey, bitmap)
+            }
+            val targets = synchronized(inFlightRequests) {
+                inFlightRequests.remove(request.cacheKey).orEmpty()
             }
             mainHandler.post {
-                val currentRequestKey = imageView.getTag(R.id.tag_artwork_request_uri) as? String
-                if (currentRequestKey != requestKey) {
-                    return@post
-                }
-                if (bitmap != null) {
-                    imageView.setImageBitmap(bitmap)
-                    imageView.setTag(R.id.tag_artwork_applied_uri, requestKey)
-                } else if (imageView.drawable == null) {
-                    imageView.setImageResource(R.drawable.ic_music_note)
-                    imageView.setTag(R.id.tag_artwork_applied_uri, null)
+                targets.forEach { target ->
+                    val targetView = target.imageView.get() ?: return@forEach
+                    val currentRequestKey = targetView.getTag(R.id.tag_artwork_request_uri) as? String
+                    if (currentRequestKey != target.expectedRequestKey) {
+                        return@forEach
+                    }
+                    if (bitmap != null) {
+                        targetView.setImageBitmap(bitmap)
+                        targetView.setTag(R.id.tag_artwork_applied_uri, request.uriKey)
+                    } else if (targetView.drawable == null) {
+                        targetView.setImageResource(R.drawable.ic_music_note)
+                        targetView.setTag(R.id.tag_artwork_applied_uri, null)
+                    }
                 }
             }
         }
     }
+
+    private fun decodeSampledBitmap(
+        resolver: android.content.ContentResolver,
+        request: ArtworkRequest
+    ): Bitmap? {
+        val bounds = BitmapFactory.Options().apply {
+            inJustDecodeBounds = true
+        }
+        resolver.openInputStream(request.uri)?.use { input ->
+            BitmapFactory.decodeStream(input, null, bounds)
+        }
+        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) {
+            return resolver.openInputStream(request.uri)?.use { input ->
+                BitmapFactory.decodeStream(input)
+            }
+        }
+
+        val decodeOptions = BitmapFactory.Options().apply {
+            inSampleSize = calculateInSampleSize(
+                sourceWidth = bounds.outWidth,
+                sourceHeight = bounds.outHeight,
+                requestedWidth = request.targetWidthPx,
+                requestedHeight = request.targetHeightPx
+            )
+            inPreferredConfig = Bitmap.Config.ARGB_8888
+        }
+        return resolver.openInputStream(request.uri)?.use { input ->
+            BitmapFactory.decodeStream(input, null, decodeOptions)
+        }
+    }
+
+    private fun calculateInSampleSize(
+        sourceWidth: Int,
+        sourceHeight: Int,
+        requestedWidth: Int,
+        requestedHeight: Int
+    ): Int {
+        var sampleSize = 1
+        if (sourceHeight <= requestedHeight && sourceWidth <= requestedWidth) {
+            return sampleSize
+        }
+        while (
+            sourceHeight / (sampleSize * 2) >= requestedHeight &&
+            sourceWidth / (sampleSize * 2) >= requestedWidth
+        ) {
+            sampleSize *= 2
+            if (sampleSize >= 32) {
+                break
+            }
+        }
+        return sampleSize.coerceAtLeast(1)
+    }
+
+    private fun resolveTargetDimensionPx(
+        primary: Int,
+        secondary: Int,
+        layoutParam: Int,
+        fallback: Int
+    ): Int {
+        return listOf(primary, secondary, layoutParam)
+            .firstOrNull { it > 0 }
+            ?.coerceAtMost(MAX_DECODE_DIMENSION_PX)
+            ?: fallback.coerceIn(MIN_DECODE_DIMENSION_PX, MAX_DECODE_DIMENSION_PX)
+    }
+
+    private fun bucketSizePx(sizePx: Int): Int {
+        val bounded = sizePx.coerceIn(MIN_DECODE_DIMENSION_PX, MAX_DECODE_DIMENSION_PX)
+        return ((bounded + CACHE_BUCKET_STEP_PX - 1) / CACHE_BUCKET_STEP_PX) * CACHE_BUCKET_STEP_PX
+    }
+
+    private fun resolveCacheSizeBytes(): Int {
+        val maxMemory = Runtime.getRuntime().maxMemory().coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
+        return (maxMemory / 8).coerceIn(8 * 1024 * 1024, 48 * 1024 * 1024)
+    }
+    private const val MIN_DECODE_DIMENSION_PX = 64
+    private const val MAX_DECODE_DIMENSION_PX = 1440
+    private const val CACHE_BUCKET_STEP_PX = 64
 }

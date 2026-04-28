@@ -31,15 +31,14 @@ class SettingsFragment : Fragment() {
     private var internalUpdating = false
     private var selectedSection: SettingsSection? = null
     private var usbSpinnerIds: List<Int?> = listOf(null)
-    private var usbDirectSampleRateOptionsHz: List<Int?> = listOf(null)
-    private var usbDirectBitDepthOptions: List<Int?> = listOf(null)
     private var latestAudioPipelineDetails: String = ""
     private val outputSampleRateOptionsHz = listOf<Int?>(null, 44_100, 48_000, 88_200, 96_000, 176_400, 192_000)
     private val bitDepthOptions = listOf(16, 32)
     private val usbResamplerAlgorithmOptions = listOf(
         com.example.hifx.audio.USB_RESAMPLER_ALGORITHM_NEAREST,
         com.example.hifx.audio.USB_RESAMPLER_ALGORITHM_LINEAR,
-        com.example.hifx.audio.USB_RESAMPLER_ALGORITHM_CUBIC
+        com.example.hifx.audio.USB_RESAMPLER_ALGORITHM_CUBIC,
+        com.example.hifx.audio.USB_RESAMPLER_ALGORITHM_SOXR_HQ
     )
     private val bitrateOptionsKbps = listOf<Int?>(null, 320, 512, 768, 1024, 1536, 3072, 6144, 9216)
     private val visualizationModeOptions = listOf(
@@ -189,6 +188,17 @@ class SettingsFragment : Fragment() {
                 }
                 AudioEngine.setHapticAudioEnabled(isChecked)
             }
+        }
+        binding.sliderHapticAudioDelay.addOnChangeListener { _, value, fromUser ->
+            val delayMs = value.roundToInt()
+            binding.textHapticAudioDelayValue.text = getString(
+                R.string.settings_haptic_audio_delay_value_format,
+                delayMs
+            )
+            if (!fromUser || internalUpdating) {
+                return@addOnChangeListener
+            }
+            AudioEngine.setHapticAudioDelayMs(delayMs)
         }
         binding.switchDirectDacGoldTheme.setOnCheckedChangeListener { _, isChecked ->
             if (!internalUpdating) {
@@ -389,30 +399,10 @@ class SettingsFragment : Fragment() {
             override fun onNothingSelected(parent: AdapterView<*>?) = Unit
         }
 
-        binding.spinnerUsbDirectSampleRate.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
-            override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
-                if (!internalUpdating) {
-                    AudioEngine.setPreferredUsbDirectSampleRateHz(usbDirectSampleRateOptionsHz.getOrNull(position))
-                }
-            }
-
-            override fun onNothingSelected(parent: AdapterView<*>?) = Unit
-        }
-
-        binding.spinnerUsbDirectBitDepth.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
-            override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
-                if (!internalUpdating) {
-                    AudioEngine.setPreferredUsbDirectBitDepth(usbDirectBitDepthOptions.getOrNull(position))
-                }
-            }
-
-            override fun onNothingSelected(parent: AdapterView<*>?) = Unit
-        }
-
         binding.spinnerUsbResampleAlgorithm.adapter = ArrayAdapter(
             requireContext(),
             android.R.layout.simple_spinner_dropdown_item,
-            listOf("Nearest", "Linear", "Cubic")
+            listOf("Nearest", "Linear", "Cubic", "SoXr HQ")
         )
         binding.spinnerUsbResampleAlgorithm.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
             override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
@@ -447,6 +437,11 @@ class SettingsFragment : Fragment() {
         binding.switchRememberPlayback.isChecked = state.rememberPlaybackSessionEnabled
         binding.switchHapticFeedback.isChecked = state.hapticFeedbackEnabled
         binding.switchHapticAudio.isChecked = state.hapticAudioEnabled
+        binding.sliderHapticAudioDelay.value = state.hapticAudioDelayMs.toFloat()
+        binding.textHapticAudioDelayValue.text = getString(
+            R.string.settings_haptic_audio_delay_value_format,
+            state.hapticAudioDelayMs
+        )
         binding.switchDirectDacGoldTheme.isChecked = state.directDacGoldThemeEnabled
         binding.switchShowLyricsPanel.isChecked = state.showLyricsPanelEnabled
         binding.switchLyricsGlow.isChecked = state.lyricsGlowEnabled
@@ -549,38 +544,6 @@ class SettingsFragment : Fragment() {
         )
         val selectedIndex = usbSpinnerIds.indexOf(state.preferredUsbDeviceId).takeIf { it >= 0 } ?: 0
         binding.spinnerUsbDac.setSelection(selectedIndex, false)
-
-        usbDirectSampleRateOptionsHz = listOf(null) + state.usbDirectSampleRateOptionsHz
-        binding.spinnerUsbDirectSampleRate.adapter = ArrayAdapter(
-            requireContext(),
-            android.R.layout.simple_spinner_dropdown_item,
-            usbDirectSampleRateOptionsHz.map { sampleRate ->
-                if (sampleRate == null) {
-                    getString(R.string.settings_auto_value)
-                } else {
-                    "${sampleRate / 1000.0} kHz"
-                }
-            }
-        )
-        val usbDirectSampleRateIndex = usbDirectSampleRateOptionsHz.indexOf(state.preferredUsbDirectSampleRateHz)
-            .takeIf { it >= 0 } ?: 0
-        binding.spinnerUsbDirectSampleRate.setSelection(usbDirectSampleRateIndex, false)
-
-        usbDirectBitDepthOptions = listOf(null) + state.usbDirectBitDepthOptions
-        binding.spinnerUsbDirectBitDepth.adapter = ArrayAdapter(
-            requireContext(),
-            android.R.layout.simple_spinner_dropdown_item,
-            usbDirectBitDepthOptions.map { bitDepth ->
-                if (bitDepth == null) {
-                    getString(R.string.settings_auto_value)
-                } else {
-                    "${bitDepth}-bit"
-                }
-            }
-        )
-        val usbDirectBitDepthIndex = usbDirectBitDepthOptions.indexOf(state.preferredUsbDirectBitDepth)
-            .takeIf { it >= 0 } ?: 0
-        binding.spinnerUsbDirectBitDepth.setSelection(usbDirectBitDepthIndex, false)
     }
 
     private fun showAudioPipelineDetailsDialog() {

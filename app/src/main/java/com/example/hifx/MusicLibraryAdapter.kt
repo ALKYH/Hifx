@@ -5,7 +5,6 @@ import android.view.View
 import android.view.ViewGroup
 import android.widget.ImageView
 import android.widget.TextView
-import androidx.interpolator.view.animation.FastOutSlowInInterpolator
 import androidx.recyclerview.widget.RecyclerView
 import com.example.hifx.audio.LibraryTrack
 import com.example.hifx.util.loadArtworkOrDefault
@@ -33,15 +32,12 @@ class MusicLibraryAdapter(
 ) : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
 
     private val rows = mutableListOf<LibraryListRow>()
-    private var lastAnimatedPosition = -1
-    private val itemInterpolator = FastOutSlowInInterpolator()
     private var showPlayCount = false
 
     fun submitRows(newRows: List<LibraryListRow>, showPlayCount: Boolean = false) {
         rows.clear()
         rows.addAll(newRows)
         this.showPlayCount = showPlayCount
-        lastAnimatedPosition = -1
         notifyDataSetChanged()
     }
 
@@ -73,20 +69,8 @@ class MusicLibraryAdapter(
             is LibraryListRow.EntityRow -> (holder as EntityViewHolder).bind(row, onEntityClick)
             is LibraryListRow.TrackRow -> {
                 (holder as TrackViewHolder).bind(row.track, showPlayCount, onTrackClick)
-                if (position > lastAnimatedPosition) {
-                    holder.itemView.alpha = 0f
-                    holder.itemView.translationY = 14f
-                    holder.itemView.animate()
-                        .alpha(1f)
-                        .translationY(0f)
-                        .setInterpolator(itemInterpolator)
-                        .setDuration(170L)
-                        .start()
-                    lastAnimatedPosition = position
-                } else {
-                    holder.itemView.alpha = 1f
-                    holder.itemView.translationY = 0f
-                }
+                holder.itemView.alpha = 1f
+                holder.itemView.translationY = 0f
             }
         }
     }

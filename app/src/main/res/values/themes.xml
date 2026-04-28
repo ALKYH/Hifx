@@ -5,6 +5,13 @@
         <item name="android:windowLightStatusBar">true</item>
     </style>
 
+    <style name="Theme.Hifx.PlayerOverlay" parent="Theme.Hifx">
+        <item name="android:windowIsTranslucent">true</item>
+        <item name="android:windowBackground">@android:color/transparent</item>
+        <item name="android:backgroundDimEnabled">false</item>
+        <item name="android:windowDisablePreview">true</item>
+    </style>
+
     <style name="Theme.HiFX" parent="Theme.Hifx" />
 
     <style name="ShapeAppearanceOverlay.MiniPlayer.Cover" parent="">

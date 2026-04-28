@@ -371,32 +371,6 @@
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:layout_marginTop="10dp"
-                    android:text="@string/settings_usb_direct_sample_rate_title"
-                    android:textAppearance="?attr/textAppearanceLabelLarge" />
-
-                <Spinner
-                    android:id="@+id/spinner_usb_direct_sample_rate"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="6dp" />
-
-                <TextView
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="10dp"
-                    android:text="@string/settings_usb_direct_bit_depth_title"
-                    android:textAppearance="?attr/textAppearanceLabelLarge" />
-
-                <Spinner
-                    android:id="@+id/spinner_usb_direct_bit_depth"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="6dp" />
-
-                <TextView
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="10dp"
                     android:text="@string/settings_usb_resample_algorithm_title"
                     android:textAppearance="?attr/textAppearanceLabelLarge" />
 
@@ -710,6 +684,23 @@
                     android:layout_height="wrap_content"
                     android:layout_marginTop="8dp"
                     android:text="@string/settings_haptic_audio_switch" />
+
+                <TextView
+                    android:id="@+id/text_haptic_audio_delay_value"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="10dp"
+                    android:text="@string/settings_haptic_audio_delay_value"
+                    android:textAppearance="?attr/textAppearanceLabelLarge" />
+
+                <com.google.android.material.slider.Slider
+                    android:id="@+id/slider_haptic_audio_delay"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="6dp"
+                    android:stepSize="10"
+                    android:valueFrom="-250"
+                    android:valueTo="250" />
             </LinearLayout>
         </com.google.android.material.card.MaterialCardView>
 

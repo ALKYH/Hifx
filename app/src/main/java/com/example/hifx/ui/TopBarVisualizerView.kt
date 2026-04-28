@@ -44,14 +44,14 @@ class TopBarVisualizerView @JvmOverloads constructor(
         style = Paint.Style.STROKE
         strokeCap = Paint.Cap.ROUND
         strokeJoin = Paint.Join.ROUND
-        strokeWidth = 3.2f * density
+        strokeWidth = 1.2f * density
         alpha = 88
     }
     private val waveformPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.STROKE
         strokeCap = Paint.Cap.ROUND
         strokeJoin = Paint.Join.ROUND
-        strokeWidth = 1.45f * density
+        strokeWidth = 0.40f * density
     }
     private val barPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.FILL
@@ -185,8 +185,8 @@ class TopBarVisualizerView @JvmOverloads constructor(
     }
 
     private fun drawGrid(canvas: Canvas) {
-        val verticalDivisions = 8
-        val horizontalDivisions = 4
+        val verticalDivisions = 2
+        val horizontalDivisions = 3
         for (index in 1 until verticalDivisions) {
             val x = contentBounds.left + contentBounds.width() * index / verticalDivisions
             canvas.drawLine(x, contentBounds.top, x, contentBounds.bottom, gridPaint)
@@ -245,8 +245,12 @@ class TopBarVisualizerView @JvmOverloads constructor(
 
     private fun drawAnalogMeter(canvas: Canvas) {
         AudioEngine.fillTopBarVisualizationSnapshot(TopBarVisualizationMode.ANALOG_METER, meterSnapshot)
-        val leftTarget = meterToNeedleTarget(meterSnapshot.getOrElse(0) { 0f })
-        val rightTarget = meterToNeedleTarget(meterSnapshot.getOrElse(1) { meterSnapshot[0] })
+        val (leftLevel, rightLevel) = resolveAnalogStereoLevels(
+            meterSnapshot.getOrElse(0) { 0f },
+            meterSnapshot.getOrElse(1) { meterSnapshot.getOrElse(0) { 0f } }
+        )
+        val leftTarget = meterToNeedleTarget(leftLevel)
+        val rightTarget = meterToNeedleTarget(rightLevel)
         stepAnalogPhysics(leftTarget, rightTarget)
 
         val labelBandHeight = drawBounds.height() * 0.16f
@@ -422,9 +426,9 @@ class TopBarVisualizerView @JvmOverloads constructor(
         }
         lastFrameNanos = now
 
-        val stiffness = 96f
-        val damping = 11f
-        val staticDrag = 2.1f
+        val stiffness = 104f
+        val damping = 8.6f
+        val staticDrag = 1.45f
 
         analogLeftVelocity += ((leftTarget - analogLeftPointer) * stiffness - analogLeftVelocity * damping) * dtSeconds
         analogRightVelocity += ((rightTarget - analogRightPointer) * stiffness - analogRightVelocity * damping) * dtSeconds
@@ -436,11 +440,22 @@ class TopBarVisualizerView @JvmOverloads constructor(
         analogRightPointer = (analogRightPointer + analogRightVelocity * dtSeconds).coerceIn(0f, 1.06f)
     }
 
+    private fun resolveAnalogStereoLevels(rawLeft: Float, rawRight: Float): Pair<Float, Float> {
+        val left = rawLeft.coerceIn(0f, 1f)
+        val right = rawRight.coerceIn(0f, 1f)
+        val center = (left + right) * 0.5f
+        val delta = (left - right) * 0.22f
+        return Pair(
+            (center + (left - center) * 1.08f + delta).coerceIn(0f, 1f),
+            (center + (right - center) * 1.08f - delta).coerceIn(0f, 1f)
+        )
+    }
+
     private fun meterToNeedleTarget(level: Float): Float {
         val normalized = level.coerceIn(0f, 1f)
         if (normalized <= 0.0001f) {
             return 0f
         }
-        return normalized.pow(0.58f).coerceIn(0f, 1f)
+        return normalized.pow(0.52f).coerceIn(0f, 1f)
     }
 }

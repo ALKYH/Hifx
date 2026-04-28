@@ -282,6 +282,7 @@ class LyricMaskTextView @JvmOverloads constructor(
         val baseline: Float,
         val left: Float,
         val right: Float,
+        val clipPadding: Float,
         val rtl: Boolean
     )
 
@@ -425,9 +426,22 @@ class LyricMaskTextView @JvmOverloads constructor(
 
                 val startX = textLayout.getPrimaryHorizontal(cursor)
                 val endX = textLayout.getPrimaryHorizontal(lineEnd)
-                val left = min(startX, endX)
-                val right = max(startX, endX)
+                val measuredAdvance = paint.measureText(content, cursor, lineEnd).coerceAtLeast(0f)
+                val rtl = endX < startX
+                val rawLeft = min(startX, endX)
+                val rawRight = max(startX, endX)
+                val left = if (rtl) {
+                    rawRight - measuredAdvance.coerceAtLeast(rawRight - rawLeft)
+                } else {
+                    rawLeft
+                }
+                val right = if (rtl) {
+                    rawRight
+                } else {
+                    rawLeft + measuredAdvance.coerceAtLeast(rawRight - rawLeft)
+                }
                 if ((right - left) > 0.001f) {
+                    val clipPadding = (textSize * 0.055f).coerceIn(0.75f, 3.5f)
                     fragments += RenderUnitFragment(
                         start = cursor,
                         end = lineEnd,
@@ -441,7 +455,8 @@ class LyricMaskTextView @JvmOverloads constructor(
                         baseline = textLayout.getLineBaseline(line).toFloat(),
                         left = left,
                         right = right,
-                        rtl = endX < startX
+                        clipPadding = clipPadding,
+                        rtl = rtl
                     )
                 }
                 cursor = lineEnd
@@ -693,20 +708,21 @@ class LyricMaskTextView @JvmOverloads constructor(
         val save = canvas.save()
 
         val inflate = clipInflatePx.coerceAtLeast(0f)
+        val safePadding = fragmentClipPadding(left, right)
         val clipTop = lineTop - inflate
         val clipBottom = lineBottom + inflate
         if (reveal < 0.999f) {
             if (rtl) {
-                val clipLeft = right - width * reveal - inflate
-                val clipRight = right + inflate
+                val clipLeft = right - width * reveal - inflate - safePadding
+                val clipRight = right + inflate + safePadding
                 canvas.clipRect(clipLeft, clipTop, clipRight, clipBottom)
             } else {
-                val clipLeft = left - inflate
-                val clipRight = left + width * reveal + inflate
+                val clipLeft = left - inflate - safePadding
+                val clipRight = left + width * reveal + inflate + safePadding
                 canvas.clipRect(clipLeft, clipTop, clipRight, clipBottom)
             }
         } else if (inflate > 0f) {
-            canvas.clipRect(left - inflate, clipTop, right + inflate, clipBottom)
+            canvas.clipRect(left - inflate - safePadding, clipTop, right + inflate + safePadding, clipBottom)
         }
 
         canvas.translate(0f, -lift)
@@ -723,6 +739,12 @@ class LyricMaskTextView @JvmOverloads constructor(
         paint.clearShadowLayer()
 
         canvas.restoreToCount(save)
+    }
+
+    private fun fragmentClipPadding(left: Float, right: Float): Float {
+        val width = (right - left).coerceAtLeast(0f)
+        if (width <= 0f) return 0f
+        return min((textSize * 0.055f).coerceAtLeast(0.75f), width * 0.35f)
     }
 
     private fun resolveLineWeight(): Float {

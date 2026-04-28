@@ -9,6 +9,15 @@ object PlayerTransitionState {
     var miniPlayerRectOnScreen: Rect? = null
 
     @Volatile
+    var miniPlayerCoverRectOnScreen: Rect? = null
+
+    @Volatile
+    var miniPlayerTitleRectOnScreen: Rect? = null
+
+    @Volatile
+    var miniPlayerSubtitleRectOnScreen: Rect? = null
+
+    @Volatile
     private var mainUiWarmupRequested: Boolean = false
 
     @Volatile
@@ -17,7 +26,9 @@ object PlayerTransitionState {
     data class CollapseOverlayPayload(
         val snapshot: Bitmap,
         val sourceRectOnScreen: Rect,
-        val targetRectOnScreen: Rect
+        val targetRectOnScreen: Rect,
+        val startCornerRadiusPx: Float,
+        val endCornerRadiusPx: Float
     )
 
     @Volatile
@@ -25,6 +36,12 @@ object PlayerTransitionState {
 
     @Volatile
     private var prewarmedPlaybackState: PlaybackUiState? = null
+
+    @Volatile
+    private var backgroundSnapshot: Bitmap? = null
+
+    @Volatile
+    private var returningFromPlayer: Boolean = false
 
     fun requestMainUiWarmup() {
         mainUiWarmupRequested = true
@@ -56,5 +73,26 @@ object PlayerTransitionState {
         val state = prewarmedPlaybackState
         prewarmedPlaybackState = null
         return state
+    }
+
+    fun updateBackgroundSnapshot(snapshot: Bitmap?) {
+        backgroundSnapshot?.takeIf { it !== snapshot }?.recycle()
+        backgroundSnapshot = snapshot
+    }
+
+    fun consumeBackgroundSnapshot(): Bitmap? {
+        val snapshot = backgroundSnapshot
+        backgroundSnapshot = null
+        return snapshot
+    }
+
+    fun markReturningFromPlayer() {
+        returningFromPlayer = true
+    }
+
+    fun consumeReturningFromPlayer(): Boolean {
+        val returning = returningFromPlayer
+        returningFromPlayer = false
+        return returning
     }
 }

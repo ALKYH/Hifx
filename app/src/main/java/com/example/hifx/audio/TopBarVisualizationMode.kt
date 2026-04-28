@@ -6,7 +6,7 @@ enum class TopBarVisualizationMode(
 ) {
     AUDIO_INFO("audio_info", -1),
     LEVEL_METER("level_meter", 0),
-    ANALOG_METER("analog_meter", 0),
+    ANALOG_METER("analog_meter", 3),
     WAVEFORM("waveform", 1),
     BARS("bars", 2);
 

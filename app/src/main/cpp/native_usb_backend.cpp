@@ -16,6 +16,12 @@ namespace {
 constexpr int kUsbEndpointTransferTypeIso = 1;
 constexpr int kUsbEndpointTransferTypeBulk = 2;
 
+extern "C" jlong Java_com_example_hifx_audio_NativeUsbResamplerBridge_nativeCreate(JNIEnv*, jobject);
+extern "C" void Java_com_example_hifx_audio_NativeUsbResamplerBridge_nativeConfigure(JNIEnv*, jobject, jlong, jint, jint, jint);
+extern "C" jbyteArray Java_com_example_hifx_audio_NativeUsbResamplerBridge_nativeProcessPcm16Stereo(JNIEnv*, jobject, jlong, jbyteArray);
+extern "C" void Java_com_example_hifx_audio_NativeUsbResamplerBridge_nativeReset(JNIEnv*, jobject, jlong);
+extern "C" void Java_com_example_hifx_audio_NativeUsbResamplerBridge_nativeRelease(JNIEnv*, jobject, jlong);
+
 struct NativeUsbBackend {
     JavaVM* vm = nullptr;
     jobject connection = nullptr;
@@ -27,6 +33,10 @@ struct NativeUsbBackend {
     int file_descriptor = -1;
     int interface_number = 0;
     int alternate_setting = 0;
+    jlong resampler_handle = 0L;
+    int resampler_input_rate_hz = 0;
+    int resampler_output_rate_hz = 0;
+    int resampler_algorithm = -1;
     std::string last_error;
 };
 
@@ -68,6 +78,43 @@ int write_bulk_via_java(JNIEnv* env, NativeUsbBackend* backend, jbyteArray pcm_b
     }
     backend->last_error.clear();
     return total_size;
+}
+
+int ensure_resampler_configured(
+    JNIEnv* env,
+    NativeUsbBackend* backend,
+    jint input_sample_rate_hz,
+    jint output_sample_rate_hz,
+    jint algorithm
+) {
+    if (backend == nullptr) {
+        return -1;
+    }
+    if (backend->resampler_handle == 0L) {
+        backend->resampler_handle = Java_com_example_hifx_audio_NativeUsbResamplerBridge_nativeCreate(env, nullptr);
+        if (backend->resampler_handle == 0L) {
+            backend->last_error = "Failed to create native resampler";
+            return -1;
+        }
+    }
+    if (
+        backend->resampler_input_rate_hz != input_sample_rate_hz ||
+        backend->resampler_output_rate_hz != output_sample_rate_hz ||
+        backend->resampler_algorithm != algorithm
+    ) {
+        Java_com_example_hifx_audio_NativeUsbResamplerBridge_nativeConfigure(
+            env,
+            nullptr,
+            backend->resampler_handle,
+            input_sample_rate_hz,
+            output_sample_rate_hz,
+            algorithm
+        );
+        backend->resampler_input_rate_hz = input_sample_rate_hz;
+        backend->resampler_output_rate_hz = output_sample_rate_hz;
+        backend->resampler_algorithm = algorithm;
+    }
+    return 0;
 }
 
 int write_iso_via_usbfs(JNIEnv* env, NativeUsbBackend* backend, jbyteArray pcm_bytes) {
@@ -205,16 +252,45 @@ Java_com_example_hifx_audio_NativeUsbBridge_nativeWrite(
     jobject,
     jlong handle,
     jbyteArray pcm_bytes,
+    jint input_sample_rate_hz,
+    jint output_sample_rate_hz,
+    jint resample_algorithm,
     jint timeout_ms
 ) {
     auto* backend = from_handle(handle);
     if (backend == nullptr || pcm_bytes == nullptr) {
         return -1;
     }
-    if (backend->endpoint_type == kUsbEndpointTransferTypeIso) {
-        return write_iso_via_usbfs(env, backend, pcm_bytes);
+    jbyteArray transport_bytes = pcm_bytes;
+    if (
+        input_sample_rate_hz > 0 &&
+        output_sample_rate_hz > 0 &&
+        input_sample_rate_hz != output_sample_rate_hz
+    ) {
+        if (ensure_resampler_configured(env, backend, input_sample_rate_hz, output_sample_rate_hz, resample_algorithm) != 0) {
+            return -1;
+        }
+        transport_bytes = Java_com_example_hifx_audio_NativeUsbResamplerBridge_nativeProcessPcm16Stereo(
+            env,
+            nullptr,
+            backend->resampler_handle,
+            pcm_bytes
+        );
+        if (transport_bytes == nullptr) {
+            backend->last_error = "Native resampler returned null";
+            return -1;
+        }
     }
-    return write_bulk_via_java(env, backend, pcm_bytes, timeout_ms);
+    int written = -1;
+    if (backend->endpoint_type == kUsbEndpointTransferTypeIso) {
+        written = write_iso_via_usbfs(env, backend, transport_bytes);
+    } else {
+        written = write_bulk_via_java(env, backend, transport_bytes, timeout_ms);
+    }
+    if (transport_bytes != pcm_bytes) {
+        env->DeleteLocalRef(transport_bytes);
+    }
+    return written;
 }
 
 extern "C" JNIEXPORT jstring JNICALL
@@ -245,6 +321,10 @@ Java_com_example_hifx_audio_NativeUsbBridge_nativeClose(
     if (backend->endpoint != nullptr) {
         env->DeleteGlobalRef(backend->endpoint);
         backend->endpoint = nullptr;
+    }
+    if (backend->resampler_handle != 0L) {
+        Java_com_example_hifx_audio_NativeUsbResamplerBridge_nativeRelease(env, nullptr, backend->resampler_handle);
+        backend->resampler_handle = 0L;
     }
     delete backend;
 }

@@ -8,6 +8,7 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
+import android.os.Parcelable
 import android.os.SystemClock
 import android.text.format.DateUtils
 import android.view.LayoutInflater
@@ -38,6 +39,10 @@ import com.google.android.material.tabs.TabLayout
 import kotlinx.coroutines.launch
 
 class PlaybackFragment : Fragment() {
+    companion object {
+        private var savedLibraryListState: Parcelable? = null
+    }
+
     private var _binding: FragmentPlaybackBinding? = null
     private val binding get() = _binding!!
 
@@ -59,6 +64,8 @@ class PlaybackFragment : Fragment() {
     private var miniPlayerCardView: View? = null
     private var miniPlayerHandleView: View? = null
     private var imeVisible = false
+    private var pendingLibraryListState: Parcelable? = null
+    private var libraryListRestoreScheduled = false
     private var lastIndexHapticLetter: String? = null
     private var lastIndexHapticUptimeMs: Long = 0L
     private val indexLetters: List<String> = buildList {
@@ -89,6 +96,9 @@ class PlaybackFragment : Fragment() {
     }
 
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
+        pendingLibraryListState = savedLibraryListState
+        savedLibraryListState = null
+        libraryListRestoreScheduled = false
         adapter = MusicLibraryAdapter(
             onTrackClick = { track ->
                 AppHaptics.click(requireContext())
@@ -123,6 +133,7 @@ class PlaybackFragment : Fragment() {
         )
         layoutManager = LinearLayoutManager(requireContext())
         binding.recyclerLibrary.layoutManager = layoutManager
+        binding.recyclerLibrary.itemAnimator = null
         binding.recyclerLibrary.adapter = adapter
         setupTopCollapsibleControls()
         setupKeyboardBottomNavSync()
@@ -151,6 +162,9 @@ class PlaybackFragment : Fragment() {
     }
 
     override fun onDestroyView() {
+        savedLibraryListState = binding.recyclerLibrary.layoutManager?.onSaveInstanceState()
+        pendingLibraryListState = null
+        libraryListRestoreScheduled = false
         searchPanelAnimator?.cancel()
         tabsPanelAnimator?.cancel()
         detachMiniPlayerAnchorTracking()
@@ -499,6 +513,15 @@ class PlaybackFragment : Fragment() {
         currentPlayableTracks = playableTracks
         adapter.submitRows(rows, showPlayCount = currentSortMode == LibrarySortMode.MOST_PLAYED && selectedTab == LibraryTab.ALL)
         rebuildIndex(rows)
+        if (pendingLibraryListState != null && rows.isNotEmpty() && !libraryListRestoreScheduled) {
+            val restoreState = pendingLibraryListState
+            pendingLibraryListState = null
+            libraryListRestoreScheduled = true
+            binding.recyclerLibrary.layoutManager?.onRestoreInstanceState(restoreState)
+            binding.recyclerLibrary.post {
+                libraryListRestoreScheduled = false
+            }
+        }
 
         val hasRows = rows.isNotEmpty()
         binding.layoutEmpty.visibility = if (hasRows || state.loading) View.GONE else View.VISIBLE
