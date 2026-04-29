@@ -1,0 +1,865 @@
+﻿package com.alky.hifx
+
+import android.content.Intent
+import android.graphics.Typeface
+import android.net.Uri
+import android.os.Bundle
+import android.view.LayoutInflater
+import android.view.View
+import android.view.ViewGroup
+import android.widget.AdapterView
+import android.widget.ArrayAdapter
+import android.widget.LinearLayout
+import android.widget.ListView
+import android.widget.TextView
+import android.widget.Toast
+import androidx.appcompat.app.AlertDialog
+import androidx.activity.OnBackPressedCallback
+import androidx.appcompat.app.AppCompatDelegate
+import androidx.fragment.app.Fragment
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.lifecycleScope
+import androidx.lifecycle.repeatOnLifecycle
+import com.google.android.material.dialog.MaterialAlertDialogBuilder
+import com.alky.hifx.audio.AudioEngine
+import com.alky.hifx.audio.SettingsUiState
+import com.alky.hifx.audio.TopBarVisualizationMode
+import com.alky.hifx.databinding.FragmentSettingsBinding
+import com.alky.hifx.util.AppHaptics
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import kotlin.math.roundToInt
+
+class SettingsFragment : Fragment() {
+    private var _binding: FragmentSettingsBinding? = null
+    private val binding get() = _binding!!
+
+    private var internalUpdating = false
+    private var selectedSection: SettingsSection? = null
+    private var usbSpinnerIds: List<Int?> = listOf(null)
+    private var latestAudioPipelineDetails: String = ""
+    private val outputSampleRateOptionsHz = listOf<Int?>(null, 44_100, 48_000, 88_200, 96_000, 176_400, 192_000)
+    private val bitDepthOptions = listOf(16, 32)
+    private val usbResamplerAlgorithmOptions = listOf(
+        com.alky.hifx.audio.USB_RESAMPLER_ALGORITHM_NEAREST,
+        com.alky.hifx.audio.USB_RESAMPLER_ALGORITHM_LINEAR,
+        com.alky.hifx.audio.USB_RESAMPLER_ALGORITHM_CUBIC,
+        com.alky.hifx.audio.USB_RESAMPLER_ALGORITHM_SOXR_HQ
+    )
+    private val bitrateOptionsKbps = listOf<Int?>(null, 320, 512, 768, 1024, 1536, 3072, 6144, 9216)
+    private val visualizationModeOptions = listOf(
+        TopBarVisualizationMode.ANALOG_METER,
+        TopBarVisualizationMode.LEVEL_METER,
+        TopBarVisualizationMode.WAVEFORM,
+        TopBarVisualizationMode.BARS
+    )
+
+    private data class ScanFolderNode(
+        val path: String?,
+        val label: String,
+        val isUp: Boolean = false
+    )
+
+    override fun onCreateView(
+        inflater: LayoutInflater,
+        container: ViewGroup?,
+        savedInstanceState: Bundle?
+    ): View {
+        _binding = FragmentSettingsBinding.inflate(inflater, container, false)
+        return binding.root
+    }
+
+    override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
+        setupMenuActions()
+        setupBackNavigation()
+        setupSettingActions()
+        val versionName = runCatching {
+            requireContext().packageManager.getPackageInfo(requireContext().packageName, 0).versionName
+        }.getOrDefault("1.0")
+        binding.textAboutVersion.text = getString(
+            R.string.settings_about_version,
+            versionName
+        )
+        binding.buttonAboutAuthorRepo.setOnClickListener {
+            AppHaptics.click(it)
+            openExternalLink(getString(R.string.settings_about_author_repo_url))
+        }
+        renderRootMenu()
+        observeSettings()
+    }
+
+    override fun onDestroyView() {
+        super.onDestroyView()
+        _binding = null
+    }
+
+    private fun setupMenuActions() {
+        binding.buttonMenuAppearance.setOnClickListener {
+            AppHaptics.click(it)
+            openSection(SettingsSection.APPEARANCE)
+        }
+        binding.buttonMenuPlayback.setOnClickListener {
+            AppHaptics.click(it)
+            openSection(SettingsSection.PLAYBACK)
+        }
+        binding.buttonMenuLyrics.setOnClickListener {
+            AppHaptics.click(it)
+            openSection(SettingsSection.LYRICS)
+        }
+        binding.buttonMenuVisualization.setOnClickListener {
+            AppHaptics.click(it)
+            openSection(SettingsSection.VISUALIZATION)
+        }
+        binding.buttonMenuLibrary.setOnClickListener {
+            AppHaptics.click(it)
+            openSection(SettingsSection.LIBRARY)
+        }
+        binding.buttonMenuOther.setOnClickListener {
+            AppHaptics.click(it)
+            openSection(SettingsSection.OTHER)
+        }
+        binding.buttonMenuAbout.setOnClickListener {
+            AppHaptics.click(it)
+            openSection(SettingsSection.ABOUT)
+        }
+        binding.buttonSubmenuBack.setOnClickListener {
+            AppHaptics.click(it)
+            renderRootMenu()
+        }
+    }
+
+    private fun setupBackNavigation() {
+        requireActivity().onBackPressedDispatcher.addCallback(
+            viewLifecycleOwner,
+            object : OnBackPressedCallback(true) {
+                override fun handleOnBackPressed() {
+                    if (selectedSection != null) {
+                        renderRootMenu()
+                        return
+                    }
+                    isEnabled = false
+                    requireActivity().onBackPressedDispatcher.onBackPressed()
+                    isEnabled = true
+                }
+            }
+        )
+    }
+
+    private fun setupSettingActions() {
+        binding.buttonSelectScanFolder.setOnClickListener {
+            AppHaptics.click(it)
+            showScanFolderExplorerDialog()
+        }
+        binding.buttonClearScanFolder.setOnClickListener {
+            AppHaptics.click(it)
+            showScanFolderManagerDialog()
+        }
+        binding.buttonRescanLibrary.setOnClickListener {
+            AppHaptics.click(it)
+            AudioEngine.refreshLibrary()
+        }
+        binding.switchHiFi.setOnCheckedChangeListener { _, isChecked ->
+            if (!internalUpdating) {
+                AppHaptics.click(requireContext())
+                AudioEngine.setHiFiMode(isChecked)
+            }
+        }
+        binding.switchHiResApi.setOnCheckedChangeListener { _, isChecked ->
+            if (!internalUpdating) {
+                AppHaptics.click(requireContext())
+                AudioEngine.setHiResApiEnabled(isChecked)
+            }
+        }
+        binding.switchRememberPlayback.setOnCheckedChangeListener { _, isChecked ->
+            if (!internalUpdating) {
+                AppHaptics.click(requireContext())
+                AudioEngine.setRememberPlaybackSessionEnabled(isChecked)
+            }
+        }
+        binding.switchRememberTrack.setOnCheckedChangeListener { _, isChecked ->
+            if (!internalUpdating) {
+                AppHaptics.click(requireContext())
+                AudioEngine.setRememberPlaybackTrackEnabled(isChecked)
+            }
+        }
+        binding.switchOpenPlayerOnTrackPlay.setOnCheckedChangeListener { _, isChecked ->
+            if (!internalUpdating) {
+                AppHaptics.click(requireContext())
+                AudioEngine.setOpenPlayerOnTrackPlayEnabled(isChecked)
+            }
+        }
+        binding.switchHapticFeedback.setOnCheckedChangeListener { _, isChecked ->
+            if (!internalUpdating) {
+                AudioEngine.setHapticFeedbackEnabled(isChecked)
+                if (isChecked) {
+                    AppHaptics.click(requireContext())
+                }
+            }
+        }
+        binding.switchHapticAudio.setOnCheckedChangeListener { _, isChecked ->
+            if (!internalUpdating) {
+                if (isChecked) {
+                    AppHaptics.click(requireContext())
+                }
+                AudioEngine.setHapticAudioEnabled(isChecked)
+            }
+        }
+        binding.sliderHapticAudioDelay.addOnChangeListener { _, value, fromUser ->
+            val delayMs = value.roundToInt()
+            binding.textHapticAudioDelayValue.text = getString(
+                R.string.settings_haptic_audio_delay_value_format,
+                delayMs
+            )
+            if (!fromUser || internalUpdating) {
+                return@addOnChangeListener
+            }
+            AudioEngine.setHapticAudioDelayMs(delayMs)
+        }
+        binding.switchDirectDacGoldTheme.setOnCheckedChangeListener { _, isChecked ->
+            if (!internalUpdating) {
+                AppHaptics.click(requireContext())
+                AudioEngine.setDirectDacGoldThemeEnabled(isChecked)
+            }
+        }
+        binding.switchShowLyricsPanel.setOnCheckedChangeListener { _, isChecked ->
+            if (!internalUpdating) {
+                AppHaptics.click(requireContext())
+                AudioEngine.setShowLyricsPanelEnabled(isChecked)
+            }
+        }
+        binding.switchLyricsGlow.setOnCheckedChangeListener { _, isChecked ->
+            if (!internalUpdating) {
+                AppHaptics.click(requireContext())
+                AudioEngine.setLyricsGlowEnabled(isChecked)
+            }
+        }
+        binding.switchShowLyricsScanHead.setOnCheckedChangeListener { _, isChecked ->
+            if (!internalUpdating) {
+                AppHaptics.click(requireContext())
+                AudioEngine.setShowLyricsScanHeadEnabled(isChecked)
+            }
+        }
+        binding.switchShowVisualization.setOnCheckedChangeListener { _, isChecked ->
+            if (!internalUpdating) {
+                AppHaptics.click(requireContext())
+                AudioEngine.setShowVisualizationEnabled(isChecked)
+            }
+        }
+        binding.switchVisualizationLimit30Fps.setOnCheckedChangeListener { _, isChecked ->
+            if (!internalUpdating) {
+                AppHaptics.click(requireContext())
+                AudioEngine.setVisualizationFpsLimit30Enabled(isChecked)
+            }
+        }
+        binding.sliderVisualizationDelay.addOnChangeListener { _, value, fromUser ->
+            val delayMs = value.roundToInt()
+            binding.textVisualizationDelayValue.text = getString(
+                R.string.settings_visualization_delay_value_format,
+                delayMs
+            )
+            if (!fromUser || internalUpdating) {
+                return@addOnChangeListener
+            }
+            AudioEngine.setVisualizationDelayMs(delayMs)
+        }
+        binding.switchShowStreamInfo.setOnCheckedChangeListener { _, isChecked ->
+            if (!internalUpdating) {
+                AppHaptics.click(requireContext())
+                AudioEngine.setShowStreamInfoEnabled(isChecked)
+            }
+        }
+        binding.switchBackgroundDynamic.setOnCheckedChangeListener { _, isChecked ->
+            if (!internalUpdating) {
+                AppHaptics.click(requireContext())
+                AudioEngine.setBackgroundDynamicEnabled(isChecked)
+            }
+        }
+        binding.sliderBackgroundBlur.addOnChangeListener { _, value, fromUser ->
+            if (!fromUser || internalUpdating) {
+                return@addOnChangeListener
+            }
+            AudioEngine.setBackgroundBlurStrength(value.roundToInt())
+        }
+        binding.sliderBackgroundOpacity.addOnChangeListener { _, value, fromUser ->
+            if (!fromUser || internalUpdating) {
+                return@addOnChangeListener
+            }
+            AudioEngine.setBackgroundOpacityPercent(value.roundToInt())
+        }
+        binding.sliderLyricsFontSize.addOnChangeListener { _, value, fromUser ->
+            val sizeSp = value.roundToInt()
+            binding.textLyricsFontSizeValue.text = getString(
+                R.string.settings_lyrics_font_size_value_format,
+                sizeSp
+            )
+            binding.textLyricsFontPreview.textSize = sizeSp.toFloat()
+            if (!fromUser || internalUpdating) {
+                return@addOnChangeListener
+            }
+            AudioEngine.setLyricsFontSizeSp(sizeSp)
+        }
+        binding.switchLyricsBold.setOnCheckedChangeListener { _, isChecked ->
+            binding.textLyricsFontPreview.typeface =
+                if (isChecked) Typeface.DEFAULT_BOLD else Typeface.DEFAULT
+            if (!internalUpdating) {
+                AppHaptics.click(requireContext())
+                AudioEngine.setLyricsBoldEnabled(isChecked)
+            }
+        }
+        binding.sliderLyricsGlowIntensity.addOnChangeListener { _, value, fromUser ->
+            val intensity = value.roundToInt()
+            binding.textLyricsGlowIntensityValue.text = getString(
+                R.string.settings_lyrics_glow_intensity_value_format,
+                intensity
+            )
+            if (!fromUser || internalUpdating) {
+                return@addOnChangeListener
+            }
+            AudioEngine.setLyricsGlowIntensityPercent(intensity)
+        }
+        binding.switchUsbExclusive.setOnCheckedChangeListener { _, isChecked ->
+            if (!internalUpdating) {
+                AppHaptics.click(requireContext())
+                AudioEngine.setUsbExclusiveModeEnabled(isChecked)
+            }
+        }
+        setupAudioSelectionControls()
+        binding.buttonRefreshDeviceInfo.setOnClickListener {
+            AppHaptics.click(it)
+            AudioEngine.refreshOutputInfo()
+        }
+        binding.buttonShowAudioPipelineDetails.setOnClickListener {
+            AppHaptics.click(it)
+            showAudioPipelineDetailsDialog()
+        }
+        binding.groupThemeMode.setOnCheckedChangeListener { _, checkedId ->
+            if (internalUpdating) {
+                return@setOnCheckedChangeListener
+            }
+            val mode = when (checkedId) {
+                R.id.radio_theme_light -> AppCompatDelegate.MODE_NIGHT_NO
+                R.id.radio_theme_dark -> AppCompatDelegate.MODE_NIGHT_YES
+                else -> AppCompatDelegate.MODE_NIGHT_FOLLOW_SYSTEM
+            }
+            AudioEngine.setThemeMode(mode)
+            AppCompatDelegate.setDefaultNightMode(mode)
+        }
+        binding.spinnerVisualizationMode.adapter = ArrayAdapter(
+            requireContext(),
+            android.R.layout.simple_spinner_dropdown_item,
+            listOf(
+                getString(R.string.settings_visualization_mode_analog_meter),
+                getString(R.string.settings_visualization_mode_level_meter),
+                getString(R.string.settings_visualization_mode_waveform),
+                getString(R.string.settings_visualization_mode_bars)
+            )
+        )
+        binding.spinnerVisualizationMode.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+            override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
+                if (!internalUpdating) {
+                    AudioEngine.setTopBarVisualizationMode(
+                        visualizationModeOptions.getOrElse(position) { TopBarVisualizationMode.ANALOG_METER }
+                    )
+                }
+            }
+
+            override fun onNothingSelected(parent: AdapterView<*>?) = Unit
+        }
+    }
+
+    private fun setupAudioSelectionControls() {
+        binding.spinnerBitDepth.adapter = ArrayAdapter(
+            requireContext(),
+            android.R.layout.simple_spinner_dropdown_item,
+            bitDepthOptions.map { "${it}-bit" }
+        )
+        binding.spinnerBitDepth.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+            override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
+                if (!internalUpdating) {
+                    AudioEngine.setPreferredBitDepth(bitDepthOptions.getOrElse(position) { 32 })
+                }
+            }
+
+            override fun onNothingSelected(parent: AdapterView<*>?) = Unit
+        }
+
+        binding.spinnerOutputSampleRate.adapter = ArrayAdapter(
+            requireContext(),
+            android.R.layout.simple_spinner_dropdown_item,
+            outputSampleRateOptionsHz.map { sampleRate ->
+                if (sampleRate == null) {
+                    getString(R.string.settings_output_sample_rate_auto)
+                } else {
+                    "${sampleRate / 1000.0} kHz"
+                }
+            }
+        )
+        binding.spinnerOutputSampleRate.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+            override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
+                if (!internalUpdating) {
+                    AudioEngine.setPreferredOutputSampleRateHz(outputSampleRateOptionsHz.getOrNull(position))
+                }
+            }
+
+            override fun onNothingSelected(parent: AdapterView<*>?) = Unit
+        }
+
+        binding.spinnerMaxBitrate.adapter = ArrayAdapter(
+            requireContext(),
+            android.R.layout.simple_spinner_dropdown_item,
+            bitrateOptionsKbps.map { kbps ->
+                if (kbps == null) getString(R.string.settings_bitrate_unlimited) else "$kbps kbps"
+            }
+        )
+        binding.spinnerMaxBitrate.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+            override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
+                if (!internalUpdating) {
+                    AudioEngine.setPreferredMaxAudioBitrateKbps(bitrateOptionsKbps.getOrNull(position))
+                }
+            }
+
+            override fun onNothingSelected(parent: AdapterView<*>?) = Unit
+        }
+
+        binding.spinnerUsbDac.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+            override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
+                if (!internalUpdating) {
+                    AudioEngine.setPreferredUsbOutputDeviceId(usbSpinnerIds.getOrNull(position))
+                }
+            }
+
+            override fun onNothingSelected(parent: AdapterView<*>?) = Unit
+        }
+
+        binding.spinnerUsbResampleAlgorithm.adapter = ArrayAdapter(
+            requireContext(),
+            android.R.layout.simple_spinner_dropdown_item,
+            listOf("Nearest", "Linear", "Cubic", "SoXr HQ")
+        )
+        binding.spinnerUsbResampleAlgorithm.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+            override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
+                if (!internalUpdating) {
+                    AudioEngine.setPreferredUsbResampleAlgorithm(
+                        usbResamplerAlgorithmOptions.getOrElse(position) {
+                            com.alky.hifx.audio.USB_RESAMPLER_ALGORITHM_LINEAR
+                        }
+                    )
+                }
+            }
+
+            override fun onNothingSelected(parent: AdapterView<*>?) = Unit
+        }
+    }
+
+    private fun observeSettings() {
+        viewLifecycleOwner.lifecycleScope.launch {
+            viewLifecycleOwner.repeatOnLifecycle(Lifecycle.State.STARTED) {
+                AudioEngine.settingsState.collect { state ->
+                    renderSettings(state)
+                }
+            }
+        }
+    }
+
+    private fun renderSettings(state: SettingsUiState) {
+        internalUpdating = true
+        binding.textScanFolder.text = buildScanFolderSummary(state)
+        binding.buttonClearScanFolder.isEnabled = true
+        binding.switchHiFi.isChecked = state.hiFiMode
+        binding.switchHiResApi.isChecked = state.hiResApiEnabled
+        binding.switchRememberPlayback.isChecked = state.rememberPlaybackSessionEnabled
+        binding.switchRememberTrack.isChecked = state.rememberPlaybackTrackEnabled
+        binding.switchOpenPlayerOnTrackPlay.isChecked = state.openPlayerOnTrackPlayEnabled
+        binding.switchHapticFeedback.isChecked = state.hapticFeedbackEnabled
+        binding.switchHapticAudio.isChecked = state.hapticAudioEnabled
+        binding.sliderHapticAudioDelay.value = state.hapticAudioDelayMs.toFloat()
+        binding.textHapticAudioDelayValue.text = getString(
+            R.string.settings_haptic_audio_delay_value_format,
+            state.hapticAudioDelayMs
+        )
+        binding.switchDirectDacGoldTheme.isChecked = state.directDacGoldThemeEnabled
+        binding.switchShowLyricsPanel.isChecked = state.showLyricsPanelEnabled
+        binding.switchLyricsGlow.isChecked = state.lyricsGlowEnabled
+        binding.switchShowLyricsScanHead.isChecked = state.showLyricsScanHeadEnabled
+        binding.switchShowStreamInfo.isChecked = state.showStreamInfoEnabled
+        binding.switchShowVisualization.isChecked = state.showVisualizationEnabled
+        binding.switchVisualizationLimit30Fps.isChecked = state.visualizationFpsLimit30Enabled
+        binding.switchVisualizationLimit30Fps.isEnabled = state.showVisualizationEnabled
+        binding.sliderVisualizationDelay.value = state.visualizationDelayMs.toFloat()
+        binding.sliderVisualizationDelay.isEnabled = state.showVisualizationEnabled
+        binding.textVisualizationDelayValue.text = getString(
+            R.string.settings_visualization_delay_value_format,
+            state.visualizationDelayMs
+        )
+        val visualizationModeIndex = visualizationModeOptions.indexOf(state.topBarVisualizationMode).coerceAtLeast(0)
+        binding.spinnerVisualizationMode.setSelection(visualizationModeIndex, false)
+        binding.switchBackgroundDynamic.isChecked = state.backgroundDynamicEnabled
+        binding.sliderBackgroundBlur.value = state.backgroundBlurStrength.toFloat()
+        binding.sliderBackgroundOpacity.value = state.backgroundOpacityPercent.toFloat()
+        binding.textBackgroundBlurValue.text = getString(
+            R.string.settings_background_blur_value_format,
+            state.backgroundBlurStrength
+        )
+        binding.textBackgroundOpacityValue.text = getString(
+            R.string.settings_background_opacity_value_format,
+            state.backgroundOpacityPercent
+        )
+        binding.sliderLyricsFontSize.value = state.lyricsFontSizeSp.toFloat()
+        binding.textLyricsFontSizeValue.text = getString(
+            R.string.settings_lyrics_font_size_value_format,
+            state.lyricsFontSizeSp
+        )
+        binding.textLyricsFontPreview.textSize = state.lyricsFontSizeSp.toFloat()
+        binding.switchLyricsBold.isChecked = state.lyricsBoldEnabled
+        binding.textLyricsFontPreview.typeface =
+            if (state.lyricsBoldEnabled) Typeface.DEFAULT_BOLD else Typeface.DEFAULT
+        binding.sliderLyricsGlowIntensity.value = state.lyricsGlowIntensityPercent.toFloat()
+        binding.textLyricsGlowIntensityValue.text = getString(
+            R.string.settings_lyrics_glow_intensity_value_format,
+            state.lyricsGlowIntensityPercent
+        )
+        binding.textSampleRate.text = getString(
+            R.string.settings_sample_rate_value,
+            state.outputSampleRateHz?.toString() ?: getString(R.string.unknown_value)
+        )
+        binding.textFramesPerBuffer.text = getString(
+            R.string.settings_buffer_value,
+            state.outputFramesPerBuffer?.toString() ?: getString(R.string.unknown_value)
+        )
+        binding.textOffloadSupport.text = getString(
+            R.string.settings_offload_value,
+            if (state.offloadSupported) getString(R.string.supported) else getString(R.string.not_supported)
+        )
+        val bitDepthIndex = bitDepthOptions.indexOf(state.preferredBitDepth).coerceAtLeast(0)
+        binding.spinnerBitDepth.setSelection(bitDepthIndex, false)
+        val sampleRateIndex = outputSampleRateOptionsHz.indexOf(state.preferredOutputSampleRateHz).coerceAtLeast(0)
+        binding.spinnerOutputSampleRate.setSelection(sampleRateIndex, false)
+        val bitrateIndex = bitrateOptionsKbps.indexOf(state.preferredMaxBitrateKbps).coerceAtLeast(0)
+        binding.spinnerMaxBitrate.setSelection(bitrateIndex, false)
+        renderUsbOptions(state)
+        binding.textActiveRoute.text = getString(
+            R.string.settings_active_route_value,
+            state.activeOutputRouteLabel
+        )
+        binding.textUsbDirectCapability.text = state.usbDirectCapabilitySummary
+        val algorithmIndex = usbResamplerAlgorithmOptions.indexOf(state.preferredUsbResampleAlgorithm).coerceAtLeast(0)
+        binding.spinnerUsbResampleAlgorithm.setSelection(algorithmIndex, false)
+        binding.switchUsbExclusive.isChecked = state.usbExclusiveModeEnabled
+        val hasSelectedUsb = state.preferredUsbDeviceId != null
+        val canToggleExclusive = hasSelectedUsb
+        binding.switchUsbExclusive.isEnabled = canToggleExclusive
+        binding.textUsbExclusiveState.text = when {
+            !hasSelectedUsb -> getString(R.string.settings_usb_exclusive_state_no_device)
+            state.usbExclusiveActive && state.usbSrcBypassGuaranteed ->
+                getString(R.string.settings_usb_exclusive_state_active)
+            state.usbExclusiveActive ->
+                getString(R.string.settings_usb_exclusive_state_active_unverified)
+            state.usbCompatibilityActive -> getString(
+                R.string.settings_usb_exclusive_state_compat_active,
+                state.usbResolvedSampleRateHz?.toString() ?: getString(R.string.unknown_value),
+                state.usbResolvedBitDepth?.toString() ?: getString(R.string.unknown_value)
+            )
+            !state.usbExclusiveSupported -> getString(R.string.settings_usb_exclusive_state_not_supported)
+            state.usbExclusiveModeEnabled -> getString(R.string.settings_usb_exclusive_state_inactive)
+            else -> getString(R.string.settings_usb_exclusive_state_default)
+        }
+        latestAudioPipelineDetails = state.audioPipelineDetails
+        binding.textHiFiHint.text = if (state.hiFiMode) {
+            getString(R.string.settings_hifi_on_hint)
+        } else {
+            getString(R.string.settings_hifi_off_hint)
+        }
+        when (state.themeMode) {
+            AppCompatDelegate.MODE_NIGHT_NO -> binding.radioThemeLight.isChecked = true
+            AppCompatDelegate.MODE_NIGHT_YES -> binding.radioThemeDark.isChecked = true
+            else -> binding.radioThemeSystem.isChecked = true
+        }
+        internalUpdating = false
+    }
+
+    private fun renderUsbOptions(state: SettingsUiState) {
+        usbSpinnerIds = listOf(null) + state.usbOutputOptions.map { it.id }
+        val labels = listOf(getString(R.string.settings_route_auto)) + state.usbOutputOptions.map { it.label }
+        binding.spinnerUsbDac.adapter = ArrayAdapter(
+            requireContext(),
+            android.R.layout.simple_spinner_dropdown_item,
+            labels
+        )
+        val selectedIndex = usbSpinnerIds.indexOf(state.preferredUsbDeviceId).takeIf { it >= 0 } ?: 0
+        binding.spinnerUsbDac.setSelection(selectedIndex, false)
+    }
+
+    private fun showAudioPipelineDetailsDialog() {
+        val raw = latestAudioPipelineDetails.ifBlank { getString(R.string.settings_pipeline_details_empty) }
+        val explanation = buildAudioPipelineExplanation(raw)
+        val message = buildString {
+            append(getString(R.string.settings_pipeline_explain_header))
+            append("\n")
+            append(explanation)
+            append("\n\n")
+            append(getString(R.string.settings_pipeline_raw_header))
+            append("\n")
+            append(raw)
+        }
+        MaterialAlertDialogBuilder(requireContext())
+            .setTitle(R.string.settings_pipeline_dialog_title)
+            .setMessage(message)
+            .setPositiveButton(android.R.string.ok, null)
+            .show()
+    }
+    private fun buildAudioPipelineExplanation(raw: String): String {
+        if (raw.isBlank() || raw == getString(R.string.settings_pipeline_details_empty)) {
+            return "当前没有可解释的链路数据，请先播放音频并点击“刷新设备输出信息”。"
+        }
+        val points = mutableListOf<String>()
+        raw.lineSequence().map { it.trim() }.forEach { line ->
+            when {
+                line.contains("选中音轨") -> points += "选中音轨：当前真正参与播放的轨道。"
+                line.contains("MIME") -> points += "编码格式：源文件编码类型（FLAC/AAC/MP3 等）。"
+                line.contains("音轨采样率") -> points += "音轨采样率：文件内采样率，不一定等于实际输出采样率。"
+                line.contains("音轨声道数") -> points += "音轨声道数：源轨道声道信息（2声道/多声道）。"
+                line.contains("音轨码率") -> points += "音轨码率：压缩质量指标之一。"
+                line.startsWith("解码器:") -> points += "解码器：当前实际被选中的解码器实现。"
+                line.contains("目标输出采样率") -> points += "目标输出采样率：你的偏好目标值。"
+                line.contains("系统输出采样率") -> points += "系统输出采样率：当前实际输出参数。"
+                line.contains("Offload") -> points += "Offload支持：设备能力，非当前路径的绝对证明。"
+                line.contains("USB独占开关") -> points += "USB独占：需同时看开关/支持/激活，激活=true 才表示已生效。"
+                line.contains("USB兼容直通") -> points += "USB兼容直通：用于不支持独占的外置小尾巴，表示已锁定USB路由并按设备能力协商格式。"
+                line.startsWith("Equalizer:") -> points += "EQ链路：展示是否启用及各频段增益。"
+                line.startsWith("Convolution=") -> points += "卷积链路：展示 IR 与湿度参数，确认卷积是否生效。"
+                line.startsWith("id=") -> points += "设备清单：系统枚举到的输出设备能力原始数据。"
+            }
+        }
+        return if (points.isEmpty()) {
+            "已显示原始链路信息。可重点关注：音轨采样率、系统输出采样率、USB独占激活状态、解码器。"
+        } else {
+            "• " + points.distinct().joinToString(separator = "\n• ")
+        }
+    }
+
+    private fun showScanFolderManagerDialog() {
+        viewLifecycleOwner.lifecycleScope.launch {
+            if (!isAdded) {
+                return@launch
+            }
+            val currentFolders = AudioEngine.settingsState.value.scanFolderRelativePaths
+            if (currentFolders.isEmpty()) {
+                Toast.makeText(
+                    requireContext(),
+                    R.string.settings_library_remove_scan_path_empty,
+                    Toast.LENGTH_SHORT
+                ).show()
+                return@launch
+            }
+            val selected = BooleanArray(currentFolders.size)
+            MaterialAlertDialogBuilder(requireContext())
+                .setTitle(R.string.settings_library_manage_scan_paths_title)
+                .setMultiChoiceItems(currentFolders.toTypedArray(), selected) { _, which, isChecked ->
+                    selected[which] = isChecked
+                }
+                .setPositiveButton(R.string.action_remove_selected_paths) { _, _ ->
+                    val remaining = currentFolders.filterIndexed { index, _ -> !selected[index] }
+                    AudioEngine.setScanFolderRelativePaths(remaining)
+                }
+                .setNeutralButton(R.string.settings_library_clear_scan_paths) { _, _ ->
+                    AudioEngine.clearScanFolders()
+                }
+                .setNegativeButton(android.R.string.cancel, null)
+                .show()
+        }
+    }
+
+    private fun showScanFolderExplorerDialog() {
+        viewLifecycleOwner.lifecycleScope.launch {
+            val folders = withContext(Dispatchers.IO) { AudioEngine.getAvailableScanFolders() }
+            if (!isAdded) {
+                return@launch
+            }
+            if (folders.isEmpty()) {
+                Toast.makeText(
+                    requireContext(),
+                    R.string.library_scan_folder_picker_empty,
+                    Toast.LENGTH_SHORT
+                ).show()
+                return@launch
+            }
+
+            var currentPath: String? = null
+            var currentNodes: List<ScanFolderNode> = emptyList()
+            val context = requireContext()
+            val pathView = TextView(context).apply {
+                setTextAppearance(com.google.android.material.R.style.TextAppearance_Material3_BodyMedium)
+                setPadding(0, 0, 0, dp(12f))
+            }
+            val listView = ListView(context).apply {
+                dividerHeight = 0
+            }
+            val container = LinearLayout(context).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(dp(4f), dp(8f), dp(4f), 0)
+                addView(
+                    pathView,
+                    LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT
+                    )
+                )
+                addView(
+                    listView,
+                    LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        dp(320f)
+                    )
+                )
+            }
+
+            lateinit var dialog: AlertDialog
+            fun render() {
+                pathView.text = currentPath?.let {
+                    getString(R.string.settings_library_scan_folder_current, it)
+                } ?: getString(R.string.settings_library_scan_folder_root)
+                currentNodes = buildScanFolderNodes(folders, currentPath)
+                listView.adapter = ArrayAdapter(
+                    context,
+                    android.R.layout.simple_list_item_1,
+                    currentNodes.map { it.label }
+                )
+                dialog.getButton(AlertDialog.BUTTON_POSITIVE)?.isEnabled = !currentPath.isNullOrBlank()
+            }
+
+            listView.setOnItemClickListener { _, _, position, _ ->
+                val node = currentNodes.getOrNull(position) ?: return@setOnItemClickListener
+                currentPath = if (node.isUp) {
+                    parentScanFolderPath(currentPath)
+                } else {
+                    node.path
+                }
+                render()
+            }
+
+            dialog = MaterialAlertDialogBuilder(context)
+                .setTitle(R.string.settings_library_select_scan_folder_title)
+                .setView(container)
+                .setPositiveButton(R.string.action_add_scan_path, null)
+                .setNegativeButton(android.R.string.cancel, null)
+                .show()
+            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+                val selectedPath = currentPath ?: return@setOnClickListener
+                val alreadyAdded = AudioEngine.settingsState.value.scanFolderRelativePaths.any {
+                    it.equals(selectedPath, ignoreCase = true)
+                }
+                if (alreadyAdded) {
+                    Toast.makeText(
+                        context,
+                        R.string.settings_library_scan_folder_already_added,
+                        Toast.LENGTH_SHORT
+                    ).show()
+                    return@setOnClickListener
+                }
+                AudioEngine.setScanFolderRelativePath(selectedPath)
+                Toast.makeText(
+                    context,
+                    getString(R.string.settings_library_scan_folder_added, selectedPath),
+                    Toast.LENGTH_SHORT
+                ).show()
+                dialog.dismiss()
+            }
+            render()
+        }
+    }
+
+    private fun buildScanFolderNodes(allFolders: List<String>, currentPath: String?): List<ScanFolderNode> {
+        val nodes = mutableListOf<ScanFolderNode>()
+        if (!currentPath.isNullOrBlank()) {
+            nodes += ScanFolderNode(
+                path = parentScanFolderPath(currentPath),
+                label = getString(R.string.action_scan_path_up),
+                isUp = true
+            )
+        }
+        val prefix = currentPath?.let { "$it/" }.orEmpty()
+        val children = linkedSetOf<String>()
+        allFolders.forEach { folder ->
+            if (currentPath.isNullOrBlank()) {
+                children += folder.substringBefore('/')
+            } else if (folder.startsWith(prefix, ignoreCase = true)) {
+                val remainder = folder.removePrefix(prefix)
+                if (remainder.isNotBlank()) {
+                    children += remainder.substringBefore('/')
+                }
+            }
+        }
+        children.sortedBy { it.lowercase() }.forEach { child ->
+            val path = if (currentPath.isNullOrBlank()) child else "$currentPath/$child"
+            nodes += ScanFolderNode(path = path, label = child)
+        }
+        return nodes
+    }
+
+    private fun parentScanFolderPath(path: String?): String? {
+        val current = path?.trim('/')?.takeIf { it.isNotBlank() } ?: return null
+        val parent = current.substringBeforeLast('/', "")
+        return parent.takeIf { it.isNotBlank() }
+    }
+
+    private fun dp(value: Float): Int = (value * resources.displayMetrics.density).roundToInt()
+
+    private fun openExternalLink(url: String) {
+        startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+    }
+
+    private fun buildScanFolderSummary(state: SettingsUiState): String {
+        if (state.scanFolderRelativePaths.isEmpty()) {
+            return state.scanFolderLabel
+        }
+        val detailLines = state.scanFolderRelativePaths.joinToString(separator = "\n") { "• $it" }
+        return state.scanFolderLabel + "\n" + detailLines
+    }
+
+    private fun openSection(section: SettingsSection) {
+        selectedSection = section
+        binding.layoutRootMenu.visibility = View.GONE
+        binding.layoutSubmenuHeader.visibility = View.VISIBLE
+        binding.textSubmenuTitle.setText(section.titleResId)
+        renderVisibleSection(section)
+    }
+
+    private fun renderRootMenu() {
+        selectedSection = null
+        binding.layoutSubmenuHeader.visibility = View.GONE
+        binding.layoutRootMenu.visibility = View.VISIBLE
+        renderVisibleSection(null)
+    }
+
+    private fun renderVisibleSection(section: SettingsSection?) {
+        binding.sectionAppearance.visibility = if (section == SettingsSection.APPEARANCE) View.VISIBLE else View.GONE
+        binding.sectionPlayback.visibility = if (section == SettingsSection.PLAYBACK) View.VISIBLE else View.GONE
+        binding.sectionLyrics.visibility = if (section == SettingsSection.LYRICS) View.VISIBLE else View.GONE
+        binding.sectionVisualization.visibility = if (section == SettingsSection.VISUALIZATION) View.VISIBLE else View.GONE
+        binding.sectionLibrary.visibility = if (section == SettingsSection.LIBRARY) View.VISIBLE else View.GONE
+        binding.sectionOther.visibility = if (section == SettingsSection.OTHER) View.VISIBLE else View.GONE
+        binding.sectionAbout.visibility = if (section == SettingsSection.ABOUT) View.VISIBLE else View.GONE
+    }
+
+    private enum class SettingsSection {
+        APPEARANCE,
+        PLAYBACK,
+        LYRICS,
+        VISUALIZATION,
+        LIBRARY,
+        OTHER,
+        ABOUT;
+
+        val titleResId: Int
+            get() = when (this) {
+                APPEARANCE -> R.string.settings_appearance_title
+                PLAYBACK -> R.string.settings_playback_title
+                LYRICS -> R.string.settings_lyrics_title
+                VISUALIZATION -> R.string.settings_visualization_title
+                LIBRARY -> R.string.settings_library_title
+                OTHER -> R.string.settings_other_title
+                ABOUT -> R.string.settings_about_title
+            }
+    }
+}

@@ -197,12 +197,12 @@ bool process_with_soxr(
 }  // namespace
 
 extern "C" JNIEXPORT jlong JNICALL
-Java_com_example_hifx_audio_NativeUsbResamplerBridge_nativeCreate(JNIEnv*, jobject) {
+Java_com_alky_hifx_audio_NativeUsbResamplerBridge_nativeCreate(JNIEnv*, jobject) {
     return reinterpret_cast<jlong>(new NativeUsbResampler());
 }
 
 extern "C" JNIEXPORT void JNICALL
-Java_com_example_hifx_audio_NativeUsbResamplerBridge_nativeConfigure(
+Java_com_alky_hifx_audio_NativeUsbResamplerBridge_nativeConfigure(
     JNIEnv*,
     jobject,
     jlong handle,
@@ -223,7 +223,7 @@ Java_com_example_hifx_audio_NativeUsbResamplerBridge_nativeConfigure(
 }
 
 extern "C" JNIEXPORT jbyteArray JNICALL
-Java_com_example_hifx_audio_NativeUsbResamplerBridge_nativeProcessPcm16Stereo(
+Java_com_alky_hifx_audio_NativeUsbResamplerBridge_nativeProcessPcm16Stereo(
     JNIEnv* env,
     jobject,
     jlong handle,
@@ -303,7 +303,7 @@ Java_com_example_hifx_audio_NativeUsbResamplerBridge_nativeProcessPcm16Stereo(
 }
 
 extern "C" JNIEXPORT void JNICALL
-Java_com_example_hifx_audio_NativeUsbResamplerBridge_nativeReset(JNIEnv*, jobject, jlong handle) {
+Java_com_alky_hifx_audio_NativeUsbResamplerBridge_nativeReset(JNIEnv*, jobject, jlong handle) {
     auto* resampler = from_handle(handle);
     if (resampler == nullptr) {
         return;
@@ -316,7 +316,7 @@ Java_com_example_hifx_audio_NativeUsbResamplerBridge_nativeReset(JNIEnv*, jobjec
 }
 
 extern "C" JNIEXPORT void JNICALL
-Java_com_example_hifx_audio_NativeUsbResamplerBridge_nativeRelease(JNIEnv*, jobject, jlong handle) {
+Java_com_alky_hifx_audio_NativeUsbResamplerBridge_nativeRelease(JNIEnv*, jobject, jlong handle) {
     auto* resampler = from_handle(handle);
     release_soxr_state(resampler);
     delete resampler;

@@ -372,17 +372,17 @@ NativeConvolutionEngine* from_handle(jlong handle) {
 }  // namespace
 
 extern "C" JNIEXPORT jlong JNICALL
-Java_com_example_hifx_audio_NativeConvolutionBridge_nativeCreate(JNIEnv*, jobject) {
+Java_com_alky_hifx_audio_NativeConvolutionBridge_nativeCreate(JNIEnv*, jobject) {
     return reinterpret_cast<jlong>(new NativeConvolutionEngine());
 }
 
 extern "C" JNIEXPORT void JNICALL
-Java_com_example_hifx_audio_NativeConvolutionBridge_nativeRelease(JNIEnv*, jobject, jlong handle) {
+Java_com_alky_hifx_audio_NativeConvolutionBridge_nativeRelease(JNIEnv*, jobject, jlong handle) {
     delete from_handle(handle);
 }
 
 extern "C" JNIEXPORT void JNICALL
-Java_com_example_hifx_audio_NativeConvolutionBridge_nativeConfigure(
+Java_com_alky_hifx_audio_NativeConvolutionBridge_nativeConfigure(
     JNIEnv*,
     jobject,
     jlong handle,
@@ -395,7 +395,7 @@ Java_com_example_hifx_audio_NativeConvolutionBridge_nativeConfigure(
 }
 
 extern "C" JNIEXPORT void JNICALL
-Java_com_example_hifx_audio_NativeConvolutionBridge_nativeUpdateConfig(
+Java_com_alky_hifx_audio_NativeConvolutionBridge_nativeUpdateConfig(
     JNIEnv*,
     jobject,
     jlong handle,
@@ -408,7 +408,7 @@ Java_com_example_hifx_audio_NativeConvolutionBridge_nativeUpdateConfig(
 }
 
 extern "C" JNIEXPORT void JNICALL
-Java_com_example_hifx_audio_NativeConvolutionBridge_nativeUpdateImpulse(
+Java_com_alky_hifx_audio_NativeConvolutionBridge_nativeUpdateImpulse(
     JNIEnv* env,
     jobject,
     jlong handle,
@@ -429,7 +429,7 @@ Java_com_example_hifx_audio_NativeConvolutionBridge_nativeUpdateImpulse(
 }
 
 extern "C" JNIEXPORT jfloat JNICALL
-Java_com_example_hifx_audio_NativeConvolutionBridge_nativeProcess(
+Java_com_alky_hifx_audio_NativeConvolutionBridge_nativeProcess(
     JNIEnv* env,
     jobject,
     jlong handle,
@@ -452,7 +452,7 @@ Java_com_example_hifx_audio_NativeConvolutionBridge_nativeProcess(
 }
 
 extern "C" JNIEXPORT void JNICALL
-Java_com_example_hifx_audio_NativeConvolutionBridge_nativeFlush(JNIEnv*, jobject, jlong handle) {
+Java_com_alky_hifx_audio_NativeConvolutionBridge_nativeFlush(JNIEnv*, jobject, jlong handle) {
     if (auto* engine = from_handle(handle)) {
         engine->flush();
     }

@@ -299,17 +299,17 @@ void write_bar_snapshot(const NativeTopBarVisualizer& visualizer, jfloat* out, i
 }  // namespace
 
 extern "C" JNIEXPORT jlong JNICALL
-Java_com_example_hifx_audio_NativeTopBarVisualizerBridge_nativeCreate(JNIEnv*, jobject) {
+Java_com_alky_hifx_audio_NativeTopBarVisualizerBridge_nativeCreate(JNIEnv*, jobject) {
     return reinterpret_cast<jlong>(new NativeTopBarVisualizer());
 }
 
 extern "C" JNIEXPORT void JNICALL
-Java_com_example_hifx_audio_NativeTopBarVisualizerBridge_nativeRelease(JNIEnv*, jobject, jlong handle) {
+Java_com_alky_hifx_audio_NativeTopBarVisualizerBridge_nativeRelease(JNIEnv*, jobject, jlong handle) {
     delete from_handle(handle);
 }
 
 extern "C" JNIEXPORT void JNICALL
-Java_com_example_hifx_audio_NativeTopBarVisualizerBridge_nativeReset(JNIEnv*, jobject, jlong handle) {
+Java_com_alky_hifx_audio_NativeTopBarVisualizerBridge_nativeReset(JNIEnv*, jobject, jlong handle) {
     auto* visualizer = from_handle(handle);
     if (visualizer == nullptr) {
         return;
@@ -318,7 +318,7 @@ Java_com_example_hifx_audio_NativeTopBarVisualizerBridge_nativeReset(JNIEnv*, jo
 }
 
 extern "C" JNIEXPORT void JNICALL
-Java_com_example_hifx_audio_NativeTopBarVisualizerBridge_nativeSetSampleRateHz(
+Java_com_alky_hifx_audio_NativeTopBarVisualizerBridge_nativeSetSampleRateHz(
     JNIEnv*,
     jobject,
     jlong handle,
@@ -332,7 +332,7 @@ Java_com_example_hifx_audio_NativeTopBarVisualizerBridge_nativeSetSampleRateHz(
 }
 
 extern "C" JNIEXPORT void JNICALL
-Java_com_example_hifx_audio_NativeTopBarVisualizerBridge_nativeAnalyzePcm16(
+Java_com_alky_hifx_audio_NativeTopBarVisualizerBridge_nativeAnalyzePcm16(
     JNIEnv* env,
     jobject,
     jlong handle,
@@ -356,7 +356,7 @@ Java_com_example_hifx_audio_NativeTopBarVisualizerBridge_nativeAnalyzePcm16(
 }
 
 extern "C" JNIEXPORT void JNICALL
-Java_com_example_hifx_audio_NativeTopBarVisualizerBridge_nativeAnalyzeFloat(
+Java_com_alky_hifx_audio_NativeTopBarVisualizerBridge_nativeAnalyzeFloat(
     JNIEnv* env,
     jobject,
     jlong handle,
@@ -377,7 +377,7 @@ Java_com_example_hifx_audio_NativeTopBarVisualizerBridge_nativeAnalyzeFloat(
 }
 
 extern "C" JNIEXPORT void JNICALL
-Java_com_example_hifx_audio_NativeTopBarVisualizerBridge_nativeFillSnapshot(
+Java_com_alky_hifx_audio_NativeTopBarVisualizerBridge_nativeFillSnapshot(
     JNIEnv* env,
     jobject,
     jlong handle,
@@ -426,7 +426,7 @@ Java_com_example_hifx_audio_NativeTopBarVisualizerBridge_nativeFillSnapshot(
 }
 
 extern "C" JNIEXPORT void JNICALL
-Java_com_example_hifx_audio_NativeTopBarVisualizerBridge_nativeFillEqSpectrumSnapshot(
+Java_com_alky_hifx_audio_NativeTopBarVisualizerBridge_nativeFillEqSpectrumSnapshot(
     JNIEnv* env,
     jobject,
     jlong handle,

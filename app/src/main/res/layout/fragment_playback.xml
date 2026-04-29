@@ -33,7 +33,7 @@
             android:paddingEnd="26dp"
             android:paddingBottom="12dp" />
 
-        <com.example.hifx.ui.AlphabetIndexView
+        <com.alky.hifx.ui.AlphabetIndexView
             android:id="@+id/view_alpha_index"
             android:layout_width="26dp"
             android:layout_height="match_parent"

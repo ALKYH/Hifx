@@ -234,7 +234,7 @@
                     android:text="@string/effects_eq_delete_point_short" />
             </LinearLayout>
 
-            <com.example.hifx.ui.EqCurveView
+            <com.alky.hifx.ui.EqCurveView
                 android:id="@+id/eq_curve_view"
                 android:layout_width="match_parent"
                 android:layout_height="0dp"
@@ -279,7 +279,7 @@
                         android:textStyle="bold"
                         android:textAppearance="?attr/textAppearanceLabelSmall" />
 
-                    <com.example.hifx.ui.KnobView
+                    <com.alky.hifx.ui.KnobView
                         android:id="@+id/knob_eq_freq"
                         android:layout_width="78dp"
                         android:layout_height="78dp"
@@ -313,7 +313,7 @@
                         android:textStyle="bold"
                         android:textAppearance="?attr/textAppearanceLabelSmall" />
 
-                    <com.example.hifx.ui.KnobView
+                    <com.alky.hifx.ui.KnobView
                         android:id="@+id/knob_eq_q"
                         android:layout_width="78dp"
                         android:layout_height="78dp"
@@ -346,7 +346,7 @@
                         android:textStyle="bold"
                         android:textAppearance="?attr/textAppearanceLabelSmall" />
 
-                    <com.example.hifx.ui.KnobView
+                    <com.alky.hifx.ui.KnobView
                         android:id="@+id/knob_eq_gain"
                         android:layout_width="78dp"
                         android:layout_height="78dp"
@@ -536,7 +536,7 @@
                                 android:text="@string/effects_channel_right_label" />
                         </LinearLayout>
 
-                        <com.example.hifx.ui.SpatialPadView
+                        <com.alky.hifx.ui.SpatialPadView
                             android:id="@+id/spatial_pad_dual"
                             android:layout_width="match_parent"
                             android:layout_height="260dp"
@@ -661,7 +661,6 @@
                             android:layout_height="wrap_content"
                             android:orientation="vertical"
                             android:padding="14dp">
-
                             <TextView
                                 android:layout_width="match_parent"
                                 android:layout_height="wrap_content"
@@ -672,7 +671,7 @@
                                 android:layout_width="match_parent"
                                 android:layout_height="wrap_content"
                                 android:layout_marginTop="4dp"
-                                android:text="启用后将与空间化互斥，仅支持 5.1 / 7.1"
+                                android:text="@string/effects_surround_mode_hint"
                                 android:textAppearance="?attr/textAppearanceBodySmall" />
 
                             <com.google.android.material.materialswitch.MaterialSwitch
@@ -680,7 +679,7 @@
                                 android:layout_width="match_parent"
                                 android:layout_height="wrap_content"
                                 android:layout_marginTop="6dp"
-                                android:text="启用环绕声" />
+                                android:text="@string/effects_surround_enabled" />
 
                             <com.google.android.material.button.MaterialButtonToggleGroup
                                 android:id="@+id/toggle_surround_mode"
@@ -873,6 +872,13 @@
                                 android:layout_height="wrap_content"
                                 android:text="@string/effects_convolution_title"
                                 android:textAppearance="?attr/textAppearanceLabelLarge" />
+
+                            <TextView
+                                android:layout_width="match_parent"
+                                android:layout_height="wrap_content"
+                                android:layout_marginTop="4dp"
+                                android:text="@string/effects_convolution_hint"
+                                android:textAppearance="?attr/textAppearanceBodySmall" />
 
                             <com.google.android.material.materialswitch.MaterialSwitch
                                 android:id="@+id/switch_convolution_enabled"

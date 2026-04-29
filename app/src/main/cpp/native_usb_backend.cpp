@@ -16,11 +16,11 @@ namespace {
 constexpr int kUsbEndpointTransferTypeIso = 1;
 constexpr int kUsbEndpointTransferTypeBulk = 2;
 
-extern "C" jlong Java_com_example_hifx_audio_NativeUsbResamplerBridge_nativeCreate(JNIEnv*, jobject);
-extern "C" void Java_com_example_hifx_audio_NativeUsbResamplerBridge_nativeConfigure(JNIEnv*, jobject, jlong, jint, jint, jint);
-extern "C" jbyteArray Java_com_example_hifx_audio_NativeUsbResamplerBridge_nativeProcessPcm16Stereo(JNIEnv*, jobject, jlong, jbyteArray);
-extern "C" void Java_com_example_hifx_audio_NativeUsbResamplerBridge_nativeReset(JNIEnv*, jobject, jlong);
-extern "C" void Java_com_example_hifx_audio_NativeUsbResamplerBridge_nativeRelease(JNIEnv*, jobject, jlong);
+extern "C" jlong Java_com_alky_hifx_audio_NativeUsbResamplerBridge_nativeCreate(JNIEnv*, jobject);
+extern "C" void Java_com_alky_hifx_audio_NativeUsbResamplerBridge_nativeConfigure(JNIEnv*, jobject, jlong, jint, jint, jint);
+extern "C" jbyteArray Java_com_alky_hifx_audio_NativeUsbResamplerBridge_nativeProcessPcm16Stereo(JNIEnv*, jobject, jlong, jbyteArray);
+extern "C" void Java_com_alky_hifx_audio_NativeUsbResamplerBridge_nativeReset(JNIEnv*, jobject, jlong);
+extern "C" void Java_com_alky_hifx_audio_NativeUsbResamplerBridge_nativeRelease(JNIEnv*, jobject, jlong);
 
 struct NativeUsbBackend {
     JavaVM* vm = nullptr;
@@ -91,7 +91,7 @@ int ensure_resampler_configured(
         return -1;
     }
     if (backend->resampler_handle == 0L) {
-        backend->resampler_handle = Java_com_example_hifx_audio_NativeUsbResamplerBridge_nativeCreate(env, nullptr);
+        backend->resampler_handle = Java_com_alky_hifx_audio_NativeUsbResamplerBridge_nativeCreate(env, nullptr);
         if (backend->resampler_handle == 0L) {
             backend->last_error = "Failed to create native resampler";
             return -1;
@@ -102,7 +102,7 @@ int ensure_resampler_configured(
         backend->resampler_output_rate_hz != output_sample_rate_hz ||
         backend->resampler_algorithm != algorithm
     ) {
-        Java_com_example_hifx_audio_NativeUsbResamplerBridge_nativeConfigure(
+        Java_com_alky_hifx_audio_NativeUsbResamplerBridge_nativeConfigure(
             env,
             nullptr,
             backend->resampler_handle,
@@ -199,7 +199,7 @@ int write_iso_via_usbfs(JNIEnv* env, NativeUsbBackend* backend, jbyteArray pcm_b
 }  // namespace
 
 extern "C" JNIEXPORT jlong JNICALL
-Java_com_example_hifx_audio_NativeUsbBridge_nativeCreate(
+Java_com_alky_hifx_audio_NativeUsbBridge_nativeCreate(
     JNIEnv* env,
     jobject,
     jobject connection,
@@ -247,7 +247,7 @@ Java_com_example_hifx_audio_NativeUsbBridge_nativeCreate(
 }
 
 extern "C" JNIEXPORT jint JNICALL
-Java_com_example_hifx_audio_NativeUsbBridge_nativeWrite(
+Java_com_alky_hifx_audio_NativeUsbBridge_nativeWrite(
     JNIEnv* env,
     jobject,
     jlong handle,
@@ -270,7 +270,7 @@ Java_com_example_hifx_audio_NativeUsbBridge_nativeWrite(
         if (ensure_resampler_configured(env, backend, input_sample_rate_hz, output_sample_rate_hz, resample_algorithm) != 0) {
             return -1;
         }
-        transport_bytes = Java_com_example_hifx_audio_NativeUsbResamplerBridge_nativeProcessPcm16Stereo(
+        transport_bytes = Java_com_alky_hifx_audio_NativeUsbResamplerBridge_nativeProcessPcm16Stereo(
             env,
             nullptr,
             backend->resampler_handle,
@@ -294,7 +294,7 @@ Java_com_example_hifx_audio_NativeUsbBridge_nativeWrite(
 }
 
 extern "C" JNIEXPORT jstring JNICALL
-Java_com_example_hifx_audio_NativeUsbBridge_nativeGetLastError(
+Java_com_alky_hifx_audio_NativeUsbBridge_nativeGetLastError(
     JNIEnv* env,
     jobject,
     jlong handle
@@ -305,7 +305,7 @@ Java_com_example_hifx_audio_NativeUsbBridge_nativeGetLastError(
 }
 
 extern "C" JNIEXPORT void JNICALL
-Java_com_example_hifx_audio_NativeUsbBridge_nativeClose(
+Java_com_alky_hifx_audio_NativeUsbBridge_nativeClose(
     JNIEnv* env,
     jobject,
     jlong handle
@@ -323,7 +323,7 @@ Java_com_example_hifx_audio_NativeUsbBridge_nativeClose(
         backend->endpoint = nullptr;
     }
     if (backend->resampler_handle != 0L) {
-        Java_com_example_hifx_audio_NativeUsbResamplerBridge_nativeRelease(env, nullptr, backend->resampler_handle);
+        Java_com_alky_hifx_audio_NativeUsbResamplerBridge_nativeRelease(env, nullptr, backend->resampler_handle);
         backend->resampler_handle = 0L;
     }
     delete backend;

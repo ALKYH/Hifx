@@ -321,17 +321,17 @@ inline NativeVocalIsolationEngine* from_handle(jlong handle) {
 }  // namespace
 
 extern "C" JNIEXPORT jlong JNICALL
-Java_com_example_hifx_audio_NativeVocalIsolationBridge_nativeCreate(JNIEnv*, jobject) {
+Java_com_alky_hifx_audio_NativeVocalIsolationBridge_nativeCreate(JNIEnv*, jobject) {
     return reinterpret_cast<jlong>(new NativeVocalIsolationEngine());
 }
 
 extern "C" JNIEXPORT void JNICALL
-Java_com_example_hifx_audio_NativeVocalIsolationBridge_nativeRelease(JNIEnv*, jobject, jlong handle) {
+Java_com_alky_hifx_audio_NativeVocalIsolationBridge_nativeRelease(JNIEnv*, jobject, jlong handle) {
     delete from_handle(handle);
 }
 
 extern "C" JNIEXPORT void JNICALL
-Java_com_example_hifx_audio_NativeVocalIsolationBridge_nativeConfigure(
+Java_com_alky_hifx_audio_NativeVocalIsolationBridge_nativeConfigure(
     JNIEnv*,
     jobject,
     jlong handle,
@@ -344,7 +344,7 @@ Java_com_example_hifx_audio_NativeVocalIsolationBridge_nativeConfigure(
 }
 
 extern "C" JNIEXPORT void JNICALL
-Java_com_example_hifx_audio_NativeVocalIsolationBridge_nativeUpdateConfig(
+Java_com_alky_hifx_audio_NativeVocalIsolationBridge_nativeUpdateConfig(
     JNIEnv*,
     jobject,
     jlong handle,
@@ -364,7 +364,7 @@ Java_com_example_hifx_audio_NativeVocalIsolationBridge_nativeUpdateConfig(
 }
 
 extern "C" JNIEXPORT void JNICALL
-Java_com_example_hifx_audio_NativeVocalIsolationBridge_nativeProcess(
+Java_com_alky_hifx_audio_NativeVocalIsolationBridge_nativeProcess(
     JNIEnv* env,
     jobject,
     jlong handle,
@@ -386,7 +386,7 @@ Java_com_example_hifx_audio_NativeVocalIsolationBridge_nativeProcess(
 }
 
 extern "C" JNIEXPORT void JNICALL
-Java_com_example_hifx_audio_NativeVocalIsolationBridge_nativeFlush(JNIEnv*, jobject, jlong handle) {
+Java_com_alky_hifx_audio_NativeVocalIsolationBridge_nativeFlush(JNIEnv*, jobject, jlong handle) {
     if (auto* engine = from_handle(handle)) {
         engine->flush();
     }

@@ -88,7 +88,7 @@
                     android:textAppearance="?attr/textAppearanceLabelMedium" />
             </LinearLayout>
 
-            <com.example.hifx.ui.TopBarVisualizerView
+            <com.alky.hifx.ui.TopBarVisualizerView
                 android:id="@+id/view_stream_banner_visualizer"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
