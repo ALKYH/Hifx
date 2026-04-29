@@ -1,12 +1,16 @@
 package com.example.hifx.audio
 
+import android.Manifest
 import android.app.PendingIntent
+import android.bluetooth.BluetoothManager
+import android.bluetooth.BluetoothProfile
 import android.content.BroadcastReceiver
 import android.content.ContentUris
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.SharedPreferences
+import android.content.pm.PackageManager
 import android.hardware.usb.UsbConstants
 import android.hardware.usb.UsbDevice
 import android.hardware.usb.UsbManager
@@ -109,6 +113,7 @@ data class PlaybackUiState(
     val mediaUri: Uri? = null,
     val artworkUri: Uri? = null,
     val hasMedia: Boolean = false,
+    val playWhenReady: Boolean = false,
     val isPlaying: Boolean = false,
     val durationMs: Long = 0L,
     val positionMs: Long = 0L,
@@ -212,6 +217,8 @@ data class SettingsUiState(
     val hiFiMode: Boolean = true,
     val hiResApiEnabled: Boolean = true,
     val rememberPlaybackSessionEnabled: Boolean = true,
+    val rememberPlaybackTrackEnabled: Boolean = true,
+    val openPlayerOnTrackPlayEnabled: Boolean = false,
     val hapticFeedbackEnabled: Boolean = true,
     val hapticAudioEnabled: Boolean = false,
     val hapticAudioDelayMs: Int = 0,
@@ -220,6 +227,8 @@ data class SettingsUiState(
     val showLyricsScanHeadEnabled: Boolean = true,
     val showStreamInfoEnabled: Boolean = true,
     val showVisualizationEnabled: Boolean = true,
+    val visualizationFpsLimit30Enabled: Boolean = false,
+    val visualizationDelayMs: Int = 0,
     val topBarVisualizationMode: TopBarVisualizationMode = TopBarVisualizationMode.LEVEL_METER,
     val backgroundBlurStrength: Int = 80,
     val backgroundOpacityPercent: Int = 52,
@@ -254,6 +263,8 @@ data class SettingsUiState(
     val offloadSupported: Boolean = false,
     val audioPipelineDetails: String = "",
     val scanFolderUri: Uri? = null,
+    val scanFolderRelativePaths: List<String> = emptyList(),
+    val scanFolderRelativePath: String? = null,
     val scanFolderLabel: String = "全部媒体库",
     val themeMode: Int = AppCompatDelegate.MODE_NIGHT_FOLLOW_SYSTEM
 )
@@ -318,6 +329,9 @@ object AudioEngine {
     private const val KEY_HIFI_MODE = "key_hifi_mode"
     private const val KEY_HIRES_API_ENABLED = "key_hires_api_enabled"
     private const val KEY_REMEMBER_PLAYBACK_SESSION = "key_remember_playback_session"
+    private const val KEY_REMEMBER_PLAYBACK_STATE = "key_remember_playback_state"
+    private const val KEY_REMEMBER_PLAYBACK_TRACK = "key_remember_playback_track"
+    private const val KEY_OPEN_PLAYER_ON_TRACK_PLAY = "key_open_player_on_track_play"
     private const val KEY_HAPTIC_FEEDBACK = "key_haptic_feedback"
     private const val KEY_HAPTIC_AUDIO_ENABLED = "key_haptic_audio_enabled"
     private const val KEY_HAPTIC_AUDIO_DELAY_MS = "key_haptic_audio_delay_ms"
@@ -326,6 +340,8 @@ object AudioEngine {
     private const val KEY_SHOW_LYRICS_SCAN_HEAD = "key_show_lyrics_scan_head"
     private const val KEY_SHOW_STREAM_INFO = "key_show_stream_info"
     private const val KEY_SHOW_VISUALIZATION = "key_show_visualization"
+    private const val KEY_VISUALIZATION_FPS_LIMIT_30 = "key_visualization_fps_limit_30"
+    private const val KEY_VISUALIZATION_DELAY_MS = "key_visualization_delay_ms"
     private const val KEY_TOP_BAR_VISUALIZATION_MODE = "key_top_bar_visualization_mode"
     private const val KEY_BACKGROUND_BLUR_STRENGTH = "key_background_blur_strength"
     private const val KEY_BACKGROUND_OPACITY_PERCENT = "key_background_opacity_percent"
@@ -411,6 +427,8 @@ object AudioEngine {
     private const val KEY_CONVOLUTION_IR_URI = "key_convolution_ir_uri"
     private const val KEY_CONVOLUTION_IR_NAME = "key_convolution_ir_name"
     private const val KEY_SCAN_FOLDER_URI = "key_scan_folder_uri"
+    private const val KEY_SCAN_FOLDER_PATHS_JSON = "key_scan_folder_paths_json"
+    private const val KEY_SCAN_FOLDER_RELATIVE_PATH = "key_scan_folder_relative_path"
     private const val KEY_THEME_MODE = "key_theme_mode"
     private const val KEY_PLAYBACK_SHUFFLE = "key_playback_shuffle"
     private const val KEY_PLAYBACK_REPEAT_MODE = "key_playback_repeat_mode"
@@ -493,9 +511,12 @@ object AudioEngine {
     private var usbHostDirectOutput: UsbPcmOutputBackend? = null
     private var usbHostDirectBackendLabelCached: String = "none"
     private var usbHostDirectRouteLabelCached: String = "none"
+    private var bluetoothCodecLabelCached: String? = null
     private val playbackQueue = mutableListOf<LibraryTrack>()
     private var sleepTimerEndElapsedMs: Long? = null
     private var audioDeviceCallback: AudioDeviceCallback? = null
+    private var bluetoothA2dpProfile: BluetoothProfile? = null
+    private var bluetoothProfileListener: BluetoothProfile.ServiceListener? = null
     private var usbPermissionReceiver: BroadcastReceiver? = null
     private var usbPermissionReceiverRegistered = false
     private var bitPerfectBypassActive: Boolean = false
@@ -591,6 +612,13 @@ object AudioEngine {
         initialized = true
 
         val scanUri = prefs.getString(KEY_SCAN_FOLDER_URI, null)?.let(Uri::parse)
+        val storedScanFolderRelativePath = prefs.getString(KEY_SCAN_FOLDER_RELATIVE_PATH, null)
+        val scanFolderRelativePaths = parseScanFolderRelativePaths(
+            prefs.getString(KEY_SCAN_FOLDER_PATHS_JSON, null),
+            fallback = listOfNotNull(
+                normalizeScanFolderRelativePath(storedScanFolderRelativePath ?: resolveRelativePathPrefix(scanUri))
+            )
+        )
         val themeMode = prefs.getInt(KEY_THEME_MODE, AppCompatDelegate.MODE_NIGHT_FOLLOW_SYSTEM)
 
         val legacySpatialX = prefs.getInt(KEY_SPATIAL_X, 0).coerceIn(SPATIAL_COORD_MIN_CM, SPATIAL_COORD_MAX_CM)
@@ -740,10 +768,23 @@ object AudioEngine {
         } else {
             storedVisualizationMode
         }
+        val rememberPlaybackLegacy = prefs.getBoolean(KEY_REMEMBER_PLAYBACK_SESSION, true)
+        val rememberPlaybackStateEnabled = if (prefs.contains(KEY_REMEMBER_PLAYBACK_STATE)) {
+            prefs.getBoolean(KEY_REMEMBER_PLAYBACK_STATE, rememberPlaybackLegacy)
+        } else {
+            rememberPlaybackLegacy
+        }
+        val rememberPlaybackTrackEnabled = if (prefs.contains(KEY_REMEMBER_PLAYBACK_TRACK)) {
+            prefs.getBoolean(KEY_REMEMBER_PLAYBACK_TRACK, rememberPlaybackLegacy)
+        } else {
+            rememberPlaybackLegacy
+        }
         _settingsState.value = _settingsState.value.copy(
             hiFiMode = prefs.getBoolean(KEY_HIFI_MODE, true),
             hiResApiEnabled = prefs.getBoolean(KEY_HIRES_API_ENABLED, true),
-            rememberPlaybackSessionEnabled = prefs.getBoolean(KEY_REMEMBER_PLAYBACK_SESSION, true),
+            rememberPlaybackSessionEnabled = rememberPlaybackStateEnabled,
+            rememberPlaybackTrackEnabled = rememberPlaybackTrackEnabled,
+            openPlayerOnTrackPlayEnabled = prefs.getBoolean(KEY_OPEN_PLAYER_ON_TRACK_PLAY, false),
             hapticFeedbackEnabled = prefs.getBoolean(KEY_HAPTIC_FEEDBACK, true),
             hapticAudioEnabled = prefs.getBoolean(KEY_HAPTIC_AUDIO_ENABLED, false),
             hapticAudioDelayMs = prefs.getInt(KEY_HAPTIC_AUDIO_DELAY_MS, 0).coerceIn(-250, 250),
@@ -752,6 +793,8 @@ object AudioEngine {
             showLyricsScanHeadEnabled = prefs.getBoolean(KEY_SHOW_LYRICS_SCAN_HEAD, true),
             showStreamInfoEnabled = prefs.getBoolean(KEY_SHOW_STREAM_INFO, true),
             showVisualizationEnabled = prefs.getBoolean(KEY_SHOW_VISUALIZATION, true),
+            visualizationFpsLimit30Enabled = prefs.getBoolean(KEY_VISUALIZATION_FPS_LIMIT_30, false),
+            visualizationDelayMs = prefs.getInt(KEY_VISUALIZATION_DELAY_MS, 0).coerceIn(0, 250),
             topBarVisualizationMode = topBarVisualizationMode,
             backgroundBlurStrength = prefs.getInt(KEY_BACKGROUND_BLUR_STRENGTH, 80).coerceIn(0, 220),
             backgroundOpacityPercent = prefs.getInt(KEY_BACKGROUND_OPACITY_PERCENT, 52).coerceIn(0, 100),
@@ -768,18 +811,21 @@ object AudioEngine {
             preferredUsbDirectBitDepth = preferredBitDepth,
             preferredUsbResampleAlgorithm = preferredUsbResampleAlgorithm,
             usbExclusiveModeEnabled = prefs.getBoolean(KEY_USB_EXCLUSIVE_MODE, false),
-            scanFolderUri = scanUri,
-            scanFolderLabel = buildScanFolderLabel(scanUri),
-            themeMode = themeMode
-        )
+              scanFolderUri = scanUri,
+              scanFolderRelativePaths = scanFolderRelativePaths,
+              scanFolderRelativePath = scanFolderRelativePaths.firstOrNull(),
+              scanFolderLabel = buildScanFolderLabel(scanFolderRelativePaths),
+              themeMode = themeMode
+          )
 
         buildPlayer()
-        if (_settingsState.value.rememberPlaybackSessionEnabled) {
-            restoreLastPlaybackSession()
+        if (_settingsState.value.rememberPlaybackTrackEnabled) {
+            restoreLastPlaybackSession(_settingsState.value.rememberPlaybackSessionEnabled)
         } else {
             clearLastPlaybackSession()
         }
         registerAudioDeviceMonitor()
+        registerBluetoothCodecMonitor()
         registerUsbPermissionReceiver()
         restoreConvolutionImpulseIfNeeded(storedEffects.convolutionIrUri)
         refreshOutputInfo()
@@ -862,6 +908,38 @@ object AudioEngine {
         }
     }
 
+    private fun registerBluetoothCodecMonitor() {
+        if (bluetoothProfileListener != null) {
+            return
+        }
+        val adapter = appContext.getSystemService(BluetoothManager::class.java)?.adapter ?: return
+        val listener = object : BluetoothProfile.ServiceListener {
+            override fun onServiceConnected(profile: Int, proxy: BluetoothProfile) {
+                if (profile != BluetoothProfile.A2DP) {
+                    return
+                }
+                bluetoothA2dpProfile = proxy
+                refreshBluetoothCodecInfo()
+                refreshOutputInfo()
+            }
+
+            override fun onServiceDisconnected(profile: Int) {
+                if (profile != BluetoothProfile.A2DP) {
+                    return
+                }
+                bluetoothA2dpProfile = null
+                bluetoothCodecLabelCached = null
+                refreshOutputInfo()
+            }
+        }
+        val registered = runCatching {
+            adapter.getProfileProxy(appContext, listener, BluetoothProfile.A2DP)
+        }.getOrDefault(false)
+        if (registered) {
+            bluetoothProfileListener = listener
+        }
+    }
+
     private fun unregisterAudioDeviceMonitor() {
         val callback = audioDeviceCallback ?: return
         val audioManager = appContext.getSystemService(AudioManager::class.java) ?: return
@@ -869,6 +947,20 @@ object AudioEngine {
             audioManager.unregisterAudioDeviceCallback(callback)
         }
         audioDeviceCallback = null
+    }
+
+    private fun unregisterBluetoothCodecMonitor() {
+        bluetoothProfileListener ?: return
+        val adapter = appContext.getSystemService(BluetoothManager::class.java)?.adapter
+        val proxy = bluetoothA2dpProfile
+        if (adapter != null && proxy != null) {
+            runCatching {
+                adapter.closeProfileProxy(BluetoothProfile.A2DP, proxy)
+            }
+        }
+        bluetoothA2dpProfile = null
+        bluetoothProfileListener = null
+        bluetoothCodecLabelCached = null
     }
 
     private fun registerUsbPermissionReceiver() {
@@ -963,10 +1055,10 @@ object AudioEngine {
             scanFolderLabel = _settingsState.value.scanFolderLabel
         )
 
-        val scanFolderUri = _settingsState.value.scanFolderUri
+        val scanFolderRelativePaths = _settingsState.value.scanFolderRelativePaths
         scope.launch {
             val result = runCatching {
-                withContext(Dispatchers.IO) { queryTracks(scanFolderUri) }
+                withContext(Dispatchers.IO) { queryTracks(scanFolderRelativePaths) }
             }
             val tracks = result.getOrDefault(emptyList())
             val albums = tracks
@@ -996,17 +1088,91 @@ object AudioEngine {
     }
 
     fun setScanFolderUri(uri: Uri?) {
+        val relativePath = normalizeScanFolderRelativePath(resolveRelativePathPrefix(uri))
+        applyScanFolderSelection(
+            uri = uri,
+            relativePaths = mergeScanFolderRelativePaths(
+                _settingsState.value.scanFolderRelativePaths,
+                listOfNotNull(relativePath)
+            )
+        )
+    }
+
+    fun setScanFolderRelativePath(relativePath: String?) {
+        applyScanFolderSelection(
+            uri = null,
+            relativePaths = mergeScanFolderRelativePaths(
+                _settingsState.value.scanFolderRelativePaths,
+                listOfNotNull(normalizeScanFolderRelativePath(relativePath))
+            )
+        )
+    }
+
+    fun setScanFolderRelativePaths(relativePaths: List<String>) {
+        applyScanFolderSelection(
+            uri = _settingsState.value.scanFolderUri,
+            relativePaths = mergeScanFolderRelativePaths(emptyList(), relativePaths)
+        )
+    }
+
+    fun removeScanFolderRelativePath(relativePath: String) {
+        val normalized = normalizeScanFolderRelativePath(relativePath) ?: return
+        applyScanFolderSelection(
+            uri = _settingsState.value.scanFolderUri,
+            relativePaths = _settingsState.value.scanFolderRelativePaths.filterNot { it.equals(normalized, ignoreCase = true) }
+        )
+    }
+
+    fun clearScanFolders() {
+        applyScanFolderSelection(uri = null, relativePaths = emptyList())
+    }
+
+    fun getAvailableScanFolders(): List<String> {
+        if (!initialized) {
+            return emptyList()
+        }
+        val projection = arrayOf(MediaStore.Audio.Media.RELATIVE_PATH)
+        val selection = "${MediaStore.Audio.Media.IS_MUSIC} != 0 AND ${MediaStore.Audio.Media.DURATION} > 10000"
+        val folders = linkedSetOf<String>()
+        appContext.contentResolver.query(
+            MediaStore.Audio.Media.EXTERNAL_CONTENT_URI,
+            projection,
+            selection,
+            null,
+            "${MediaStore.Audio.Media.RELATIVE_PATH} COLLATE NOCASE ASC"
+        )?.use { cursor ->
+            val relativePathIndex = cursor.getColumnIndex(MediaStore.Audio.Media.RELATIVE_PATH)
+            while (cursor.moveToNext()) {
+                val rawPath = if (relativePathIndex >= 0) cursor.getString(relativePathIndex) else null
+                val normalized = normalizeScanFolderRelativePath(rawPath) ?: continue
+                folders += normalized
+            }
+        }
+        return folders.sortedBy { it.lowercase() }
+    }
+
+    private fun applyScanFolderSelection(uri: Uri?, relativePaths: List<String>) {
+        val normalizedPaths = mergeScanFolderRelativePaths(emptyList(), relativePaths)
         val editor = prefs.edit()
         if (uri == null) {
             editor.remove(KEY_SCAN_FOLDER_URI)
         } else {
             editor.putString(KEY_SCAN_FOLDER_URI, uri.toString())
         }
+        if (normalizedPaths.isEmpty()) {
+            editor.remove(KEY_SCAN_FOLDER_PATHS_JSON)
+            editor.remove(KEY_SCAN_FOLDER_RELATIVE_PATH)
+        } else {
+            editor.putString(KEY_SCAN_FOLDER_PATHS_JSON, serializeScanFolderRelativePaths(normalizedPaths))
+            editor.putString(KEY_SCAN_FOLDER_RELATIVE_PATH, normalizedPaths.first())
+        }
         editor.apply()
 
         _settingsState.value = _settingsState.value.copy(
             scanFolderUri = uri,
-            scanFolderLabel = buildScanFolderLabel(uri)
+            scanFolderRelativePaths = normalizedPaths,
+            scanFolderRelativePath = normalizedPaths.firstOrNull(),
+            scanFolderLabel = buildScanFolderLabel(normalizedPaths)
         )
         refreshLibrary()
     }
@@ -1225,10 +1391,41 @@ object AudioEngine {
             return
         }
         _settingsState.value = current.copy(rememberPlaybackSessionEnabled = enabled)
-        prefs.edit().putBoolean(KEY_REMEMBER_PLAYBACK_SESSION, enabled).apply()
+        prefs.edit()
+            .putBoolean(KEY_REMEMBER_PLAYBACK_STATE, enabled)
+            .apply()
+        if (!enabled) {
+            clearLastPlaybackState()
+        }
+    }
+
+    fun setRememberPlaybackTrackEnabled(enabled: Boolean) {
+        val current = _settingsState.value
+        if (current.rememberPlaybackTrackEnabled == enabled) {
+            return
+        }
+        _settingsState.value = current.copy(rememberPlaybackTrackEnabled = enabled)
+        prefs.edit()
+            .putBoolean(KEY_REMEMBER_PLAYBACK_TRACK, enabled)
+            .apply()
         if (!enabled) {
             clearLastPlaybackSession()
         }
+    }
+
+    fun setOpenPlayerOnTrackPlayEnabled(enabled: Boolean) {
+        val current = _settingsState.value
+        if (current.openPlayerOnTrackPlayEnabled == enabled) {
+            return
+        }
+        _settingsState.value = current.copy(openPlayerOnTrackPlayEnabled = enabled)
+        prefs.edit()
+            .putBoolean(KEY_OPEN_PLAYER_ON_TRACK_PLAY, enabled)
+            .apply()
+    }
+
+    fun shouldOpenPlayerOnTrackPlay(): Boolean {
+        return _settingsState.value.openPlayerOnTrackPlayEnabled
     }
 
     fun setHapticFeedbackEnabled(enabled: Boolean) {
@@ -1299,6 +1496,25 @@ object AudioEngine {
         }
         _settingsState.value = current.copy(showVisualizationEnabled = enabled)
         prefs.edit().putBoolean(KEY_SHOW_VISUALIZATION, enabled).apply()
+    }
+
+    fun setVisualizationFpsLimit30Enabled(enabled: Boolean) {
+        val current = _settingsState.value
+        if (current.visualizationFpsLimit30Enabled == enabled) {
+            return
+        }
+        _settingsState.value = current.copy(visualizationFpsLimit30Enabled = enabled)
+        prefs.edit().putBoolean(KEY_VISUALIZATION_FPS_LIMIT_30, enabled).apply()
+    }
+
+    fun setVisualizationDelayMs(delayMs: Int) {
+        val normalized = delayMs.coerceIn(0, 250)
+        val current = _settingsState.value
+        if (current.visualizationDelayMs == normalized) {
+            return
+        }
+        _settingsState.value = current.copy(visualizationDelayMs = normalized)
+        prefs.edit().putInt(KEY_VISUALIZATION_DELAY_MS, normalized).apply()
     }
 
     fun setShowStreamInfoEnabled(enabled: Boolean) {
@@ -1596,6 +1812,15 @@ object AudioEngine {
             _effectsState.value.copy(playbackSpeedPitchCompensationEnabled = enabled)
         )
         prefs.edit().putBoolean(KEY_PLAYBACK_SPEED_PITCH_COMPENSATION, enabled).apply()
+        applyPlaybackSpeed(_effectsState.value)
+    }
+
+    fun setTransientPlaybackSpeedPercent(value: Int) {
+        val normalizedPercent = value.coerceIn(25, 500)
+        val speed = normalizedPercent / 100f
+        val pitch = resolvePitchForSpeed(_effectsState.value, speed)
+        transientPlaybackSpeedOverride = speed
+        transientPlaybackPitchOverride = pitch
         applyPlaybackSpeed(_effectsState.value)
     }
 
@@ -2417,6 +2642,7 @@ object AudioEngine {
             return
         }
         val audioManager = appContext.getSystemService(AudioManager::class.java)
+        refreshBluetoothCodecInfo(audioManager)
         val sampleRate = audioManager
             ?.getProperty(AudioManager.PROPERTY_OUTPUT_SAMPLE_RATE)
             ?.toIntOrNull()
@@ -2503,11 +2729,13 @@ object AudioEngine {
         val isIsoDac = settings.usbHostDirectActive && hostRouteLabel.equals("ISO", ignoreCase = true)
         val useDirectDacTheme = settings.usbHostDirectActive
         val useDacAccent = settings.usbExclusiveActive || settings.usbCompatibilityActive || settings.usbHostDirectActive
+        val bluetoothCodecLabel = bluetoothCodecLabelCached
         val center = when {
             isIsoDac -> appContext.getString(R.string.stream_mode_iso_dac)
             settings.usbHostDirectActive -> appContext.getString(R.string.stream_mode_direct_dac)
             settings.usbCompatibilityActive -> appContext.getString(R.string.stream_mode_compat_dac)
             settings.usbExclusiveActive -> appContext.getString(R.string.stream_mode_bitperfect_dac)
+            !bluetoothCodecLabel.isNullOrBlank() -> bluetoothCodecLabel
             playback.isPlaying -> appContext.getString(R.string.stream_mode_android_audio)
             else -> ""
         }
@@ -2722,6 +2950,118 @@ object AudioEngine {
         }
     }
 
+    private fun refreshBluetoothCodecInfo(audioManager: AudioManager? = appContext.getSystemService(AudioManager::class.java)) {
+        bluetoothCodecLabelCached = resolveActiveBluetoothCodecLabel(audioManager)
+    }
+
+    private fun resolveActiveBluetoothCodecLabel(audioManager: AudioManager?): String? {
+        val bluetoothOutput = audioManager
+            ?.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
+            ?.firstOrNull { it.isBluetoothOutputDevice() }
+            ?: return null
+        val fallbackLabel = bluetoothOutput.fallbackBluetoothLabel()
+        if (bluetoothOutput.type != AudioDeviceInfo.TYPE_BLUETOOTH_A2DP) {
+            return fallbackLabel
+        }
+        if (!hasBluetoothConnectPermission()) {
+            return fallbackLabel
+        }
+        val a2dpProfile = bluetoothA2dpProfile ?: return fallbackLabel
+        val connectedDevice = a2dpProfile.connectedDevices.firstOrNull { profileDevice ->
+            bluetoothOutput.matchesBluetoothDevice(profileDevice)
+        } ?: a2dpProfile.connectedDevices.firstOrNull()
+        return connectedDevice?.let { readBluetoothCodecLabel(a2dpProfile, it) } ?: fallbackLabel
+    }
+
+    private fun readBluetoothCodecLabel(
+        profile: BluetoothProfile,
+        device: android.bluetooth.BluetoothDevice
+    ): String? {
+        val codecStatus = runCatching {
+            profile.javaClass.getMethod("getCodecStatus", device.javaClass)
+                .invoke(profile, device)
+        }.getOrNull() ?: return null
+        val codecConfig = runCatching {
+            codecStatus.javaClass.getMethod("getCodecConfig").invoke(codecStatus)
+        }.getOrNull() ?: return null
+        val codecType = runCatching {
+            codecConfig.javaClass.getMethod("getCodecType").invoke(codecConfig) as? Int
+        }.getOrNull() ?: return null
+        return bluetoothCodecTypeLabel(codecConfig, codecType)
+    }
+
+    private fun bluetoothCodecTypeLabel(codecConfig: Any, codecType: Int): String {
+        val codecFields = codecConfig.javaClass.fields
+            .filter { field ->
+                field.type == Int::class.javaPrimitiveType &&
+                    field.name.startsWith("SOURCE_CODEC_TYPE_")
+            }
+        val matchedField = codecFields.firstOrNull { field ->
+            runCatching { field.getInt(null) == codecType }.getOrDefault(false)
+        }
+        val rawName = matchedField?.name
+            ?.removePrefix("SOURCE_CODEC_TYPE_")
+            ?.replace('_', ' ')
+            ?.trim()
+            .orEmpty()
+        if (rawName.isBlank()) {
+            return "Bluetooth"
+        }
+        return when (rawName.uppercase()) {
+            "SBC" -> "SBC"
+            "AAC" -> "AAC"
+            "APTX" -> "aptX"
+            "APTX HD" -> "aptX HD"
+            "APTX ADAPTIVE" -> "aptX Adaptive"
+            "LDAC" -> "LDAC"
+            "LC3" -> "LC3"
+            "OPUS" -> "Opus"
+            else -> rawName.lowercase()
+                .split(' ')
+                .filter { it.isNotBlank() }
+                .joinToString(" ") { part -> part.replaceFirstChar { ch -> ch.uppercase() } }
+        }
+    }
+
+    private fun hasBluetoothConnectPermission(): Boolean {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            appContext.checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED
+        } else {
+            true
+        }
+    }
+
+    private fun AudioDeviceInfo.isBluetoothOutputDevice(): Boolean {
+        return when (type) {
+            AudioDeviceInfo.TYPE_BLUETOOTH_A2DP,
+            AudioDeviceInfo.TYPE_BLUETOOTH_SCO,
+            AudioDeviceInfo.TYPE_BLE_HEADSET,
+            AudioDeviceInfo.TYPE_BLE_SPEAKER,
+            AudioDeviceInfo.TYPE_BLE_BROADCAST -> true
+            else -> false
+        }
+    }
+
+    private fun AudioDeviceInfo.fallbackBluetoothLabel(): String {
+        return when (type) {
+            AudioDeviceInfo.TYPE_BLUETOOTH_A2DP -> "BT_A2DP"
+            AudioDeviceInfo.TYPE_BLUETOOTH_SCO -> "BT_SCO"
+            AudioDeviceInfo.TYPE_BLE_HEADSET -> "LE Audio"
+            AudioDeviceInfo.TYPE_BLE_SPEAKER -> "LE Audio"
+            AudioDeviceInfo.TYPE_BLE_BROADCAST -> "LE Broadcast"
+            else -> "Bluetooth"
+        }
+    }
+
+    private fun AudioDeviceInfo.matchesBluetoothDevice(device: android.bluetooth.BluetoothDevice): Boolean {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            address.equals(device.address, ignoreCase = true)
+        } else {
+            productName?.toString()?.trim().orEmpty()
+                .equals(device.name?.trim().orEmpty(), ignoreCase = true)
+        }
+    }
+
     private fun encodingToString(encoding: Int): String {
         return when (encoding) {
             AudioFormat.ENCODING_PCM_8BIT -> "PCM_8BIT"
@@ -2768,6 +3108,7 @@ object AudioEngine {
     fun release() {
         mainHandler.removeCallbacks(progressTicker)
         unregisterAudioDeviceMonitor()
+        unregisterBluetoothCodecMonitor()
         unregisterUsbPermissionReceiver()
         usbHostDirectOutput?.close()
         usbHostDirectOutput = null
@@ -3610,12 +3951,16 @@ object AudioEngine {
         }
         releasePlatformAudioEffects()
         currentAudioSessionId = audioSessionId
+        val state = _effectsState.value
+        val needsPlatformEffects = requiresPlatformAudioEffects(state)
 
-        equalizer = runCatching { Equalizer(0, audioSessionId) }.getOrNull()
-        bassBoost = runCatching { BassBoost(0, audioSessionId) }.getOrNull()
-        virtualizer = runCatching { Virtualizer(0, audioSessionId) }.getOrNull()
-        loudnessEnhancer = runCatching { LoudnessEnhancer(audioSessionId) }.getOrNull()
-        environmentalReverb = runCatching { EnvironmentalReverb(0, audioSessionId) }.getOrNull()
+        if (needsPlatformEffects) {
+            equalizer = runCatching { Equalizer(0, audioSessionId) }.getOrNull()
+            bassBoost = runCatching { BassBoost(0, audioSessionId) }.getOrNull()
+            virtualizer = runCatching { Virtualizer(0, audioSessionId) }.getOrNull()
+            loudnessEnhancer = runCatching { LoudnessEnhancer(audioSessionId) }.getOrNull()
+            environmentalReverb = runCatching { EnvironmentalReverb(0, audioSessionId) }.getOrNull()
+        }
         if (hapticAudioDriver == null) {
             hapticAudioDriver = HapticAudioDriver.createOrNull(
                 context = appContext,
@@ -3627,7 +3972,7 @@ object AudioEngine {
         }
 
         val eq = equalizer
-        if (eq != null) {
+        if (needsPlatformEffects && eq != null) {
             val range = eq.bandLevelRange
             val min = range.getOrNull(0)?.toInt() ?: -1500
             val max = range.getOrNull(1)?.toInt() ?: 1500
@@ -3646,6 +3991,10 @@ object AudioEngine {
         applyHapticAudioState()
         applyEffectState()
         syncPlaybackState()
+    }
+
+    private fun requiresPlatformAudioEffects(state: EffectsUiState): Boolean {
+        return state.enabled && (state.eqEnabled || state.spatialEnabled)
     }
 
     private fun releasePlatformAudioEffects() {
@@ -3743,6 +4092,32 @@ object AudioEngine {
             runCatching { environmentalReverb?.enabled = false }
             updateVocalIsolationProcessor(state.copy(enabled = false))
             updateStereoUtilityProcessor(state.copy(enabled = false))
+            return
+        }
+        if (!requiresPlatformAudioEffects(state)) {
+            player?.volume = 1f
+            if (
+                equalizer != null ||
+                bassBoost != null ||
+                virtualizer != null ||
+                loudnessEnhancer != null ||
+                environmentalReverb != null
+            ) {
+                releasePlatformAudioEffects()
+                val sessionId = player?.audioSessionId ?: C.AUDIO_SESSION_ID_UNSET
+                if (sessionId != C.AUDIO_SESSION_ID_UNSET) {
+                    currentAudioSessionId = sessionId
+                }
+                applyHapticAudioState()
+            }
+            updateVocalIsolationProcessor(state.copy(enabled = false))
+            updateHrtfProcessor(state.copy(enabled = false, spatialEnabled = false))
+            updateConvolutionProcessor(state.copy(enabled = false))
+            updateStereoUtilityProcessor(state.copy(enabled = false))
+            val derived = withSpatialDerived(state)
+            if (derived != state) {
+                _effectsState.value = derived
+            }
             return
         }
         val model = buildSpatialModel(state)
@@ -3936,10 +4311,22 @@ object AudioEngine {
 
     private fun applyPlaybackSpeed(state: EffectsUiState) {
         val baseSpeed = (state.playbackSpeedPercent / 100f).coerceIn(0.5f, 2.0f)
-        val basePitch = if (state.playbackSpeedPitchCompensationEnabled) 1f else baseSpeed
+        val basePitch = resolvePitchForSpeed(state, baseSpeed)
         val speed = transientPlaybackSpeedOverride ?: baseSpeed
         val pitch = transientPlaybackPitchOverride ?: basePitch
-        player?.setPlaybackParameters(PlaybackParameters(speed, pitch))
+        val currentPlayer = player ?: return
+        val currentParams = currentPlayer.playbackParameters
+        if (
+            kotlin.math.abs(currentParams.speed - speed) < 0.009f &&
+            kotlin.math.abs(currentParams.pitch - pitch) < 0.009f
+        ) {
+            return
+        }
+        currentPlayer.setPlaybackParameters(PlaybackParameters(speed, pitch))
+    }
+
+    private fun resolvePitchForSpeed(state: EffectsUiState, speed: Float): Float {
+        return if (state.playbackSpeedPitchCompensationEnabled) 1f else speed
     }
 
     private fun withSpatialDerived(state: EffectsUiState): EffectsUiState {
@@ -4710,7 +5097,7 @@ object AudioEngine {
         editor.apply()
     }
 
-    private fun restoreLastPlaybackSession() {
+    private fun restoreLastPlaybackSession(restorePlaybackState: Boolean) {
         val queueJson = prefs.getString(KEY_LAST_QUEUE_JSON, null).orEmpty()
         if (queueJson.isBlank()) {
             return
@@ -4751,8 +5138,16 @@ object AudioEngine {
 
         val currentPlayer = player ?: return
         val index = prefs.getInt(KEY_LAST_QUEUE_INDEX, 0).coerceIn(0, items.lastIndex)
-        val positionMs = prefs.getLong(KEY_LAST_POSITION_MS, 0L).coerceAtLeast(0L)
-        val playWhenReady = prefs.getBoolean(KEY_LAST_PLAY_WHEN_READY, true)
+        val positionMs = if (restorePlaybackState) {
+            prefs.getLong(KEY_LAST_POSITION_MS, 0L).coerceAtLeast(0L)
+        } else {
+            0L
+        }
+        val playWhenReady = if (restorePlaybackState) {
+            prefs.getBoolean(KEY_LAST_PLAY_WHEN_READY, true)
+        } else {
+            false
+        }
         playbackQueue.clear()
         playbackQueue.addAll(items.mapIndexed { i, mediaItem ->
             val metadata = mediaItem.mediaMetadata
@@ -4784,6 +5179,10 @@ object AudioEngine {
     }
 
     private fun persistPlaybackSessionIfNeeded(currentPlayer: ExoPlayer, hasMedia: Boolean, queueIndex: Int) {
+        if (!_settingsState.value.rememberPlaybackTrackEnabled) {
+            clearLastPlaybackSession()
+            return
+        }
         if (!hasMedia || currentPlayer.mediaItemCount <= 0) {
             clearLastPlaybackSession()
             return
@@ -4829,12 +5228,17 @@ object AudioEngine {
             clearLastPlaybackSession()
             return
         }
-        prefs.edit()
+        val editor = prefs.edit()
             .putString(KEY_LAST_QUEUE_JSON, queueJson.toString())
             .putInt(KEY_LAST_QUEUE_INDEX, queueIndex.coerceAtLeast(0))
-            .putLong(KEY_LAST_POSITION_MS, positionMs)
-            .putBoolean(KEY_LAST_PLAY_WHEN_READY, currentPlayer.playWhenReady)
-            .apply()
+        if (_settingsState.value.rememberPlaybackSessionEnabled) {
+            editor.putLong(KEY_LAST_POSITION_MS, positionMs)
+            editor.putBoolean(KEY_LAST_PLAY_WHEN_READY, currentPlayer.playWhenReady)
+        } else {
+            editor.remove(KEY_LAST_POSITION_MS)
+            editor.remove(KEY_LAST_PLAY_WHEN_READY)
+        }
+        editor.apply()
         lastPersistSignature = signature
         lastPersistPositionMs = positionMs
         lastPersistElapsedRealtimeMs = now
@@ -4855,6 +5259,20 @@ object AudioEngine {
             .remove(KEY_LAST_PLAY_WHEN_READY)
             .apply()
         lastPersistSignature = null
+        lastPersistPositionMs = -1L
+        lastPersistElapsedRealtimeMs = 0L
+    }
+
+    private fun clearLastPlaybackState() {
+        if (prefs.contains(KEY_LAST_POSITION_MS).not() &&
+            prefs.contains(KEY_LAST_PLAY_WHEN_READY).not()
+        ) {
+            return
+        }
+        prefs.edit()
+            .remove(KEY_LAST_POSITION_MS)
+            .remove(KEY_LAST_PLAY_WHEN_READY)
+            .apply()
         lastPersistPositionMs = -1L
         lastPersistElapsedRealtimeMs = 0L
     }
@@ -4882,6 +5300,7 @@ object AudioEngine {
         }
         val banner = formatStreamInfo(currentPlayer, _playbackState.value.copy(
             hasMedia = hasMedia,
+            playWhenReady = currentPlayer.playWhenReady,
             isPlaying = currentPlayer.isPlaying,
             title = title,
             subtitle = subtitle
@@ -4898,6 +5317,7 @@ object AudioEngine {
             mediaUri = currentPlayer.currentMediaItem?.localConfiguration?.uri,
             artworkUri = metadata?.artworkUri,
             hasMedia = hasMedia,
+            playWhenReady = currentPlayer.playWhenReady,
             isPlaying = currentPlayer.isPlaying,
             durationMs = if (currentPlayer.duration > 0L) currentPlayer.duration else 0L,
             positionMs = currentPlayer.currentPosition.coerceAtLeast(0L),
@@ -4919,7 +5339,7 @@ object AudioEngine {
             streamInfoUseIsoDacTheme = banner.useIsoDacTheme
         )
 
-        if (_settingsState.value.rememberPlaybackSessionEnabled) {
+        if (_settingsState.value.rememberPlaybackTrackEnabled) {
             if (hasMedia) {
                 persistPlaybackSessionIfNeeded(currentPlayer, hasMedia, queueIndex)
             }
@@ -4945,7 +5365,7 @@ object AudioEngine {
         player?.pause()
     }
 
-    private fun queryTracks(scanFolderUri: Uri?): List<LibraryTrack> {
+    private fun queryTracks(scanFolderRelativePaths: List<String>): List<LibraryTrack> {
         val projection = arrayOf(
             MediaStore.Audio.Media._ID,
             MediaStore.Audio.Media.TITLE,
@@ -4960,7 +5380,7 @@ object AudioEngine {
         val selection = "${MediaStore.Audio.Media.IS_MUSIC} != 0 AND ${MediaStore.Audio.Media.DURATION} > 10000"
         val sortOrder = "${MediaStore.Audio.Media.TITLE} COLLATE NOCASE ASC"
         val uri = MediaStore.Audio.Media.EXTERNAL_CONTENT_URI
-        val relativePathPrefix = resolveRelativePathPrefix(scanFolderUri)
+        val relativePathPrefixes = scanFolderRelativePaths.mapNotNull { buildRelativePathPrefix(it) }
         val tracks = mutableListOf<LibraryTrack>()
 
         appContext.contentResolver.query(uri, projection, selection, null, sortOrder)?.use { cursor ->
@@ -4976,8 +5396,11 @@ object AudioEngine {
 
             while (cursor.moveToNext()) {
                 val relativePath = if (relativePathIndex >= 0) cursor.getString(relativePathIndex).orEmpty() else ""
-                if (!relativePathPrefix.isNullOrBlank()) {
-                    if (relativePath.isBlank() || !relativePath.startsWith(relativePathPrefix, ignoreCase = true)) {
+                if (relativePathPrefixes.isNotEmpty()) {
+                    val matched = relativePath.isNotBlank() && relativePathPrefixes.any { prefix ->
+                        relativePath.startsWith(prefix, ignoreCase = true)
+                    }
+                    if (!matched) {
                         continue
                     }
                 }
@@ -5038,6 +5461,76 @@ object AudioEngine {
         val docId = runCatching { DocumentsContract.getTreeDocumentId(scanFolderUri) }.getOrNull() ?: return null
         val relative = docId.substringAfter(':', "").trim('/')
         return if (relative.isBlank()) null else "$relative/"
+    }
+
+    private fun buildScanFolderLabel(relativePath: String?): String {
+        val normalized = normalizeScanFolderRelativePath(relativePath)
+        return if (normalized == null) {
+            appContext.getString(R.string.library_scan_folder_default)
+        } else {
+            appContext.getString(R.string.library_scan_folder_format, normalized)
+        }
+    }
+
+    private fun buildRelativePathPrefix(relativePath: String?): String? {
+        val normalized = normalizeScanFolderRelativePath(relativePath)
+        return if (normalized == null) null else "$normalized/"
+    }
+
+    private fun normalizeScanFolderRelativePath(relativePath: String?): String? {
+        return relativePath
+            ?.replace('\\', '/')
+            ?.trim()
+            ?.trim('/')
+            ?.takeIf { it.isNotBlank() }
+    }
+
+    private fun buildScanFolderLabel(relativePaths: List<String>): String {
+        val normalizedPaths = mergeScanFolderRelativePaths(emptyList(), relativePaths)
+        return when {
+            normalizedPaths.isEmpty() -> appContext.getString(R.string.library_scan_folder_default)
+            normalizedPaths.size == 1 -> appContext.getString(
+                R.string.library_scan_folder_format,
+                normalizedPaths.first()
+            )
+            else -> appContext.getString(
+                R.string.library_scan_folder_multi_format,
+                normalizedPaths.size,
+                normalizedPaths.take(2).joinToString("、")
+            )
+        }
+    }
+
+    private fun mergeScanFolderRelativePaths(existing: List<String>, appended: List<String>): List<String> {
+        val merged = linkedSetOf<String>()
+        (existing + appended).forEach { rawPath ->
+            val normalized = normalizeScanFolderRelativePath(rawPath) ?: return@forEach
+            if (merged.none { it.equals(normalized, ignoreCase = true) }) {
+                merged += normalized
+            }
+        }
+        return merged.toList()
+    }
+
+    private fun serializeScanFolderRelativePaths(relativePaths: List<String>): String {
+        val arr = JSONArray()
+        mergeScanFolderRelativePaths(emptyList(), relativePaths).forEach { arr.put(it) }
+        return arr.toString()
+    }
+
+    private fun parseScanFolderRelativePaths(rawJson: String?, fallback: List<String> = emptyList()): List<String> {
+        if (rawJson.isNullOrBlank()) {
+            return mergeScanFolderRelativePaths(emptyList(), fallback)
+        }
+        val parsed = runCatching {
+            val arr = JSONArray(rawJson)
+            buildList {
+                for (index in 0 until arr.length()) {
+                    add(arr.optString(index))
+                }
+            }
+        }.getOrElse { fallback }
+        return mergeScanFolderRelativePaths(emptyList(), parsed)
     }
 
     private fun incrementTrackPlayCount(trackId: Long?) {

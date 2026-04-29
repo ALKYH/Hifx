@@ -1,6 +1,5 @@
 ﻿package com.example.hifx
 
-import android.content.Intent
 import android.graphics.Typeface
 import android.os.Bundle
 import android.view.LayoutInflater
@@ -8,8 +7,12 @@ import android.view.View
 import android.view.ViewGroup
 import android.widget.AdapterView
 import android.widget.ArrayAdapter
+import android.widget.LinearLayout
+import android.widget.ListView
+import android.widget.TextView
+import android.widget.Toast
+import androidx.appcompat.app.AlertDialog
 import androidx.activity.OnBackPressedCallback
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatDelegate
 import androidx.fragment.app.Fragment
 import androidx.lifecycle.Lifecycle
@@ -21,7 +24,9 @@ import com.example.hifx.audio.SettingsUiState
 import com.example.hifx.audio.TopBarVisualizationMode
 import com.example.hifx.databinding.FragmentSettingsBinding
 import com.example.hifx.util.AppHaptics
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlin.math.roundToInt
 
 class SettingsFragment : Fragment() {
@@ -48,18 +53,11 @@ class SettingsFragment : Fragment() {
         TopBarVisualizationMode.BARS
     )
 
-    private val openTreeLauncher =
-        registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
-            if (uri != null) {
-                runCatching {
-                    requireContext().contentResolver.takePersistableUriPermission(
-                        uri,
-                        Intent.FLAG_GRANT_READ_URI_PERMISSION
-                    )
-                }
-                AudioEngine.setScanFolderUri(uri)
-            }
-        }
+    private data class ScanFolderNode(
+        val path: String?,
+        val label: String,
+        val isUp: Boolean = false
+    )
 
     override fun onCreateView(
         inflater: LayoutInflater,
@@ -145,11 +143,11 @@ class SettingsFragment : Fragment() {
     private fun setupSettingActions() {
         binding.buttonSelectScanFolder.setOnClickListener {
             AppHaptics.click(it)
-            openTreeLauncher.launch(null)
+            showScanFolderExplorerDialog()
         }
         binding.buttonClearScanFolder.setOnClickListener {
             AppHaptics.click(it)
-            AudioEngine.setScanFolderUri(null)
+            showScanFolderManagerDialog()
         }
         binding.buttonRescanLibrary.setOnClickListener {
             AppHaptics.click(it)
@@ -171,6 +169,18 @@ class SettingsFragment : Fragment() {
             if (!internalUpdating) {
                 AppHaptics.click(requireContext())
                 AudioEngine.setRememberPlaybackSessionEnabled(isChecked)
+            }
+        }
+        binding.switchRememberTrack.setOnCheckedChangeListener { _, isChecked ->
+            if (!internalUpdating) {
+                AppHaptics.click(requireContext())
+                AudioEngine.setRememberPlaybackTrackEnabled(isChecked)
+            }
+        }
+        binding.switchOpenPlayerOnTrackPlay.setOnCheckedChangeListener { _, isChecked ->
+            if (!internalUpdating) {
+                AppHaptics.click(requireContext())
+                AudioEngine.setOpenPlayerOnTrackPlayEnabled(isChecked)
             }
         }
         binding.switchHapticFeedback.setOnCheckedChangeListener { _, isChecked ->
@@ -229,6 +239,23 @@ class SettingsFragment : Fragment() {
                 AppHaptics.click(requireContext())
                 AudioEngine.setShowVisualizationEnabled(isChecked)
             }
+        }
+        binding.switchVisualizationLimit30Fps.setOnCheckedChangeListener { _, isChecked ->
+            if (!internalUpdating) {
+                AppHaptics.click(requireContext())
+                AudioEngine.setVisualizationFpsLimit30Enabled(isChecked)
+            }
+        }
+        binding.sliderVisualizationDelay.addOnChangeListener { _, value, fromUser ->
+            val delayMs = value.roundToInt()
+            binding.textVisualizationDelayValue.text = getString(
+                R.string.settings_visualization_delay_value_format,
+                delayMs
+            )
+            if (!fromUser || internalUpdating) {
+                return@addOnChangeListener
+            }
+            AudioEngine.setVisualizationDelayMs(delayMs)
         }
         binding.switchShowStreamInfo.setOnCheckedChangeListener { _, isChecked ->
             if (!internalUpdating) {
@@ -431,10 +458,13 @@ class SettingsFragment : Fragment() {
 
     private fun renderSettings(state: SettingsUiState) {
         internalUpdating = true
-        binding.textScanFolder.text = state.scanFolderLabel
+        binding.textScanFolder.text = buildScanFolderSummary(state)
+        binding.buttonClearScanFolder.isEnabled = true
         binding.switchHiFi.isChecked = state.hiFiMode
         binding.switchHiResApi.isChecked = state.hiResApiEnabled
         binding.switchRememberPlayback.isChecked = state.rememberPlaybackSessionEnabled
+        binding.switchRememberTrack.isChecked = state.rememberPlaybackTrackEnabled
+        binding.switchOpenPlayerOnTrackPlay.isChecked = state.openPlayerOnTrackPlayEnabled
         binding.switchHapticFeedback.isChecked = state.hapticFeedbackEnabled
         binding.switchHapticAudio.isChecked = state.hapticAudioEnabled
         binding.sliderHapticAudioDelay.value = state.hapticAudioDelayMs.toFloat()
@@ -448,6 +478,14 @@ class SettingsFragment : Fragment() {
         binding.switchShowLyricsScanHead.isChecked = state.showLyricsScanHeadEnabled
         binding.switchShowStreamInfo.isChecked = state.showStreamInfoEnabled
         binding.switchShowVisualization.isChecked = state.showVisualizationEnabled
+        binding.switchVisualizationLimit30Fps.isChecked = state.visualizationFpsLimit30Enabled
+        binding.switchVisualizationLimit30Fps.isEnabled = state.showVisualizationEnabled
+        binding.sliderVisualizationDelay.value = state.visualizationDelayMs.toFloat()
+        binding.sliderVisualizationDelay.isEnabled = state.showVisualizationEnabled
+        binding.textVisualizationDelayValue.text = getString(
+            R.string.settings_visualization_delay_value_format,
+            state.visualizationDelayMs
+        )
         val visualizationModeIndex = visualizationModeOptions.indexOf(state.topBarVisualizationMode).coerceAtLeast(0)
         binding.spinnerVisualizationMode.setSelection(visualizationModeIndex, false)
         binding.switchBackgroundDynamic.isChecked = state.backgroundDynamicEnabled
@@ -593,6 +631,182 @@ class SettingsFragment : Fragment() {
             "• " + points.distinct().joinToString(separator = "\n• ")
         }
     }
+
+    private fun showScanFolderManagerDialog() {
+        viewLifecycleOwner.lifecycleScope.launch {
+            if (!isAdded) {
+                return@launch
+            }
+            val currentFolders = AudioEngine.settingsState.value.scanFolderRelativePaths
+            if (currentFolders.isEmpty()) {
+                Toast.makeText(
+                    requireContext(),
+                    R.string.settings_library_remove_scan_path_empty,
+                    Toast.LENGTH_SHORT
+                ).show()
+                return@launch
+            }
+            val selected = BooleanArray(currentFolders.size)
+            MaterialAlertDialogBuilder(requireContext())
+                .setTitle(R.string.settings_library_manage_scan_paths_title)
+                .setMultiChoiceItems(currentFolders.toTypedArray(), selected) { _, which, isChecked ->
+                    selected[which] = isChecked
+                }
+                .setPositiveButton(R.string.action_remove_selected_paths) { _, _ ->
+                    val remaining = currentFolders.filterIndexed { index, _ -> !selected[index] }
+                    AudioEngine.setScanFolderRelativePaths(remaining)
+                }
+                .setNeutralButton(R.string.settings_library_clear_scan_paths) { _, _ ->
+                    AudioEngine.clearScanFolders()
+                }
+                .setNegativeButton(android.R.string.cancel, null)
+                .show()
+        }
+    }
+
+    private fun showScanFolderExplorerDialog() {
+        viewLifecycleOwner.lifecycleScope.launch {
+            val folders = withContext(Dispatchers.IO) { AudioEngine.getAvailableScanFolders() }
+            if (!isAdded) {
+                return@launch
+            }
+            if (folders.isEmpty()) {
+                Toast.makeText(
+                    requireContext(),
+                    R.string.library_scan_folder_picker_empty,
+                    Toast.LENGTH_SHORT
+                ).show()
+                return@launch
+            }
+
+            var currentPath: String? = null
+            var currentNodes: List<ScanFolderNode> = emptyList()
+            val context = requireContext()
+            val pathView = TextView(context).apply {
+                setTextAppearance(com.google.android.material.R.style.TextAppearance_Material3_BodyMedium)
+                setPadding(0, 0, 0, dp(12f))
+            }
+            val listView = ListView(context).apply {
+                dividerHeight = 0
+            }
+            val container = LinearLayout(context).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(dp(4f), dp(8f), dp(4f), 0)
+                addView(
+                    pathView,
+                    LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT
+                    )
+                )
+                addView(
+                    listView,
+                    LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        dp(320f)
+                    )
+                )
+            }
+
+            lateinit var dialog: AlertDialog
+            fun render() {
+                pathView.text = currentPath?.let {
+                    getString(R.string.settings_library_scan_folder_current, it)
+                } ?: getString(R.string.settings_library_scan_folder_root)
+                currentNodes = buildScanFolderNodes(folders, currentPath)
+                listView.adapter = ArrayAdapter(
+                    context,
+                    android.R.layout.simple_list_item_1,
+                    currentNodes.map { it.label }
+                )
+                dialog.getButton(AlertDialog.BUTTON_POSITIVE)?.isEnabled = !currentPath.isNullOrBlank()
+            }
+
+            listView.setOnItemClickListener { _, _, position, _ ->
+                val node = currentNodes.getOrNull(position) ?: return@setOnItemClickListener
+                currentPath = if (node.isUp) {
+                    parentScanFolderPath(currentPath)
+                } else {
+                    node.path
+                }
+                render()
+            }
+
+            dialog = MaterialAlertDialogBuilder(context)
+                .setTitle(R.string.settings_library_select_scan_folder_title)
+                .setView(container)
+                .setPositiveButton(R.string.action_add_scan_path, null)
+                .setNegativeButton(android.R.string.cancel, null)
+                .show()
+            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+                val selectedPath = currentPath ?: return@setOnClickListener
+                val alreadyAdded = AudioEngine.settingsState.value.scanFolderRelativePaths.any {
+                    it.equals(selectedPath, ignoreCase = true)
+                }
+                if (alreadyAdded) {
+                    Toast.makeText(
+                        context,
+                        R.string.settings_library_scan_folder_already_added,
+                        Toast.LENGTH_SHORT
+                    ).show()
+                    return@setOnClickListener
+                }
+                AudioEngine.setScanFolderRelativePath(selectedPath)
+                Toast.makeText(
+                    context,
+                    getString(R.string.settings_library_scan_folder_added, selectedPath),
+                    Toast.LENGTH_SHORT
+                ).show()
+                dialog.dismiss()
+            }
+            render()
+        }
+    }
+
+    private fun buildScanFolderNodes(allFolders: List<String>, currentPath: String?): List<ScanFolderNode> {
+        val nodes = mutableListOf<ScanFolderNode>()
+        if (!currentPath.isNullOrBlank()) {
+            nodes += ScanFolderNode(
+                path = parentScanFolderPath(currentPath),
+                label = getString(R.string.action_scan_path_up),
+                isUp = true
+            )
+        }
+        val prefix = currentPath?.let { "$it/" }.orEmpty()
+        val children = linkedSetOf<String>()
+        allFolders.forEach { folder ->
+            if (currentPath.isNullOrBlank()) {
+                children += folder.substringBefore('/')
+            } else if (folder.startsWith(prefix, ignoreCase = true)) {
+                val remainder = folder.removePrefix(prefix)
+                if (remainder.isNotBlank()) {
+                    children += remainder.substringBefore('/')
+                }
+            }
+        }
+        children.sortedBy { it.lowercase() }.forEach { child ->
+            val path = if (currentPath.isNullOrBlank()) child else "$currentPath/$child"
+            nodes += ScanFolderNode(path = path, label = child)
+        }
+        return nodes
+    }
+
+    private fun parentScanFolderPath(path: String?): String? {
+        val current = path?.trim('/')?.takeIf { it.isNotBlank() } ?: return null
+        val parent = current.substringBeforeLast('/', "")
+        return parent.takeIf { it.isNotBlank() }
+    }
+
+    private fun dp(value: Float): Int = (value * resources.displayMetrics.density).roundToInt()
+
+    private fun buildScanFolderSummary(state: SettingsUiState): String {
+        if (state.scanFolderRelativePaths.isEmpty()) {
+            return state.scanFolderLabel
+        }
+        val detailLines = state.scanFolderRelativePaths.joinToString(separator = "\n") { "• $it" }
+        return state.scanFolderLabel + "\n" + detailLines
+    }
+
     private fun openSection(section: SettingsSection) {
         selectedSection = section
         binding.layoutRootMenu.visibility = View.GONE

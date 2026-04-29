@@ -424,21 +424,20 @@ class LyricMaskTextView @JvmOverloads constructor(
                 val lineEnd = textLayout.getLineEnd(line).coerceAtMost(unit.end)
                 if (lineEnd <= cursor) break
 
-                val startX = textLayout.getPrimaryHorizontal(cursor)
-                val endX = textLayout.getPrimaryHorizontal(lineEnd)
                 val measuredAdvance = paint.measureText(content, cursor, lineEnd).coerceAtLeast(0f)
-                val rtl = endX < startX
-                val rawLeft = min(startX, endX)
-                val rawRight = max(startX, endX)
+                val startX = textLayout.getPrimaryHorizontal(cursor)
+                val rtl = textLayout.isRtlCharAt(cursor)
+                val lineLeft = min(textLayout.getLineLeft(line), textLayout.getLineRight(line))
+                val lineRight = max(textLayout.getLineLeft(line), textLayout.getLineRight(line))
                 val left = if (rtl) {
-                    rawRight - measuredAdvance.coerceAtLeast(rawRight - rawLeft)
+                    (startX - measuredAdvance).coerceIn(lineLeft, lineRight)
                 } else {
-                    rawLeft
+                    startX.coerceIn(lineLeft, lineRight)
                 }
                 val right = if (rtl) {
-                    rawRight
+                    startX.coerceIn(left, lineRight)
                 } else {
-                    rawLeft + measuredAdvance.coerceAtLeast(rawRight - rawLeft)
+                    (startX + measuredAdvance).coerceIn(left, lineRight)
                 }
                 if ((right - left) > 0.001f) {
                     val clipPadding = (textSize * 0.055f).coerceIn(0.75f, 3.5f)

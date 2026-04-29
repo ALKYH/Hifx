@@ -108,25 +108,19 @@ class PlaybackFragment : Fragment() {
                 } else {
                     AudioEngine.playTrack(track)
                 }
-                startActivity(Intent(requireContext(), PlayerActivity::class.java))
+                if (AudioEngine.shouldOpenPlayerOnTrackPlay()) {
+                    startActivity(Intent(requireContext(), PlayerActivity::class.java))
+                }
             },
             onEntityClick = { row ->
                 AppHaptics.click(requireContext())
                 when (row.entityType) {
                     LibraryEntityType.ALBUM -> {
-                        parentFragmentManager.beginTransaction()
-                            .setReorderingAllowed(true)
-                            .replace(R.id.fragment_container, AlbumDetailFragment.newInstance(row.title))
-                            .addToBackStack(null)
-                            .commit()
+                        (activity as? MainActivity)?.openAlbumDetail(row.title)
                     }
 
                     LibraryEntityType.ARTIST -> {
-                        parentFragmentManager.beginTransaction()
-                            .setReorderingAllowed(true)
-                            .replace(R.id.fragment_container, ArtistDetailFragment.newInstance(row.title))
-                            .addToBackStack(null)
-                            .commit()
+                        (activity as? MainActivity)?.openArtistDetail(row.title)
                     }
                 }
             }
@@ -221,7 +215,10 @@ class PlaybackFragment : Fragment() {
             syncBottomNavWithKeyboard()
             insets
         }
-        binding.root.post { ViewCompat.requestApplyInsets(binding.root) }
+        val rootView = binding.root
+        rootView.post {
+            _binding?.root?.takeIf { it === rootView }?.let(ViewCompat::requestApplyInsets)
+        }
     }
 
     private fun syncBottomNavWithKeyboard() {
@@ -248,7 +245,12 @@ class PlaybackFragment : Fragment() {
         }
         miniPlayerPreDrawListener = preDrawListener
         binding.root.viewTreeObserver.addOnPreDrawListener(preDrawListener)
-        binding.layoutFloatingTopControls.post { updateFloatingControlsBottomSpacing() }
+        val floatingControls = binding.layoutFloatingTopControls
+        floatingControls.post {
+            _binding?.layoutFloatingTopControls
+                ?.takeIf { it === floatingControls }
+                ?.let { updateFloatingControlsBottomSpacing() }
+        }
     }
 
     private fun detachMiniPlayerAnchorTracking() {
@@ -518,8 +520,11 @@ class PlaybackFragment : Fragment() {
             pendingLibraryListState = null
             libraryListRestoreScheduled = true
             binding.recyclerLibrary.layoutManager?.onRestoreInstanceState(restoreState)
-            binding.recyclerLibrary.post {
-                libraryListRestoreScheduled = false
+            val recyclerView = binding.recyclerLibrary
+            recyclerView.post {
+                if (_binding?.recyclerLibrary === recyclerView) {
+                    libraryListRestoreScheduled = false
+                }
             }
         }
 

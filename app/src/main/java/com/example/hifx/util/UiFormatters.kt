@@ -52,7 +52,8 @@ private data class ArtworkRequest(
     val uriKey: String,
     val cacheKey: String,
     val targetWidthPx: Int,
-    val targetHeightPx: Int
+    val targetHeightPx: Int,
+    val preferredConfig: Bitmap.Config
 )
 
 private data class PendingTarget(
@@ -73,26 +74,34 @@ private object ArtworkLoader {
     fun getBitmap(key: String): Bitmap? = cache.get(key)
 
     fun buildRequest(imageView: ImageView, uri: Uri): ArtworkRequest {
+        val decodeMaxPx = (imageView.getTag(R.id.tag_artwork_decode_max_px) as? Int)
+            ?.coerceIn(MIN_DECODE_DIMENSION_PX, MAX_DECODE_DIMENSION_PX)
+            ?: MAX_DECODE_DIMENSION_PX
+        val preferRgb565 = imageView.getTag(R.id.tag_artwork_decode_rgb565) == true
         val targetWidth = resolveTargetDimensionPx(
             primary = imageView.width,
             secondary = imageView.measuredWidth,
             layoutParam = imageView.layoutParams?.width ?: ViewGroup.LayoutParams.WRAP_CONTENT,
-            fallback = imageView.resources.displayMetrics.widthPixels
+            fallback = imageView.resources.displayMetrics.widthPixels,
+            maxDimensionPx = decodeMaxPx
         )
         val targetHeight = resolveTargetDimensionPx(
             primary = imageView.height,
             secondary = imageView.measuredHeight,
             layoutParam = imageView.layoutParams?.height ?: ViewGroup.LayoutParams.WRAP_CONTENT,
-            fallback = imageView.resources.displayMetrics.heightPixels
+            fallback = imageView.resources.displayMetrics.heightPixels,
+            maxDimensionPx = decodeMaxPx
         )
         val bucketWidth = bucketSizePx(targetWidth)
         val bucketHeight = bucketSizePx(targetHeight)
+        val preferredConfig = if (preferRgb565) Bitmap.Config.RGB_565 else Bitmap.Config.ARGB_8888
         return ArtworkRequest(
             uri = uri,
             uriKey = uri.toString(),
-            cacheKey = uri.toString() + "#" + bucketWidth + "x" + bucketHeight,
+            cacheKey = uri.toString() + "#" + bucketWidth + "x" + bucketHeight + "#" + preferredConfig.name,
             targetWidthPx = bucketWidth,
-            targetHeightPx = bucketHeight
+            targetHeightPx = bucketHeight,
+            preferredConfig = preferredConfig
         )
     }
 
@@ -165,7 +174,7 @@ private object ArtworkLoader {
                 requestedWidth = request.targetWidthPx,
                 requestedHeight = request.targetHeightPx
             )
-            inPreferredConfig = Bitmap.Config.ARGB_8888
+            inPreferredConfig = request.preferredConfig
         }
         return resolver.openInputStream(request.uri)?.use { input ->
             BitmapFactory.decodeStream(input, null, decodeOptions)
@@ -198,12 +207,13 @@ private object ArtworkLoader {
         primary: Int,
         secondary: Int,
         layoutParam: Int,
-        fallback: Int
+        fallback: Int,
+        maxDimensionPx: Int
     ): Int {
         return listOf(primary, secondary, layoutParam)
             .firstOrNull { it > 0 }
-            ?.coerceAtMost(MAX_DECODE_DIMENSION_PX)
-            ?: fallback.coerceIn(MIN_DECODE_DIMENSION_PX, MAX_DECODE_DIMENSION_PX)
+            ?.coerceAtMost(maxDimensionPx)
+            ?: fallback.coerceIn(MIN_DECODE_DIMENSION_PX, maxDimensionPx)
     }
 
     private fun bucketSizePx(sizePx: Int): Int {

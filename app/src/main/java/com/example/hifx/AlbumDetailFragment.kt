@@ -48,7 +48,9 @@ class AlbumDetailFragment : Fragment() {
         adapter = DetailTrackAdapter(showAlbumInMeta = false) { track ->
             val idx = currentTracks.indexOfFirst { it.id == track.id }.coerceAtLeast(0)
             AudioEngine.playTrackList(currentTracks, idx)
-            startActivity(Intent(requireContext(), PlayerActivity::class.java))
+            if (AudioEngine.shouldOpenPlayerOnTrackPlay()) {
+                startActivity(Intent(requireContext(), PlayerActivity::class.java))
+            }
         }
         recycler.layoutManager = LinearLayoutManager(requireContext())
         recycler.adapter = adapter

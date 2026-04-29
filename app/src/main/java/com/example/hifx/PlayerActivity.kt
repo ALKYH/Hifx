@@ -13,6 +13,7 @@ import android.graphics.RectF
 import android.graphics.RenderEffect
 import android.graphics.Shader
 import android.graphics.drawable.BitmapDrawable
+import android.graphics.drawable.GradientDrawable
 import android.graphics.Typeface
 import android.media.MediaMetadataRetriever
 import android.net.Uri
@@ -32,6 +33,7 @@ import android.view.animation.DecelerateInterpolator
 import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.LinearLayout
+import android.widget.TextView
 import android.view.animation.LinearInterpolator
 import android.util.TypedValue
 import android.text.SpannableStringBuilder
@@ -119,6 +121,7 @@ class PlayerActivity : AppCompatActivity() {
         private const val TAG = "PlayerLyrics"
         private const val MAX_WAVEFORM_CACHE_ENTRIES = 12
         private const val WAVEFORM_PREWARM_NEIGHBOR_COUNT = 1
+        private const val BACKGROUND_ARTWORK_DECODE_MAX_PX = 960
         private const val COLLAPSED_COVER_SIZE_DP = 104f * 2f / 3f
         private const val COVER_CORNER_RADIUS_DP = 22f
         private const val MINI_COVER_CORNER_RADIUS_DP = 6f
@@ -127,6 +130,7 @@ class PlayerActivity : AppCompatActivity() {
         private const val MINI_MORPH_OVERLAY_ALPHA = 0.9f
         private const val LYRICS_AUTO_RETURN_DELAY_MS = 4_000L
         private const val SHUTTLE_MAX_SPEED = 5f
+        private const val SHUTTLE_FORWARD_AUDIO_MAX_SPEED = 3.25f
         private const val SHUTTLE_TICK_MS = 45L
         private const val SHUTTLE_INERTIA_MS = 260L
         private const val SHUTTLE_ACCELERATION_MS = 2_000f
@@ -144,6 +148,8 @@ class PlayerActivity : AppCompatActivity() {
     private lateinit var binding: ActivityPlayerBinding
     private lateinit var transitionUnderlayView: ImageView
     private lateinit var playerMaskContainer: FrameLayout
+    private lateinit var backgroundCrossfadeView: ImageView
+    private lateinit var shuttleSpeedIndicatorView: TextView
     private var userSeeking = false
     private var lastArtworkKey: String? = null
     private var lastMediaKey: String? = null
@@ -176,6 +182,11 @@ class PlayerActivity : AppCompatActivity() {
     private var shuttleActiveDirection: ShuttleDirection? = null
     private var shuttleLongPressTriggered = false
     private var shuttleLastSpeed = 1f
+    private var shuttleAppliedAudioSpeed = 1f
+    private var shuttleWasPlayingBeforeLongPress = false
+    private var shuttleDisplayPositionMs: Long? = null
+    private var shuttleDisplayActive = false
+    private var shuttleDisplayHoldUntilUptimeMs = 0L
     private var lyricsExpanded = false
     private var lyricsPanelAnimator: ValueAnimator? = null
     private lateinit var lyricsLayoutManager: LinearLayoutManager
@@ -207,6 +218,7 @@ class PlayerActivity : AppCompatActivity() {
     private var lyricSettleLastFrameUptimeMs = 0L
     private var lyricsTranslationSwitchInProgress = false
     private var lyricsTranslationSwitchJob: Job? = null
+    private var lyricsTranslationRelayoutJob: Job? = null
     private val lyricLineOffsetsPx = mutableMapOf<Int, Float>()
     private val lyricLineVelocitiesPxPerSec = mutableMapOf<Int, Float>()
     private var albumDefaultHeightPx: Int = 0
@@ -247,17 +259,51 @@ class PlayerActivity : AppCompatActivity() {
             clipChildren = false
             clipToPadding = false
         }
+        backgroundCrossfadeView = ImageView(this).apply {
+            layoutParams = FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+            )
+            scaleType = ImageView.ScaleType.CENTER_CROP
+            alpha = 0f
+            visibility = View.GONE
+            setTag(R.id.tag_artwork_decode_max_px, BACKGROUND_ARTWORK_DECODE_MAX_PX)
+            setTag(R.id.tag_artwork_decode_rgb565, true)
+            importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+        }
+        shuttleSpeedIndicatorView = TextView(this).apply {
+            layoutParams = FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+            alpha = 0f
+            visibility = View.GONE
+            setPadding(dp(12f), dp(7f), dp(12f), dp(7f))
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.RECTANGLE
+                cornerRadius = dp(16f).toFloat()
+                setColor(ColorUtils.setAlphaComponent(Color.BLACK, 168))
+            }
+            setTextColor(Color.WHITE)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+            typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+            importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+        }
         val movableChildren = buildList<View> {
             add(binding.imagePlayerBg)
             add(binding.viewPlayerBgOverlay)
             add(binding.scrollPlayer)
             add(binding.waveformPreviewCard)
         }
+        playerMaskContainer.addView(backgroundCrossfadeView)
         movableChildren.forEach { child ->
             binding.root.removeView(child)
             playerMaskContainer.addView(child)
         }
+        playerMaskContainer.addView(shuttleSpeedIndicatorView)
         binding.root.addView(playerMaskContainer, 1)
+        binding.imagePlayerBg.setTag(R.id.tag_artwork_decode_max_px, BACKGROUND_ARTWORK_DECODE_MAX_PX)
+        binding.imagePlayerBg.setTag(R.id.tag_artwork_decode_rgb565, true)
         transitionUnderlaySnapshot = PlayerTransitionState.consumeBackgroundSnapshot()
         transitionUnderlayView.setImageBitmap(transitionUnderlaySnapshot)
         transitionUnderlayView.post { updateTransitionUnderlayMatrix() }
@@ -391,6 +437,8 @@ class PlayerActivity : AppCompatActivity() {
                         shuttleLongPressTriggered = true
                         AppHaptics.click(view)
                         startTrackShuttle(direction)
+                        view.isPressed = false
+                        animateTransportButtonPressed(view, pressed = false)
                     }
                     view.isPressed = true
                     true
@@ -443,13 +491,22 @@ class PlayerActivity : AppCompatActivity() {
         shuttleDriveJob?.cancel()
         shuttleActiveDirection = direction
         shuttleLastSpeed = 1f
-        AudioEngine.play()
+        shuttleAppliedAudioSpeed = 1f
+        shuttleDisplayActive = true
+        shuttleDisplayHoldUntilUptimeMs = 0L
+        shuttleDisplayPositionMs = currentDisplayedPlaybackPosition(latestDurationMs.coerceAtLeast(1L))
+        shuttleWasPlayingBeforeLongPress = AudioEngine.playbackState.value.isPlaying
+        if (direction == ShuttleDirection.FORWARD && !shuttleWasPlayingBeforeLongPress) {
+            AudioEngine.play()
+        }
+        showShuttleSpeedIndicator(direction, 1f)
         shuttleDriveJob = lifecycleScope.launch {
             while (true) {
                 val heldMs = (SystemClock.uptimeMillis() - shuttlePressStartUptimeMs).coerceAtLeast(0L)
                 val speed = computeTrackShuttleSpeed(heldMs)
                 shuttleLastSpeed = speed
                 applyTrackShuttleFrame(direction, speed, SHUTTLE_TICK_MS)
+                showShuttleSpeedIndicator(direction, speed)
                 delay(SHUTTLE_TICK_MS)
             }
         }
@@ -463,8 +520,12 @@ class PlayerActivity : AppCompatActivity() {
         shuttleActiveDirection = null
         if (!withInertia || direction == null || startSpeed <= 1.02f) {
             shuttleInertiaJob?.cancel()
+            shuttleDisplayActive = false
+            shuttleDisplayHoldUntilUptimeMs = SystemClock.uptimeMillis() + 420L
             AudioEngine.clearTransientPlaybackSpeedOverride()
             shuttleLastSpeed = 1f
+            shuttleAppliedAudioSpeed = 1f
+            finishTrackShuttle(direction)
             return
         }
         shuttleInertiaJob?.cancel()
@@ -481,28 +542,80 @@ class PlayerActivity : AppCompatActivity() {
                 previousFrameAt = now
                 shuttleLastSpeed = speed
                 applyTrackShuttleFrame(direction, speed, frameDt)
+                showShuttleSpeedIndicator(direction, speed)
                 if (t >= 1f) {
                     break
                 }
                 delay(16L)
             }
+            shuttleDisplayActive = false
+            shuttleDisplayHoldUntilUptimeMs = SystemClock.uptimeMillis() + 420L
             AudioEngine.clearTransientPlaybackSpeedOverride()
             shuttleLastSpeed = 1f
+            shuttleAppliedAudioSpeed = 1f
+            finishTrackShuttle(direction)
         }
     }
 
     private fun applyTrackShuttleFrame(direction: ShuttleDirection, speed: Float, frameMs: Long) {
         val normalizedSpeed = speed.coerceIn(1f, SHUTTLE_MAX_SPEED)
-        AudioEngine.setTransientPlaybackSpeedOverride(normalizedSpeed, preservePitch = false)
-        if (direction == ShuttleDirection.REWIND) {
-            val deltaMs = -(frameMs * (normalizedSpeed * 2.15f)).toLong().coerceAtLeast(24L)
-            AudioEngine.seekBy(deltaMs)
+        val durationMs = latestDurationMs.coerceAtLeast(1L)
+        val basePositionMs = currentDisplayedPlaybackPosition(durationMs)
+        when (direction) {
+            ShuttleDirection.REWIND -> {
+                if (shuttleAppliedAudioSpeed != 1f) {
+                    AudioEngine.clearTransientPlaybackSpeedOverride()
+                    shuttleAppliedAudioSpeed = 1f
+                }
+                val deltaMs = -(frameMs * (normalizedSpeed * 2.15f)).toLong().coerceAtLeast(24L)
+                AudioEngine.seekBy(deltaMs)
+                applyDisplayedPlaybackPosition(basePositionMs + deltaMs, durationMs)
+            }
+
+            ShuttleDirection.FORWARD -> {
+                val audioSpeed = ((normalizedSpeed.coerceAtMost(SHUTTLE_FORWARD_AUDIO_MAX_SPEED) * 20f).toInt() / 20f)
+                    .coerceAtLeast(1f)
+                if (abs(audioSpeed - shuttleAppliedAudioSpeed) >= 0.049f) {
+                    AudioEngine.setTransientPlaybackSpeedPercent((audioSpeed * 100f).toInt())
+                    shuttleAppliedAudioSpeed = audioSpeed
+                }
+                val deltaMs = (frameMs * audioSpeed).toLong().coerceAtLeast(frameMs)
+                applyDisplayedPlaybackPosition(basePositionMs + deltaMs, durationMs)
+            }
         }
+    }
+
+    private fun finishTrackShuttle(direction: ShuttleDirection?) {
+        hideShuttleSpeedIndicator()
+        if (direction == ShuttleDirection.FORWARD && !shuttleWasPlayingBeforeLongPress) {
+            AudioEngine.pause()
+        }
+        shuttleWasPlayingBeforeLongPress = false
     }
 
     private fun computeTrackShuttleSpeed(heldMs: Long): Float {
         val progress = (heldMs / SHUTTLE_ACCELERATION_MS).coerceIn(0f, 1f)
         return 1f + (SHUTTLE_MAX_SPEED - 1f) * progress.pow(1.35f)
+    }
+
+    private fun currentDisplayedPlaybackPosition(durationMs: Long): Long {
+        val maxDurationMs = durationMs.coerceAtLeast(1L)
+        val basePosition = shuttleDisplayPositionMs
+            ?: pendingSeekPositionMs
+            ?: binding.progressSlider.value.toLong()
+        return basePosition.coerceIn(0L, maxDurationMs)
+    }
+
+    private fun applyDisplayedPlaybackPosition(positionMs: Long, durationMs: Long) {
+        val maxDurationMs = durationMs.coerceAtLeast(1L)
+        val clampedPositionMs = positionMs.coerceIn(0L, maxDurationMs)
+        shuttleDisplayPositionMs = clampedPositionMs
+        pendingSeekPositionMs = clampedPositionMs
+        binding.progressSlider.value = clampedPositionMs.toFloat()
+        binding.textCurrentTime.text = clampedPositionMs.toTimeString()
+        if (binding.waveformPreviewCard.visibility == View.VISIBLE) {
+            showWaveformPreview(clampedPositionMs, maxDurationMs)
+        }
     }
 
     private fun observePlaybackState() {
@@ -693,6 +806,7 @@ class PlayerActivity : AppCompatActivity() {
         lyricJob?.cancel()
         lyricsAutoReturnJob?.cancel()
         lyricsTranslationSwitchJob?.cancel()
+        lyricsTranslationRelayoutJob?.cancel()
         lyricInertiaAnimator?.cancel()
         lyricSettleAnimator?.cancel()
         lyricLineOffsetsPx.clear()
@@ -721,9 +835,10 @@ class PlayerActivity : AppCompatActivity() {
         val dx = ((viewWidth - scaledWidth) * 0.5f).coerceAtLeast(0f)
         val dy = (viewHeight - scaledHeight).coerceAtLeast(0f)
 
-        val matrix = Matrix()
-        matrix.setScale(scale, scale)
-        matrix.postTranslate(dx, dy)
+        val matrix = Matrix().apply {
+            setScale(scale, scale)
+            postTranslate(dx, dy)
+        }
         transitionUnderlayView.imageMatrix = matrix
         if (transitionUnderlaySnapshot != null && !entering && !collapsing) {
             transitionUnderlayView.alpha = 1f
@@ -737,6 +852,7 @@ class PlayerActivity : AppCompatActivity() {
         binding.imageCover.loadArtworkOrDefault(state.artworkUri)
         val artworkKey = state.artworkUri?.toString()
         if (artworkKey != lastArtworkKey) {
+            crossfadeBackgroundArtwork()
             binding.imagePlayerBg.loadArtworkOrDefault(state.artworkUri)
             binding.imagePlayerBg.alpha = 1f
             if (entering) {
@@ -787,21 +903,37 @@ class PlayerActivity : AppCompatActivity() {
             if (pendingMatched) {
                 pendingSeekPositionMs = null
                 userSeeking = false
+                if (!shuttleDisplayActive) {
+                    shuttleDisplayPositionMs = null
+                    shuttleDisplayHoldUntilUptimeMs = 0L
+                }
             }
         }
-        if (!userSeeking && pendingSeekPositionMs == null) {
-            binding.progressSlider.value = state.positionMs.coerceIn(0L, duration).toFloat()
-            binding.textCurrentTime.text = state.positionMs.toTimeString()
+        val nowUptimeMs = SystemClock.uptimeMillis()
+        val shouldUseShuttleDisplay =
+            shuttleDisplayPositionMs != null &&
+                (shuttleDisplayActive || nowUptimeMs < shuttleDisplayHoldUntilUptimeMs)
+        val effectivePositionMs = when {
+            shouldUseShuttleDisplay -> shuttleDisplayPositionMs?.coerceIn(0L, duration) ?: state.positionMs.coerceIn(0L, duration)
+            else -> state.positionMs.coerceIn(0L, duration)
+        }
+        if (!userSeeking && pendingSeekPositionMs == null && !shouldUseShuttleDisplay) {
+            binding.progressSlider.value = effectivePositionMs.toFloat()
+            binding.textCurrentTime.text = effectivePositionMs.toTimeString()
+        } else if (!userSeeking && shouldUseShuttleDisplay) {
+            binding.progressSlider.value = effectivePositionMs.toFloat()
+            binding.textCurrentTime.text = effectivePositionMs.toTimeString()
         }
         bindLyricsForCurrentTrack(state)
         updateLyrics(
-            positionMs = state.positionMs.coerceIn(0L, duration),
+            positionMs = effectivePositionMs,
             isPlaying = state.isPlaying
         )
         bindWaveformForCurrentTrack(state)
         if (binding.waveformPreviewCard.visibility == View.VISIBLE) {
             val previewPositionMs = when {
                 userSeeking -> binding.progressSlider.value.toLong()
+                shouldUseShuttleDisplay -> effectivePositionMs
                 pendingSeekPositionMs != null -> pendingSeekPositionMs ?: state.positionMs
                 else -> state.positionMs
             }.coerceIn(0L, duration)
@@ -855,6 +987,7 @@ class PlayerActivity : AppCompatActivity() {
                 lyricsTranslationSwitchInProgress = false
             }
             AppHaptics.click(it)
+            resetLyricInertiaTransforms()
             lyricsTranslationMode = if (lyricsTranslationMode == LyricsTranslationMode.ORIGINAL_ONLY) {
                 LyricsTranslationMode.ORIGINAL_WITH_TRANSLATION
             } else {
@@ -862,6 +995,7 @@ class PlayerActivity : AppCompatActivity() {
             }
             lyricsAdapter.setTranslationMode(lyricsTranslationMode, animate = true)
             updateLyricsTranslationToggleUi()
+            scheduleLyricsTranslationRelayout()
         }
         binding.cardLyrics.setOnClickListener {
             if (!lyricsPanelVisibleBySetting || !lyricsAvailableForCurrentTrack) return@setOnClickListener
@@ -1284,6 +1418,8 @@ class PlayerActivity : AppCompatActivity() {
         }
         lyricSettleLastFrameUptimeMs = 0L
         lyricSettleAnimator = ValueAnimator.ofFloat(0f, 1f).apply {
+            val settleAnimator = this
+            var settleFinishPosted = false
             duration = 240L
             interpolator = LinearInterpolator()
             addUpdateListener { animator ->
@@ -1321,8 +1457,13 @@ class PlayerActivity : AppCompatActivity() {
                     maxOffset = max(maxOffset, abs(finalOffset))
                     maxVelocity = max(maxVelocity, abs(finalVelocity))
                 }
-                if (maxOffset < 0.06f && maxVelocity < 1.8f) {
-                    animator.end()
+                if (maxOffset < 0.06f && maxVelocity < 1.8f && !settleFinishPosted) {
+                    settleFinishPosted = true
+                    binding.recyclerLyrics.post {
+                        if (lyricSettleAnimator === settleAnimator) {
+                            settleAnimator.end()
+                        }
+                    }
                 }
             }
             doOnEnd {
@@ -2085,7 +2226,7 @@ class PlayerActivity : AppCompatActivity() {
         }
     }
 
-    private fun scrollLyricsToCurrent(animated: Boolean) {
+    private fun scrollLyricsToCurrent(animated: Boolean, allowSpringKick: Boolean = true) {
         val index = currentLyricIndex
         if (index !in activeLyrics.indices) return
         val rv = binding.recyclerLyrics
@@ -2098,7 +2239,9 @@ class PlayerActivity : AppCompatActivity() {
         if (targetView != null) {
             val dy = targetView.top - targetOffset
             if (abs(dy) <= 1) return
-            injectLyricSpringKick(dy)
+            if (allowSpringKick) {
+                injectLyricSpringKick(dy)
+            }
             val duration = (abs(dy).toFloat().pow(0.72f) * 14f + 120f)
                 .toInt()
                 .coerceIn(140, 420)
@@ -2107,7 +2250,9 @@ class PlayerActivity : AppCompatActivity() {
         }
         val anchor = lyricsLayoutManager.findFirstVisibleItemPosition().coerceAtLeast(0)
         val estimateDy = ((index - anchor) * dp(46f)).coerceIn(-dp(460f), dp(460f))
-        injectLyricSpringKick(estimateDy)
+        if (allowSpringKick) {
+            injectLyricSpringKick(estimateDy)
+        }
         val scroller = object : LinearSmoothScroller(this) {
             override fun getVerticalSnapPreference(): Int = SNAP_TO_START
 
@@ -2130,6 +2275,27 @@ class PlayerActivity : AppCompatActivity() {
             }
         }.apply { targetPosition = index }
         lyricsLayoutManager.startSmoothScroll(scroller)
+    }
+
+    private fun scheduleLyricsTranslationRelayout() {
+        lyricsTranslationRelayoutJob?.cancel()
+        lastAutoFollowedLyricIndex = -1
+        binding.recyclerLyrics.post {
+            if (!isFinishing && !isDestroyed) {
+                scrollLyricsToCurrent(animated = false)
+            }
+        }
+        lyricsTranslationRelayoutJob = lifecycleScope.launch {
+            delay(380L)
+            if (isFinishing || isDestroyed) return@launch
+            resetLyricInertiaTransforms()
+            binding.recyclerLyrics.post {
+                if (!isFinishing && !isDestroyed) {
+                    scrollLyricsToCurrent(animated = true, allowSpringKick = false)
+                    updateLyricsViewportEdgeBlur()
+                }
+            }
+        }
     }
 
     private fun injectLyricSpringKick(dy: Int) {
@@ -3304,6 +3470,94 @@ class PlayerActivity : AppCompatActivity() {
         )
     }
 
+    private fun crossfadeBackgroundArtwork() {
+        val current = binding.imagePlayerBg.drawable ?: return
+        val cloned = current.constantState?.newDrawable(resources)?.mutate() ?: return
+        backgroundCrossfadeView.animate().cancel()
+        backgroundCrossfadeView.setImageDrawable(cloned)
+        backgroundCrossfadeView.scaleType = binding.imagePlayerBg.scaleType
+        if (binding.imagePlayerBg.scaleType == ImageView.ScaleType.MATRIX) {
+            backgroundCrossfadeView.imageMatrix = Matrix(binding.imagePlayerBg.imageMatrix)
+        } else {
+            backgroundCrossfadeView.imageMatrix = Matrix()
+        }
+        backgroundCrossfadeView.visibility = View.VISIBLE
+        backgroundCrossfadeView.alpha = binding.imagePlayerBg.alpha.coerceIn(0f, 1f)
+        backgroundCrossfadeView.animate()
+            .alpha(0f)
+            .setDuration(300L)
+            .setInterpolator(standardInterpolator)
+            .withEndAction {
+                backgroundCrossfadeView.setImageDrawable(null)
+                backgroundCrossfadeView.visibility = View.GONE
+                backgroundCrossfadeView.alpha = 0f
+            }
+            .start()
+    }
+
+    private fun showShuttleSpeedIndicator(direction: ShuttleDirection, speed: Float) {
+        val label = getString(
+            R.string.player_shuttle_speed_indicator,
+            if (direction == ShuttleDirection.REWIND) {
+                getString(R.string.player_shuttle_rewind)
+            } else {
+                getString(R.string.player_shuttle_forward)
+            },
+            speed.coerceAtLeast(1f)
+        )
+        if (shuttleSpeedIndicatorView.text != label) {
+            shuttleSpeedIndicatorView.text = label
+        }
+        positionShuttleSpeedIndicator()
+        if (shuttleSpeedIndicatorView.visibility != View.VISIBLE) {
+            shuttleSpeedIndicatorView.animate().cancel()
+            shuttleSpeedIndicatorView.visibility = View.VISIBLE
+            shuttleSpeedIndicatorView.alpha = 0f
+            shuttleSpeedIndicatorView.animate()
+                .alpha(1f)
+                .setDuration(110L)
+                .setInterpolator(standardInterpolator)
+                .start()
+        } else if (shuttleSpeedIndicatorView.alpha < 1f) {
+            shuttleSpeedIndicatorView.animate().cancel()
+            shuttleSpeedIndicatorView.alpha = 1f
+        }
+    }
+
+    private fun hideShuttleSpeedIndicator() {
+        if (shuttleSpeedIndicatorView.visibility != View.VISIBLE) {
+            shuttleSpeedIndicatorView.alpha = 0f
+            shuttleSpeedIndicatorView.visibility = View.GONE
+            return
+        }
+        shuttleSpeedIndicatorView.animate().cancel()
+        shuttleSpeedIndicatorView.animate()
+            .alpha(0f)
+            .setDuration(160L)
+            .setInterpolator(standardInterpolator)
+            .withEndAction {
+                shuttleSpeedIndicatorView.visibility = View.GONE
+            }
+            .start()
+    }
+
+    private fun positionShuttleSpeedIndicator() {
+        val anchorRect = Rect()
+        binding.buttonPlayPause.getDrawingRect(anchorRect)
+        playerMaskContainer.offsetDescendantRectToMyCoords(binding.buttonPlayPause, anchorRect)
+        shuttleSpeedIndicatorView.measure(
+            View.MeasureSpec.makeMeasureSpec(playerMaskContainer.width, View.MeasureSpec.AT_MOST),
+            View.MeasureSpec.makeMeasureSpec(playerMaskContainer.height, View.MeasureSpec.AT_MOST)
+        )
+        val indicatorWidth = shuttleSpeedIndicatorView.measuredWidth
+        val maxX = (playerMaskContainer.width - indicatorWidth - dp(12f)).coerceAtLeast(dp(12f))
+        val x = (anchorRect.centerX() - indicatorWidth / 2f)
+            .coerceIn(dp(12f).toFloat(), maxX.toFloat())
+        val y = anchorRect.bottom + dp(8f).toFloat()
+        shuttleSpeedIndicatorView.x = x
+        shuttleSpeedIndicatorView.y = y
+    }
+
     private fun dp(value: Float): Int {
         return (value * resources.displayMetrics.density).toInt()
     }
@@ -3338,9 +3592,9 @@ class PlayerActivity : AppCompatActivity() {
             return
         }
         val radius = (strength.coerceIn(0, 220) / 220f) * 180f
-        binding.imagePlayerBg.setRenderEffect(
-            RenderEffect.createBlurEffect(radius, radius, Shader.TileMode.CLAMP)
-        )
+        val effect = RenderEffect.createBlurEffect(radius, radius, Shader.TileMode.CLAMP)
+        binding.imagePlayerBg.setRenderEffect(effect)
+        backgroundCrossfadeView.setRenderEffect(effect)
     }
 
     private fun ensureDynamicBackgroundScrollable() {
@@ -3361,10 +3615,15 @@ class PlayerActivity : AppCompatActivity() {
             binding.imagePlayerBg.post {
                 ensureDynamicBackgroundScrollable()
                 startBackgroundDynamicScroll()
-            }
+                }
             return
         }
-        val baseScale = max(viewWidth / drawableWidth.toFloat(), viewHeight / drawableHeight.toFloat()) * 1.18f
+        val baseScale = resolveDynamicBackgroundScale(
+            drawableWidth = drawableWidth,
+            drawableHeight = drawableHeight,
+            viewWidth = viewWidth,
+            viewHeight = viewHeight
+        )
         val scaledWidth = drawableWidth * baseScale
         val scaledHeight = drawableHeight * baseScale
         val startX = -((scaledWidth - viewWidth) * 0.08f).coerceAtLeast(0f)
@@ -3385,7 +3644,12 @@ class PlayerActivity : AppCompatActivity() {
         val drawableHeight = drawable.intrinsicHeight.takeIf { it > 0 } ?: return
         val viewWidth = binding.imagePlayerBg.width.takeIf { it > 0 } ?: return
         val viewHeight = binding.imagePlayerBg.height.takeIf { it > 0 } ?: return
-        val scale = max(viewWidth / drawableWidth.toFloat(), viewHeight / drawableHeight.toFloat()) * 1.18f
+        val scale = resolveDynamicBackgroundScale(
+            drawableWidth = drawableWidth,
+            drawableHeight = drawableHeight,
+            viewWidth = viewWidth,
+            viewHeight = viewHeight
+        )
         val scaledWidth = drawableWidth * scale
         val scaledHeight = drawableHeight * scale
         val travelX = (scaledWidth - viewWidth).coerceAtLeast(0f)
@@ -3411,6 +3675,39 @@ class PlayerActivity : AppCompatActivity() {
         backgroundScrollAnimator = null
         backgroundScrollMatrix.reset()
         binding.imagePlayerBg.imageMatrix = backgroundScrollMatrix
+    }
+
+    private fun resolveDynamicBackgroundScale(
+        drawableWidth: Int,
+        drawableHeight: Int,
+        viewWidth: Int,
+        viewHeight: Int
+    ): Float {
+        val cropScale = max(
+            viewWidth / drawableWidth.toFloat(),
+            viewHeight / drawableHeight.toFloat()
+        )
+        return cropScale * 1.18f
+    }
+
+    private fun createCenterCropMatrix(
+        drawableWidth: Int,
+        drawableHeight: Int,
+        viewWidth: Int,
+        viewHeight: Int
+    ): Matrix {
+        val scale = max(
+            viewWidth / drawableWidth.toFloat(),
+            viewHeight / drawableHeight.toFloat()
+        )
+        val scaledWidth = drawableWidth * scale
+        val scaledHeight = drawableHeight * scale
+        val dx = (viewWidth - scaledWidth) * 0.5f
+        val dy = (viewHeight - scaledHeight) * 0.5f
+        return Matrix().apply {
+            setScale(scale, scale)
+            postTranslate(dx, dy)
+        }
     }
 
     private fun playEnterAnimation() {
@@ -3675,8 +3972,6 @@ class PlayerActivity : AppCompatActivity() {
                 return
             }
             if (animate && expanded) {
-                val kick = if (mode == LyricsTranslationMode.ORIGINAL_WITH_TRANSLATION) -dp(128f) else dp(112f)
-                injectLyricSpringKick(kick)
                 notifyItemRangeChanged(0, items.size, payloadTranslationMode)
             } else {
                 notifyDataSetChanged()

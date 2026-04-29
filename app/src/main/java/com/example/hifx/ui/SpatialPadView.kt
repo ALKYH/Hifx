@@ -113,6 +113,12 @@ class SpatialPadView @JvmOverloads constructor(
     private var headRadiusCm: Float = DEFAULT_HEAD_RADIUS_CM
     private var linkedChannelSpacingCm: Int = DEFAULT_LINKED_SPACING_CM
     private val headBoundaryPath = Path()
+    private val nosePath = Path()
+    private var headGeometryDirty = true
+    private var cachedHeadCenterX = Float.NaN
+    private var cachedHeadCenterY = Float.NaN
+    private var cachedPadRadius = Float.NaN
+    private var cachedHeadRadiusPx = 0f
 
     var onSelectionChanged: ((selected: Handle, fromUser: Boolean) -> Unit)? = null
     var onPositionChanged: ((
@@ -170,6 +176,7 @@ class SpatialPadView @JvmOverloads constructor(
         val rightX = currentOutputX(rightXNorm)
         val rightZ = currentOutputZ(rightZNorm)
         controlRadiusCm = clamped
+        headGeometryDirty = true
         setHandles(leftX, leftZ, rightX, rightZ, notify)
     }
 
@@ -183,6 +190,7 @@ class SpatialPadView @JvmOverloads constructor(
             return
         }
         headRadiusCm = clamped
+        headGeometryDirty = true
         val leftX = currentOutputX(leftXNorm)
         val leftZ = currentOutputZ(leftZNorm)
         val rightX = currentOutputX(rightXNorm)
@@ -240,6 +248,7 @@ class SpatialPadView @JvmOverloads constructor(
         val cx = width / 2f
         val cy = height / 2f
         val radius = width.coerceAtMost(height) / 2f - 10f * density
+        ensureHeadGeometry(cx, cy, radius)
 
         for (i in 1..4) {
             canvas.drawCircle(cx, cy, radius * i / 4f, gridPaint)
@@ -287,29 +296,34 @@ class SpatialPadView @JvmOverloads constructor(
     }
 
     private fun drawHeadContour(canvas: Canvas, cx: Float, cy: Float, padRadius: Float) {
-        val radiusRatio = (headRadiusCm / controlRadiusCm.toFloat()).coerceIn(0.07f, 0.62f)
-        val headRadiusPx = (padRadius * radiusRatio).coerceAtLeast(8f * density)
-        val boundary = buildPolarHeadBoundaryPath(cx, cy, headRadiusPx)
-        canvas.drawPath(boundary, headFillPaint)
-        canvas.drawPath(boundary, headStrokePaint)
-        canvas.drawPath(boundary, headBoundaryPaint)
+        val headRadiusPx = cachedHeadRadiusPx
+        canvas.drawPath(headBoundaryPath, headFillPaint)
+        canvas.drawPath(headBoundaryPath, headStrokePaint)
+        canvas.drawPath(headBoundaryPath, headBoundaryPaint)
         drawHeadBoundaryTicks(canvas, cx, cy, headRadiusPx)
 
         val earOffsetX = headRadiusPx * 1.02f
         val earRadius = (headRadiusPx * 0.28f).coerceAtLeast(3f * density)
         canvas.drawCircle(cx - earOffsetX, cy, earRadius, earPaint)
         canvas.drawCircle(cx + earOffsetX, cy, earRadius, earPaint)
-
-        val nosePath = Path().apply {
-            moveTo(cx, cy - headRadiusPx * 1.08f)
-            lineTo(cx - headRadiusPx * 0.18f, cy - headRadiusPx * 0.84f)
-            moveTo(cx, cy - headRadiusPx * 1.08f)
-            lineTo(cx + headRadiusPx * 0.18f, cy - headRadiusPx * 0.84f)
-        }
         canvas.drawPath(nosePath, nosePaint)
     }
 
-    private fun buildPolarHeadBoundaryPath(cx: Float, cy: Float, radiusPx: Float): Path {
+    private fun ensureHeadGeometry(cx: Float, cy: Float, padRadius: Float) {
+        if (!headGeometryDirty && cachedHeadCenterX == cx && cachedHeadCenterY == cy && cachedPadRadius == padRadius) {
+            return
+        }
+        cachedHeadCenterX = cx
+        cachedHeadCenterY = cy
+        cachedPadRadius = padRadius
+        val radiusRatio = (headRadiusCm / controlRadiusCm.toFloat()).coerceIn(0.07f, 0.62f)
+        cachedHeadRadiusPx = (padRadius * radiusRatio).coerceAtLeast(8f * density)
+        rebuildHeadBoundaryPath(cx, cy, cachedHeadRadiusPx)
+        rebuildNosePath(cx, cy, cachedHeadRadiusPx)
+        headGeometryDirty = false
+    }
+
+    private fun rebuildHeadBoundaryPath(cx: Float, cy: Float, radiusPx: Float) {
         val segments = 96
         headBoundaryPath.reset()
         for (index in 0..segments) {
@@ -323,7 +337,14 @@ class SpatialPadView @JvmOverloads constructor(
             }
         }
         headBoundaryPath.close()
-        return headBoundaryPath
+    }
+
+    private fun rebuildNosePath(cx: Float, cy: Float, headRadiusPx: Float) {
+        nosePath.reset()
+        nosePath.moveTo(cx, cy - headRadiusPx * 1.08f)
+        nosePath.lineTo(cx - headRadiusPx * 0.18f, cy - headRadiusPx * 0.84f)
+        nosePath.moveTo(cx, cy - headRadiusPx * 1.08f)
+        nosePath.lineTo(cx + headRadiusPx * 0.18f, cy - headRadiusPx * 0.84f)
     }
 
     private fun drawHeadBoundaryTicks(canvas: Canvas, cx: Float, cy: Float, radiusPx: Float) {
@@ -546,6 +567,11 @@ class SpatialPadView @JvmOverloads constructor(
         leftZNorm = centerZ
         rightZNorm = centerZ
         invalidate()
+    }
+
+    override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
+        super.onSizeChanged(w, h, oldw, oldh)
+        headGeometryDirty = true
     }
 
     private val density: Float

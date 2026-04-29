@@ -275,6 +275,20 @@
                     android:layout_marginTop="8dp"
                     android:text="@string/settings_remember_playback_switch" />
 
+                <com.google.android.material.materialswitch.MaterialSwitch
+                    android:id="@+id/switch_remember_track"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:text="@string/settings_remember_track_switch" />
+
+                <com.google.android.material.materialswitch.MaterialSwitch
+                    android:id="@+id/switch_open_player_on_track_play"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:text="@string/settings_open_player_on_track_play_switch" />
+
                 <TextView
                     android:id="@+id/text_hi_fi_hint"
                     android:layout_width="match_parent"
@@ -566,6 +580,13 @@
                     android:layout_marginTop="8dp"
                     android:text="@string/settings_show_visualization_switch" />
 
+                <com.google.android.material.materialswitch.MaterialSwitch
+                    android:id="@+id/switch_visualization_limit_30_fps"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:text="@string/settings_visualization_limit_30fps_switch" />
+
                 <TextView
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
@@ -578,6 +599,23 @@
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:layout_marginTop="6dp" />
+
+                <TextView
+                    android:id="@+id/text_visualization_delay_value"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="10dp"
+                    android:text="@string/settings_visualization_delay_value"
+                    android:textAppearance="?attr/textAppearanceLabelLarge" />
+
+                <com.google.android.material.slider.Slider
+                    android:id="@+id/slider_visualization_delay"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="6dp"
+                    android:stepSize="1"
+                    android:valueFrom="0"
+                    android:valueTo="250" />
 
                 <TextView
                     android:id="@+id/text_visualization_hint"

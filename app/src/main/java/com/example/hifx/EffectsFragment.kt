@@ -67,6 +67,10 @@ class EffectsFragment : Fragment() {
     private var effectsPagesRow: LinearLayout? = null
     private var lastEqBottomSpacerHeight = Int.MIN_VALUE
     private var surroundGainHeaderIndicator: TextView? = null
+    private val eqBottomInsetTrackedOverlays = mutableListOf<View>()
+    private val eqBottomInsetLayoutListener = View.OnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
+        updateEqBottomSpacer()
+    }
     private var effectsMasterToggleGlow: GradientDrawable? = null
     private var effectsMasterToggleCore: GradientDrawable? = null
     private var vocalRemovalSwitch: MaterialSwitch? = null
@@ -111,6 +115,7 @@ class EffectsFragment : Fragment() {
         private const val EQ_FREQ_MAX_HZ = 20_000f
         private const val EQ_FREQ_SLIDER_MIN = 0f
         private const val EQ_FREQ_SLIDER_MAX = 1000f
+        private const val EQ_CURVE_FIXED_HEIGHT_DP = 180f
     }
 
     private val eqPointColors by lazy {
@@ -174,6 +179,7 @@ class EffectsFragment : Fragment() {
 
     override fun onDestroyView() {
         stopSpeedAdjustRepeat()
+        clearEqBottomInsetTracking()
         super.onDestroyView()
         _binding = null
     }
@@ -233,7 +239,7 @@ class EffectsFragment : Fragment() {
             )
             addView(pagesRow)
             pageCount = panels.size
-            onPageChanged = { page -> currentTabPosition = page }
+            onPageChanged = { page -> handleEffectsPageChanged(page) }
         }
         container.addView(pager)
         effectsPager = pager
@@ -278,6 +284,7 @@ class EffectsFragment : Fragment() {
                 parent = spatialParent,
                 title = getString(R.string.effects_reverb_title),
                 toggleView = binding.switchSpatialEnabled,
+                showTitle = false,
                 bodyViews = spatialParent.children.filter { child ->
                     child !== titleView && child !== binding.switchSpatialEnabled
                 }.toList(),
@@ -294,6 +301,7 @@ class EffectsFragment : Fragment() {
                 parent = surroundParent,
                 title = getString(R.string.effects_surround_mode_title),
                 toggleView = binding.switchSurroundEnabled,
+                showTitle = false,
                 bodyViews = surroundParent.children.filter { child ->
                     child !== titleView && child !== binding.switchSurroundEnabled
                 }.toList(),
@@ -310,6 +318,7 @@ class EffectsFragment : Fragment() {
                 parent = convolutionParent,
                 title = getString(R.string.effects_convolution_title),
                 toggleView = binding.switchConvolutionEnabled,
+                showTitle = false,
                 bodyViews = convolutionParent.children.filter { child ->
                     child !== titleView && child !== binding.switchConvolutionEnabled
                 }.toList(),
@@ -319,10 +328,12 @@ class EffectsFragment : Fragment() {
         }
     }
 
-        private fun installCollapsibleSection(
+    private fun installCollapsibleSection(
         parent: LinearLayout,
         title: String,
         toggleView: View?,
+        showTitle: Boolean = true,
+        clearToggleText: Boolean = false,
         fillAvailableHeight: Boolean = false,
         bodyViews: List<View>,
         startExpanded: Boolean = false,
@@ -358,17 +369,25 @@ class EffectsFragment : Fragment() {
             minimumHeight = dp(44f)
             setPadding(0, 0, 0, dp(6f))
         }
-        header.addView(TextView(requireContext()).apply {
-            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
-            text = title
-            setTextAppearance(com.google.android.material.R.style.TextAppearance_Material3_TitleMedium)
-        })
+        if (showTitle) {
+            header.addView(TextView(requireContext()).apply {
+                layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+                text = title
+                setTextAppearance(com.google.android.material.R.style.TextAppearance_Material3_TitleMedium)
+            })
+        }
         toggleView?.let {
             (it.parent as? ViewGroup)?.removeView(it)
+            if (clearToggleText && it is MaterialSwitch) {
+                it.text = ""
+            }
             header.addView(it, LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT,
+                if (showTitle) ViewGroup.LayoutParams.WRAP_CONTENT else 0,
                 ViewGroup.LayoutParams.WRAP_CONTENT
             ).apply {
+                if (!showTitle) {
+                    weight = 1f
+                }
                 marginEnd = dp(8f)
             })
         }
@@ -1442,7 +1461,22 @@ class EffectsFragment : Fragment() {
     private fun renderEffectTab(position: Int, animate: Boolean) {
         currentTabPosition = position.coerceIn(0, 2)
         effectsPager?.snapToPage(currentTabPosition, smooth = animate)
+        refreshEqSpectrumVisibility()
         updateEffectsPageHeight()
+    }
+
+    private fun handleEffectsPageChanged(page: Int) {
+        currentTabPosition = page
+        refreshEqSpectrumVisibility()
+    }
+
+    private fun refreshEqSpectrumVisibility() {
+        val binding = _binding ?: return
+        if (currentTabPosition == 0) {
+            return
+        }
+        eqSpectrumBuffer.fill(0f)
+        binding.eqCurveView.setSpectrum(eqSpectrumBuffer)
     }
 
     private fun observeEffectState() {
@@ -1454,10 +1488,21 @@ class EffectsFragment : Fragment() {
                     }
                 }
                 launch {
+                    var spectrumVisible = false
                     while (isActive) {
-                        AudioEngine.fillEqVisualizationSpectrumSnapshot(eqSpectrumBuffer)
-                        binding.eqCurveView.setSpectrum(eqSpectrumBuffer)
-                        delay(33L)
+                        if (currentTabPosition == 0) {
+                            AudioEngine.fillEqVisualizationSpectrumSnapshot(eqSpectrumBuffer)
+                            binding.eqCurveView.setSpectrum(eqSpectrumBuffer)
+                            spectrumVisible = true
+                            delay(33L)
+                        } else {
+                            if (spectrumVisible) {
+                                eqSpectrumBuffer.fill(0f)
+                                binding.eqCurveView.setSpectrum(eqSpectrumBuffer)
+                                spectrumVisible = false
+                            }
+                            delay(180L)
+                        }
                     }
                 }
             }
@@ -1610,7 +1655,6 @@ class EffectsFragment : Fragment() {
         val eqInteractive = state.enabled && state.eqEnabled
         animateAlphaIfNeeded(binding.eqCurveView, if (eqInteractive) 1f else 0.55f)
         animateAlphaIfNeeded(binding.cardEqParams, if (eqInteractive) 1f else 0.65f)
-        updateEqBottomSpacer()
         binding.buttonEqAddPoint.isEnabled = eqInteractive
         binding.buttonEqSavePreset.isEnabled = eqInteractive
         binding.buttonEqDeletePreset.isEnabled = eqInteractive
@@ -1660,10 +1704,11 @@ class EffectsFragment : Fragment() {
             binding.knobEqGain.valueTo = state.eqBandLevelMaxMb.toFloat()
         }
         binding.knobEqGain.value = gainMb.toFloat()
-        binding.panelEq.post { updateEqViewportLayout() }
     }
 
     private fun updateEqBottomSpacer() {
+        val binding = _binding ?: return
+        val density = context?.resources?.displayMetrics?.density ?: return
         val card = activity?.findViewById<View>(R.id.mini_player_card)
         val handle = activity?.findViewById<View>(R.id.view_mini_handle)
         val coverView = when {
@@ -1675,7 +1720,8 @@ class EffectsFragment : Fragment() {
         val overlayMargins = (coverView?.layoutParams as? ViewGroup.MarginLayoutParams)?.let {
             it.topMargin + it.bottomMargin
         } ?: 0
-        val targetHeight = (overlayHeight + overlayMargins + dp(8f)).coerceAtLeast(dp(28f))
+        val targetHeight = (overlayHeight + overlayMargins + (8f * density).roundToInt())
+            .coerceAtLeast((28f * density).roundToInt())
         if (lastEqBottomSpacerHeight == targetHeight) {
             return
         }
@@ -1688,52 +1734,33 @@ class EffectsFragment : Fragment() {
     }
 
     private fun setupEqBottomInsetTracking() {
-        binding.root.post { updateEqBottomSpacer() }
+        clearEqBottomInsetTracking()
+        binding.root.post {
+            if (_binding != null) {
+                updateEqBottomSpacer()
+            }
+        }
         listOfNotNull(
             activity?.findViewById<View>(R.id.mini_player_card),
             activity?.findViewById<View>(R.id.view_mini_handle)
         ).forEach { overlay ->
-            overlay.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
-                updateEqBottomSpacer()
-            }
+            overlay.addOnLayoutChangeListener(eqBottomInsetLayoutListener)
+            eqBottomInsetTrackedOverlays += overlay
         }
+    }
+
+    private fun clearEqBottomInsetTracking() {
+        eqBottomInsetTrackedOverlays.forEach { overlay ->
+            overlay.removeOnLayoutChangeListener(eqBottomInsetLayoutListener)
+        }
+        eqBottomInsetTrackedOverlays.clear()
     }
 
     private fun setupEqViewportSizing() {
-        listOf(
-            binding.effectsContainer,
-            binding.panelEq,
-            binding.cardEqParams,
-            binding.viewEqBottomSpacer,
-            binding.eqCurveView
-        ).forEach { view ->
-            view.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
-                updateEqViewportLayout()
-            }
-        }
-        binding.panelEq.post { updateEqViewportLayout() }
-    }
-
-    private fun updateEqViewportLayout() {
-        val containerHeight = binding.panelEq.height.takeIf { it > 0 }
-            ?: binding.effectsContainer.height.takeIf { it > 0 }
-            ?: return
-        val reservedHeight = binding.panelEq.children
-            .filter { child -> child !== binding.eqCurveView }
-            .sumOf { child ->
-                val params = child.layoutParams as? ViewGroup.MarginLayoutParams
-                val margins = (params?.topMargin ?: 0) + (params?.bottomMargin ?: 0)
-                val measuredHeight = when {
-                    child.visibility == View.GONE -> 0
-                    child.height > 0 -> child.height
-                    else -> child.measuredHeight
-                }
-                measuredHeight + margins
-            }
-        val targetHeight = (containerHeight - reservedHeight).coerceAtLeast(dp(180f))
         binding.eqCurveView.updateLayoutParams<LinearLayout.LayoutParams> {
-            if (height != targetHeight || weight != 0f) {
-                height = targetHeight
+            val fixedHeight = dp(EQ_CURVE_FIXED_HEIGHT_DP)
+            if (height != fixedHeight || weight != 0f) {
+                height = fixedHeight
                 weight = 0f
             }
         }
@@ -2019,7 +2046,7 @@ class EffectsFragment : Fragment() {
     private fun updateSurroundGainPanelVisibility() {
         val surroundEnabled = AudioEngine.effectsState.value.surroundMode != AudioEngine.SURROUND_MODE_STEREO
         binding.layoutSurroundGainPanel.isVisible = surroundGainPanelExpanded && surroundEnabled
-        surroundGainHeaderIndicator?.text = if (surroundGainPanelExpanded) "藚" else "藘"
+        surroundGainHeaderIndicator?.text = if (surroundGainPanelExpanded) "▾" else "▸"
     }
 
     private fun setSurroundEnabled(enabled: Boolean) {

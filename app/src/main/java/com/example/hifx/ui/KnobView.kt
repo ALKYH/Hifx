@@ -96,7 +96,6 @@ class KnobView @JvmOverloads constructor(
 
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
-        updateColors()
         val size = min(width, height).toFloat()
         val strokeWidth = size * 0.08f
         trackPaint.strokeWidth = strokeWidth
@@ -161,6 +160,15 @@ class KnobView @JvmOverloads constructor(
 
     override fun performClick(): Boolean {
         return super.performClick()
+    }
+
+    override fun setEnabled(enabled: Boolean) {
+        val changed = enabled != isEnabled
+        super.setEnabled(enabled)
+        if (changed) {
+            alpha = if (enabled) 1f else 0.45f
+            invalidate()
+        }
     }
 
     private fun updateFromUser(newValue: Float) {

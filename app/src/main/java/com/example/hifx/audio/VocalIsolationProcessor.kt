@@ -26,11 +26,205 @@ internal class VocalIsolationProcessor : BaseAudioProcessor() {
     private var vocalBandHighCutHz = 4200
 
     private var sampleRateHz = 48_000
+    private var channelCount = 2
+
+    private val kotlinFallback = KotlinVocalIsolationBackend()
+    private var nativeBackend: NativeVocalIsolationBackend? = NativeVocalIsolationBackend.createOrNull()
+
+    fun updateConfig(
+        vocalRemovalEnabled: Boolean,
+        vocalKeyShiftSemitones: Int,
+        vocalBandLowCutHz: Int,
+        vocalBandHighCutHz: Int
+    ) {
+        this.vocalRemovalEnabled = vocalRemovalEnabled
+        this.vocalKeyShiftSemitones = vocalKeyShiftSemitones.coerceIn(-24, 24)
+        val normalizedLow = vocalBandLowCutHz.coerceIn(60, 7900)
+        val normalizedHigh = vocalBandHighCutHz.coerceIn(normalizedLow + 100, 8000)
+        this.vocalBandLowCutHz = normalizedLow
+        this.vocalBandHighCutHz = normalizedHigh
+        ensureNativeBackend()?.updateConfig(
+            vocalRemovalEnabled = this.vocalRemovalEnabled,
+            vocalKeyShiftSemitones = this.vocalKeyShiftSemitones,
+            vocalBandLowCutHz = this.vocalBandLowCutHz,
+            vocalBandHighCutHz = this.vocalBandHighCutHz
+        )
+        kotlinFallback.updateConfig(
+            vocalRemovalEnabled = this.vocalRemovalEnabled,
+            vocalKeyShiftSemitones = this.vocalKeyShiftSemitones,
+            vocalBandLowCutHz = this.vocalBandLowCutHz,
+            vocalBandHighCutHz = this.vocalBandHighCutHz
+        )
+    }
+
+    override fun onConfigure(inputAudioFormat: AudioProcessor.AudioFormat): AudioProcessor.AudioFormat {
+        if (inputAudioFormat.encoding != C.ENCODING_PCM_16BIT || inputAudioFormat.channelCount != 2) {
+            return AudioProcessor.AudioFormat.NOT_SET
+        }
+        sampleRateHz = inputAudioFormat.sampleRate
+        channelCount = inputAudioFormat.channelCount
+        ensureNativeBackend()?.configure(sampleRateHz, channelCount)
+        kotlinFallback.configure(sampleRateHz)
+        return inputAudioFormat
+    }
+
+    override fun queueInput(inputBuffer: ByteBuffer) {
+        if (!inputBuffer.hasRemaining()) {
+            return
+        }
+        val inputBytes = inputBuffer.remaining()
+        val outputBuffer = replaceOutputBuffer(inputBytes)
+        inputBuffer.order(ByteOrder.LITTLE_ENDIAN)
+        outputBuffer.order(ByteOrder.LITTLE_ENDIAN)
+
+        val nativeProcessed = ensureNativeBackend()?.process(inputBuffer, outputBuffer)
+        if (nativeProcessed == true) {
+            inputBuffer.position(inputBuffer.limit())
+            outputBuffer.position(inputBytes)
+            outputBuffer.flip()
+            return
+        }
+
+        kotlinFallback.process(inputBuffer, outputBuffer)
+        outputBuffer.flip()
+    }
+
+    override fun onFlush() {
+        nativeBackend?.flush()
+        kotlinFallback.flush()
+    }
+
+    override fun onReset() {
+        vocalRemovalEnabled = false
+        vocalKeyShiftSemitones = 0
+        vocalBandLowCutHz = 140
+        vocalBandHighCutHz = 4200
+        sampleRateHz = 48_000
+        channelCount = 2
+        nativeBackend?.release()
+        nativeBackend = null
+        kotlinFallback.reset()
+    }
+
+    private fun ensureNativeBackend(): NativeVocalIsolationBackend? {
+        if (nativeBackend == null) {
+            nativeBackend = NativeVocalIsolationBackend.createOrNull()?.also { backend ->
+                backend.configure(sampleRateHz, channelCount)
+                backend.updateConfig(
+                    vocalRemovalEnabled = vocalRemovalEnabled,
+                    vocalKeyShiftSemitones = vocalKeyShiftSemitones,
+                    vocalBandLowCutHz = vocalBandLowCutHz,
+                    vocalBandHighCutHz = vocalBandHighCutHz
+                )
+            }
+        }
+        return nativeBackend
+    }
+}
+
+private class NativeVocalIsolationBackend private constructor(
+    private var handle: Long
+) {
+    fun configure(sampleRateHz: Int, channelCount: Int) {
+        if (handle == 0L) return
+        NativeVocalIsolationBridge.nativeConfigure(handle, sampleRateHz, channelCount)
+    }
+
+    fun updateConfig(
+        vocalRemovalEnabled: Boolean,
+        vocalKeyShiftSemitones: Int,
+        vocalBandLowCutHz: Int,
+        vocalBandHighCutHz: Int
+    ) {
+        if (handle == 0L) return
+        NativeVocalIsolationBridge.nativeUpdateConfig(
+            handle = handle,
+            vocalRemovalEnabled = vocalRemovalEnabled,
+            vocalKeyShiftSemitones = vocalKeyShiftSemitones,
+            vocalBandLowCutHz = vocalBandLowCutHz,
+            vocalBandHighCutHz = vocalBandHighCutHz
+        )
+    }
+
+    fun process(inputBuffer: ByteBuffer, outputBuffer: ByteBuffer): Boolean {
+        if (handle == 0L || !inputBuffer.isDirect || !outputBuffer.isDirect) {
+            return false
+        }
+        val inputBytes = inputBuffer.remaining()
+        if (inputBytes <= 0) {
+            return true
+        }
+        NativeVocalIsolationBridge.nativeProcess(handle, inputBuffer, outputBuffer, inputBytes)
+        return true
+    }
+
+    fun flush() {
+        if (handle != 0L) {
+            NativeVocalIsolationBridge.nativeFlush(handle)
+        }
+    }
+
+    fun release() {
+        val localHandle = handle
+        if (localHandle == 0L) {
+            return
+        }
+        handle = 0L
+        NativeVocalIsolationBridge.nativeRelease(localHandle)
+    }
+
+    companion object {
+        fun createOrNull(): NativeVocalIsolationBackend? {
+            if (!NativeVocalIsolationBridge.isAvailable) {
+                return null
+            }
+            val handle = runCatching { NativeVocalIsolationBridge.nativeCreate() }.getOrDefault(0L)
+            return handle.takeIf { it != 0L }?.let(::NativeVocalIsolationBackend)
+        }
+    }
+}
+
+private object NativeVocalIsolationBridge {
+    val isAvailable: Boolean by lazy {
+        runCatching {
+            System.loadLibrary("hifxaudio")
+            true
+        }.getOrDefault(false)
+    }
+
+    external fun nativeCreate(): Long
+    external fun nativeRelease(handle: Long)
+    external fun nativeConfigure(handle: Long, sampleRateHz: Int, channelCount: Int)
+    external fun nativeUpdateConfig(
+        handle: Long,
+        vocalRemovalEnabled: Boolean,
+        vocalKeyShiftSemitones: Int,
+        vocalBandLowCutHz: Int,
+        vocalBandHighCutHz: Int
+    )
+    external fun nativeProcess(handle: Long, inputBuffer: ByteBuffer, outputBuffer: ByteBuffer, inputBytes: Int)
+    external fun nativeFlush(handle: Long)
+}
+
+private class KotlinVocalIsolationBackend {
+    private var vocalRemovalEnabled = false
+    private var vocalKeyShiftSemitones = 0
+    private var vocalBandLowCutHz = 140
+    private var vocalBandHighCutHz = 4200
+    private var sampleRateHz = 48_000
     private var leftHighPass = BiquadFilter.passThrough()
     private var leftLowPass = BiquadFilter.passThrough()
     private var rightHighPass = BiquadFilter.passThrough()
     private var rightLowPass = BiquadFilter.passThrough()
     private var vocalPitchShifter = DualDelayPitchShifter(sampleRateHz)
+
+    fun configure(sampleRateHz: Int) {
+        this.sampleRateHz = sampleRateHz
+        rebuildFilters()
+        vocalPitchShifter = DualDelayPitchShifter(sampleRateHz).also {
+            it.setPitchSemitones(vocalKeyShiftSemitones)
+        }
+    }
 
     fun updateConfig(
         vocalRemovalEnabled: Boolean,
@@ -52,32 +246,12 @@ internal class VocalIsolationProcessor : BaseAudioProcessor() {
         }
     }
 
-    override fun onConfigure(inputAudioFormat: AudioProcessor.AudioFormat): AudioProcessor.AudioFormat {
-        if (inputAudioFormat.encoding != C.ENCODING_PCM_16BIT || inputAudioFormat.channelCount != 2) {
-            return AudioProcessor.AudioFormat.NOT_SET
-        }
-        sampleRateHz = inputAudioFormat.sampleRate
-        rebuildFilters()
-        vocalPitchShifter = DualDelayPitchShifter(sampleRateHz).also {
-            it.setPitchSemitones(vocalKeyShiftSemitones)
-        }
-        return inputAudioFormat
-    }
-
-    override fun queueInput(inputBuffer: ByteBuffer) {
-        if (!inputBuffer.hasRemaining()) {
-            return
-        }
-        val outputBuffer = replaceOutputBuffer(inputBuffer.remaining())
-        inputBuffer.order(ByteOrder.LITTLE_ENDIAN)
-        outputBuffer.order(ByteOrder.LITTLE_ENDIAN)
-
+    fun process(inputBuffer: ByteBuffer, outputBuffer: ByteBuffer) {
         val keyShift = vocalKeyShiftSemitones
         val shouldRemoveOriginalVocal = vocalRemovalEnabled || keyShift != 0
         val shouldReinjectShiftedVocal = keyShift != 0
         if (!shouldRemoveOriginalVocal && !shouldReinjectShiftedVocal) {
             outputBuffer.put(inputBuffer)
-            outputBuffer.flip()
             return
         }
 
@@ -104,14 +278,13 @@ internal class VocalIsolationProcessor : BaseAudioProcessor() {
             outputBuffer.putShort(floatToShort(outputLeft))
             outputBuffer.putShort(floatToShort(outputRight))
         }
-        outputBuffer.flip()
     }
 
-    override fun onFlush() {
+    fun flush() {
         resetDspState()
     }
 
-    override fun onReset() {
+    fun reset() {
         vocalRemovalEnabled = false
         vocalKeyShiftSemitones = 0
         vocalBandLowCutHz = 140
@@ -133,8 +306,6 @@ internal class VocalIsolationProcessor : BaseAudioProcessor() {
     }
 
     private fun rebuildFilters() {
-        // Voice fundamentals + presence mostly sit in this band. Keep the cut fairly broad
-        // so centered vocals are isolated without chewing too much into cymbals or kick.
         val lowCut = vocalBandLowCutHz.toFloat().coerceIn(60f, 7900f)
         val highCut = vocalBandHighCutHz.toFloat().coerceIn(lowCut + 100f, 8000f)
         leftHighPass = BiquadFilter.highPass(sampleRateHz.toFloat(), lowCut, 0.707f)

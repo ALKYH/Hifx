@@ -7,11 +7,13 @@ import android.graphics.Paint
 import android.graphics.Path
 import android.graphics.RectF
 import android.graphics.Shader
+import android.os.SystemClock
 import android.util.AttributeSet
 import android.view.View
 import com.example.hifx.audio.AudioEngine
 import com.example.hifx.audio.TopBarVisualizationMode
 import com.google.android.material.color.MaterialColors
+import java.util.ArrayDeque
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.pow
@@ -108,19 +110,55 @@ class TopBarVisualizerView @JvmOverloads constructor(
     private var analogRightVelocity = 0f
     private var lastFrameNanos = 0L
     private var useIsoDacTheme = false
+    private var limitFpsTo30 = false
+    private var visualizationDelayMs = 0
+    private var frameCallbackPosted = false
+    private val levelMeterHistory = ArrayDeque<TimedSnapshot>()
+    private val waveformHistory = ArrayDeque<TimedSnapshot>()
+    private val barsHistory = ArrayDeque<TimedSnapshot>()
+    private val frameInvalidateRunnable = Runnable {
+        frameCallbackPosted = false
+        if (isAttachedToWindow && visibility == View.VISIBLE && visualizationEnabled) {
+            invalidate()
+        }
+    }
 
-    fun applySettings(enabled: Boolean, mode: TopBarVisualizationMode) {
-        val changed = visualizationEnabled != enabled || visualizationMode != mode
+    private data class TimedSnapshot(
+        val timestampMs: Long,
+        val values: FloatArray
+    )
+
+    fun applySettings(
+        enabled: Boolean,
+        mode: TopBarVisualizationMode,
+        limitFpsTo30: Boolean = false,
+        visualizationDelayMs: Int = 0
+    ) {
+        val changed =
+            visualizationEnabled != enabled ||
+                visualizationMode != mode ||
+                this.limitFpsTo30 != limitFpsTo30 ||
+                this.visualizationDelayMs != visualizationDelayMs
         val modeChanged = visualizationMode != mode
+        val delayChanged = this.visualizationDelayMs != visualizationDelayMs
         visualizationEnabled = enabled
         visualizationMode = mode
+        this.limitFpsTo30 = limitFpsTo30
+        this.visualizationDelayMs = visualizationDelayMs.coerceIn(0, 250)
         visibility = if (enabled) View.VISIBLE else View.GONE
-        if (modeChanged) {
+        if (modeChanged || delayChanged) {
             resetAnalogMotion()
+            clearSnapshotHistory()
             requestLayout()
         }
+        if (!enabled) {
+            removeCallbacks(frameInvalidateRunnable)
+            frameCallbackPosted = false
+            clearSnapshotHistory()
+        }
         if (changed && enabled) {
-            postInvalidateOnAnimation()
+            invalidate()
+            scheduleNextFrame()
         } else if (changed) {
             invalidate()
         }
@@ -179,8 +217,44 @@ class TopBarVisualizerView @JvmOverloads constructor(
             TopBarVisualizationMode.WAVEFORM -> drawWaveform(canvas)
             TopBarVisualizationMode.BARS -> drawBars(canvas)
         }
-        if (isAttachedToWindow && visibility == View.VISIBLE) {
-            postInvalidateOnAnimation()
+        scheduleNextFrame()
+    }
+
+    override fun onAttachedToWindow() {
+        super.onAttachedToWindow()
+        if (visualizationEnabled) {
+            scheduleNextFrame()
+        }
+    }
+
+    override fun onDetachedFromWindow() {
+        removeCallbacks(frameInvalidateRunnable)
+        frameCallbackPosted = false
+        super.onDetachedFromWindow()
+    }
+
+    override fun onVisibilityChanged(changedView: View, visibility: Int) {
+        super.onVisibilityChanged(changedView, visibility)
+        if (changedView !== this) {
+            return
+        }
+        if (visibility == View.VISIBLE && visualizationEnabled) {
+            scheduleNextFrame()
+        } else {
+            removeCallbacks(frameInvalidateRunnable)
+            frameCallbackPosted = false
+        }
+    }
+
+    private fun scheduleNextFrame() {
+        if (!visualizationEnabled || !isAttachedToWindow || visibility != View.VISIBLE || frameCallbackPosted) {
+            return
+        }
+        frameCallbackPosted = true
+        if (limitFpsTo30) {
+            postOnAnimationDelayed(frameInvalidateRunnable, 33L)
+        } else {
+            postOnAnimation(frameInvalidateRunnable)
         }
     }
 
@@ -198,7 +272,7 @@ class TopBarVisualizerView @JvmOverloads constructor(
     }
 
     private fun drawLevelMeter(canvas: Canvas) {
-        AudioEngine.fillTopBarVisualizationSnapshot(TopBarVisualizationMode.LEVEL_METER, meterSnapshot)
+        fillDelayedSnapshot(TopBarVisualizationMode.LEVEL_METER, meterSnapshot, levelMeterHistory)
         val leftLevel = meterSnapshot.getOrElse(0) { 0f }.coerceIn(0f, 1f)
         val rightLevel = meterSnapshot.getOrElse(1) { leftLevel }.coerceIn(0f, 1f)
         val innerPadding = 1.5f * density
@@ -244,7 +318,7 @@ class TopBarVisualizerView @JvmOverloads constructor(
     }
 
     private fun drawAnalogMeter(canvas: Canvas) {
-        AudioEngine.fillTopBarVisualizationSnapshot(TopBarVisualizationMode.ANALOG_METER, meterSnapshot)
+        fillDelayedSnapshot(TopBarVisualizationMode.ANALOG_METER, meterSnapshot, levelMeterHistory)
         val (leftLevel, rightLevel) = resolveAnalogStereoLevels(
             meterSnapshot.getOrElse(0) { 0f },
             meterSnapshot.getOrElse(1) { meterSnapshot.getOrElse(0) { 0f } }
@@ -323,7 +397,7 @@ class TopBarVisualizerView @JvmOverloads constructor(
 
     private fun drawWaveform(canvas: Canvas) {
         waveformSnapshot = ensureBuffer(waveformSnapshot, max(96, width / max(1, dp(3f))))
-        AudioEngine.fillTopBarVisualizationSnapshot(TopBarVisualizationMode.WAVEFORM, waveformSnapshot)
+        fillDelayedSnapshot(TopBarVisualizationMode.WAVEFORM, waveformSnapshot, waveformHistory)
         if (waveformSnapshot.isEmpty()) {
             return
         }
@@ -347,7 +421,7 @@ class TopBarVisualizerView @JvmOverloads constructor(
 
     private fun drawBars(canvas: Canvas) {
         barSnapshot = ensureBuffer(barSnapshot, 48)
-        AudioEngine.fillTopBarVisualizationSnapshot(TopBarVisualizationMode.BARS, barSnapshot)
+        fillDelayedSnapshot(TopBarVisualizationMode.BARS, barSnapshot, barsHistory)
         if (barSnapshot.isEmpty()) {
             return
         }
@@ -366,6 +440,62 @@ class TopBarVisualizerView @JvmOverloads constructor(
             val capTop = (top - 1.6f * density).coerceAtLeast(contentBounds.top + innerPadding)
             canvas.drawRect(left, capTop, left + barWidth, capTop + 1.2f * density, capPaint)
         }
+    }
+
+    private fun fillDelayedSnapshot(
+        mode: TopBarVisualizationMode,
+        target: FloatArray,
+        history: ArrayDeque<TimedSnapshot>
+    ) {
+        if (target.isEmpty()) {
+            return
+        }
+        val latest = FloatArray(target.size)
+        AudioEngine.fillTopBarVisualizationSnapshot(mode, latest)
+        val nowMs = SystemClock.uptimeMillis()
+        history.addLast(TimedSnapshot(nowMs, latest))
+        pruneSnapshotHistory(history, nowMs)
+        val delayed = resolveDelayedSnapshot(history, nowMs)
+        target.fill(0f)
+        val source = delayed?.values ?: latest
+        System.arraycopy(source, 0, target, 0, min(target.size, source.size))
+    }
+
+    private fun resolveDelayedSnapshot(
+        history: ArrayDeque<TimedSnapshot>,
+        nowMs: Long
+    ): TimedSnapshot? {
+        if (history.isEmpty()) {
+            return null
+        }
+        if (visualizationDelayMs <= 0) {
+            return history.lastOrNull()
+        }
+        val cutoff = nowMs - visualizationDelayMs
+        var candidate: TimedSnapshot? = null
+        history.forEach { snapshot ->
+            if (snapshot.timestampMs <= cutoff) {
+                candidate = snapshot
+            }
+        }
+        return candidate ?: history.firstOrNull()
+    }
+
+    private fun pruneSnapshotHistory(history: ArrayDeque<TimedSnapshot>, nowMs: Long) {
+        val retentionMs = visualizationDelayMs + 400L
+        while (history.size > 2) {
+            val head = history.firstOrNull() ?: break
+            if (nowMs - head.timestampMs <= retentionMs) {
+                break
+            }
+            history.removeFirst()
+        }
+    }
+
+    private fun clearSnapshotHistory() {
+        levelMeterHistory.clear()
+        waveformHistory.clear()
+        barsHistory.clear()
     }
 
     private fun applyDisplayPalette() {

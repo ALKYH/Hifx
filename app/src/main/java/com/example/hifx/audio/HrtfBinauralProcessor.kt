@@ -86,6 +86,37 @@ private data class HrtfCoefficients(
     val rightNotchMix: Float
 )
 
+private data class HrtfRuntimeCache(
+    val surroundMode: Int,
+    val frontLeftCoeff: HrtfCoefficients,
+    val frontRightCoeff: HrtfCoefficients,
+    val centerCoeff: HrtfCoefficients?,
+    val lfeCoeff: HrtfCoefficients?,
+    val surroundLeftCoeff: HrtfCoefficients?,
+    val surroundRightCoeff: HrtfCoefficients?,
+    val rearLeftCoeff: HrtfCoefficients?,
+    val rearRightCoeff: HrtfCoefficients?,
+    val frontLeftChannelGain: Float,
+    val frontRightChannelGain: Float,
+    val centerChannelGain: Float,
+    val lfeChannelGain: Float,
+    val surroundLeftChannelGain: Float,
+    val surroundRightChannelGain: Float,
+    val rearLeftChannelGain: Float,
+    val rearRightChannelGain: Float,
+    val blend: Float,
+    val headroom: Float,
+    val bassManagementCoeff: Float,
+    val centerHpCoeff: Float,
+    val centerLpCoeff: Float,
+    val surroundHpCoeff: Float,
+    val surroundLpCoeff: Float,
+    val rearHpCoeff: Float,
+    val rearLpCoeff: Float,
+    val sideGain: Float,
+    val modeCompensation: Float
+)
+
 private class SourceRenderState {
     val sourceDelay = FloatArray(8192)
     val leftHistory = FloatArray(4096)
@@ -151,6 +182,13 @@ internal class HrtfBinauralProcessor : BaseAudioProcessor() {
     private var rearBandLowPassState = 0f
     private var limiterGain = 1f
     private var wetAutoGain = 1f
+    @Volatile
+    private var configuredSampleRate = 0
+    @Volatile
+    private var configVersion = 0
+    private var cachedRuntimeVersion = -1
+    private var cachedRuntimeSampleRate = 0
+    private var runtimeCache: HrtfRuntimeCache? = null
 
     fun updateConfig(newConfig: HrtfRenderConfig) {
         val previousConfig = config
@@ -190,9 +228,13 @@ internal class HrtfBinauralProcessor : BaseAudioProcessor() {
             rearRightGain = newConfig.rearRightGain.coerceIn(0f, 2f)
         )
         config = updated
+        configVersion += 1
         val nextProcessing = updated.enabled && updated.spatialEnabled && updated.blend > 0.001f
         if (previousProcessing != nextProcessing) {
             pendingStateReset = true
+        }
+        if (configuredSampleRate > 0) {
+            rebuildRuntimeCache(updated, configuredSampleRate)
         }
     }
 
@@ -200,6 +242,8 @@ internal class HrtfBinauralProcessor : BaseAudioProcessor() {
         if (inputAudioFormat.encoding != C.ENCODING_PCM_16BIT || inputAudioFormat.channelCount != 2) {
             return AudioProcessor.AudioFormat.NOT_SET
         }
+        configuredSampleRate = inputAudioFormat.sampleRate
+        rebuildRuntimeCache(config, configuredSampleRate)
         return inputAudioFormat
     }
 
@@ -230,101 +274,45 @@ internal class HrtfBinauralProcessor : BaseAudioProcessor() {
             outputBuffer.flip()
             return
         }
-
-        val stereoLeftCoeff = buildCoefficients(
-            xNorm = localConfig.leftXNorm,
-            yNorm = localConfig.leftYNorm,
-            zNorm = localConfig.leftZNorm,
-            config = localConfig,
-            sampleRate = inputAudioFormat.sampleRate,
-            sourceDistanceMeters = localConfig.leftDistanceMeters
-        )
-        val stereoRightCoeff = buildCoefficients(
-            xNorm = localConfig.rightXNorm,
-            yNorm = localConfig.rightYNorm,
-            zNorm = localConfig.rightZNorm,
-            config = localConfig,
-            sampleRate = inputAudioFormat.sampleRate,
-            sourceDistanceMeters = localConfig.rightDistanceMeters
-        )
-        val surroundMode = localConfig.surroundMode.coerceIn(0, 2)
-        val frontDistanceMeters = (
-            (localConfig.leftDistanceMeters + localConfig.rightDistanceMeters) * 0.5f
-            ).coerceIn(0.07f, MAX_SOURCE_DISTANCE_METERS)
-        fun coeffFromAzimuth(
-            azimuthDeg: Float,
-            yNorm: Float = 0f,
-            distanceMeters: Float = frontDistanceMeters
-        ): HrtfCoefficients {
-            val radians = Math.toRadians(azimuthDeg.toDouble())
-            return buildCoefficients(
-                xNorm = sin(radians).toFloat().coerceIn(-1f, 1f),
-                yNorm = yNorm.coerceIn(-1f, 1f),
-                zNorm = cos(radians).toFloat().coerceIn(-1f, 1f),
-                config = localConfig,
-                sampleRate = inputAudioFormat.sampleRate,
-                sourceDistanceMeters = distanceMeters.coerceIn(0.07f, MAX_SOURCE_DISTANCE_METERS)
-            )
+        val runtime = ensureRuntimeCache(localConfig) ?: run {
+            outputBuffer.put(inputBuffer)
+            outputBuffer.flip()
+            return
         }
 
-        val frontLeftCoeff = if (surroundMode == 0) stereoLeftCoeff else coeffFromAzimuth(-30f)
-        val frontRightCoeff = if (surroundMode == 0) stereoRightCoeff else coeffFromAzimuth(30f)
-        val centerCoeff = if (surroundMode != 0) {
-            coeffFromAzimuth(0f, yNorm = 0.02f, distanceMeters = frontDistanceMeters * 0.98f)
-        } else {
-            null
-        }
-        val lfeCoeff = if (surroundMode != 0) {
-            coeffFromAzimuth(0f, yNorm = -0.12f, distanceMeters = frontDistanceMeters * 1.06f)
-        } else {
-            null
-        }
-        val sideAzimuth = if (surroundMode == 1) 110f else 90f
-        val surroundLeftCoeff = if (surroundMode != 0) {
-            coeffFromAzimuth(-sideAzimuth, distanceMeters = frontDistanceMeters * 1.08f)
-        } else {
-            null
-        }
-        val surroundRightCoeff = if (surroundMode != 0) {
-            coeffFromAzimuth(sideAzimuth, distanceMeters = frontDistanceMeters * 1.08f)
-        } else {
-            null
-        }
-        val rearLeftCoeff = if (surroundMode == 2) {
-            coeffFromAzimuth(-150f, distanceMeters = frontDistanceMeters * 1.14f)
-        } else {
-            null
-        }
-        val rearRightCoeff = if (surroundMode == 2) {
-            coeffFromAzimuth(150f, distanceMeters = frontDistanceMeters * 1.14f)
-        } else {
-            null
-        }
-        val frontLeftChannelGain = localConfig.frontLeftGain.coerceIn(0f, 2f)
-        val frontRightChannelGain = localConfig.frontRightGain.coerceIn(0f, 2f)
-        val centerChannelGain = localConfig.centerGain.coerceIn(0f, 2f)
-        val lfeChannelGain = localConfig.lfeGain.coerceIn(0f, 2f)
-        val surroundLeftChannelGain = localConfig.surroundLeftGain.coerceIn(0f, 2f)
-        val surroundRightChannelGain = localConfig.surroundRightGain.coerceIn(0f, 2f)
-        val rearLeftChannelGain = localConfig.rearLeftGain.coerceIn(0f, 2f)
-        val rearRightChannelGain = localConfig.rearRightGain.coerceIn(0f, 2f)
-
-        val blend = localConfig.blend.coerceIn(0f, 1f)
+        val surroundMode = runtime.surroundMode
+        val frontLeftCoeff = runtime.frontLeftCoeff
+        val frontRightCoeff = runtime.frontRightCoeff
+        val centerCoeff = runtime.centerCoeff
+        val lfeCoeff = runtime.lfeCoeff
+        val surroundLeftCoeff = runtime.surroundLeftCoeff
+        val surroundRightCoeff = runtime.surroundRightCoeff
+        val rearLeftCoeff = runtime.rearLeftCoeff
+        val rearRightCoeff = runtime.rearRightCoeff
+        val frontLeftChannelGain = runtime.frontLeftChannelGain
+        val frontRightChannelGain = runtime.frontRightChannelGain
+        val centerChannelGain = runtime.centerChannelGain
+        val lfeChannelGain = runtime.lfeChannelGain
+        val surroundLeftChannelGain = runtime.surroundLeftChannelGain
+        val surroundRightChannelGain = runtime.surroundRightChannelGain
+        val rearLeftChannelGain = runtime.rearLeftChannelGain
+        val rearRightChannelGain = runtime.rearRightChannelGain
+        val blend = runtime.blend
         val wetSourceGain = 0.62f
-        val headroom = (1f - 0.26f * blend).coerceIn(0.68f, 1f)
+        val headroom = runtime.headroom
         val limiterThreshold = 0.90f
         val limiterRelease = 0.0042f
         val wetLimiterThreshold = 0.72f
         val wetLimiterAttack = 0.22f
         val wetLimiterRelease = 0.0018f
-        val sampleRate = inputAudioFormat.sampleRate
-        val bassManagementCoeff = if (surroundMode != 0) onePoleCoefficient(90f, sampleRate) else 0f
-        val centerHpCoeff = if (surroundMode != 0) onePoleCoefficient(140f, sampleRate) else 0f
-        val centerLpCoeff = if (surroundMode != 0) onePoleCoefficient(6800f, sampleRate) else 0f
-        val surroundHpCoeff = if (surroundMode != 0) onePoleCoefficient(180f, sampleRate) else 0f
-        val surroundLpCoeff = if (surroundMode != 0) onePoleCoefficient(7200f, sampleRate) else 0f
-        val rearHpCoeff = if (surroundMode != 0) onePoleCoefficient(220f, sampleRate) else 0f
-        val rearLpCoeff = if (surroundMode != 0) onePoleCoefficient(5600f, sampleRate) else 0f
+        val sampleRate = configuredSampleRate.coerceAtLeast(1)
+        val bassManagementCoeff = runtime.bassManagementCoeff
+        val centerHpCoeff = runtime.centerHpCoeff
+        val centerLpCoeff = runtime.centerLpCoeff
+        val surroundHpCoeff = runtime.surroundHpCoeff
+        val surroundLpCoeff = runtime.surroundLpCoeff
+        val rearHpCoeff = runtime.rearHpCoeff
+        val rearLpCoeff = runtime.rearLpCoeff
         while (inputBuffer.remaining() >= 4) {
             val inLeft = shortToFloat(inputBuffer.short)
             val inRight = shortToFloat(inputBuffer.short)
@@ -397,7 +385,7 @@ internal class HrtfBinauralProcessor : BaseAudioProcessor() {
                 mixSpeaker(frontRightIn, frontRightCoeff, rightSourceState, 0.66f * frontRightChannelGain)
                 mixSpeaker(centerIn, centerCoeff, centerSourceState, 0.56f * centerChannelGain)
                 mixSpeaker(lfeIn, lfeCoeff, lfeSourceState, 0.34f * lfeChannelGain)
-                val sideGain = if (surroundMode == 2) 0.36f else 0.50f
+                val sideGain = runtime.sideGain
                 mixSpeaker(
                     surroundLeftIn,
                     surroundLeftCoeff,
@@ -415,7 +403,7 @@ internal class HrtfBinauralProcessor : BaseAudioProcessor() {
                     mixSpeaker(rearRightIn, rearRightCoeff, rearRightState, 0.30f * rearRightChannelGain)
                 }
 
-                val modeCompensation = if (surroundMode == 2) 0.62f else 0.70f
+                val modeCompensation = runtime.modeCompensation
                 wetOutLeft = accumulatorLeft * wetSourceGain * modeCompensation
                 wetOutRight = accumulatorRight * wetSourceGain * modeCompensation
             }
@@ -472,6 +460,131 @@ internal class HrtfBinauralProcessor : BaseAudioProcessor() {
         resetDynamicsState()
         wasProcessing = false
         pendingStateReset = false
+        configuredSampleRate = 0
+        cachedRuntimeVersion = -1
+        cachedRuntimeSampleRate = 0
+        runtimeCache = null
+    }
+
+    private fun ensureRuntimeCache(localConfig: HrtfRenderConfig): HrtfRuntimeCache? {
+        val sampleRate = configuredSampleRate
+        if (sampleRate <= 0) {
+            return null
+        }
+        if (cachedRuntimeVersion != configVersion || cachedRuntimeSampleRate != sampleRate || runtimeCache == null) {
+            rebuildRuntimeCache(localConfig, sampleRate)
+        }
+        return runtimeCache
+    }
+
+    private fun rebuildRuntimeCache(localConfig: HrtfRenderConfig, sampleRate: Int) {
+        if (sampleRate <= 0) {
+            runtimeCache = null
+            cachedRuntimeVersion = -1
+            cachedRuntimeSampleRate = 0
+            return
+        }
+        val surroundMode = localConfig.surroundMode.coerceIn(0, 2)
+        val stereoLeftCoeff = buildCoefficients(
+            xNorm = localConfig.leftXNorm,
+            yNorm = localConfig.leftYNorm,
+            zNorm = localConfig.leftZNorm,
+            config = localConfig,
+            sampleRate = sampleRate,
+            sourceDistanceMeters = localConfig.leftDistanceMeters
+        )
+        val stereoRightCoeff = buildCoefficients(
+            xNorm = localConfig.rightXNorm,
+            yNorm = localConfig.rightYNorm,
+            zNorm = localConfig.rightZNorm,
+            config = localConfig,
+            sampleRate = sampleRate,
+            sourceDistanceMeters = localConfig.rightDistanceMeters
+        )
+        val frontDistanceMeters = (
+            (localConfig.leftDistanceMeters + localConfig.rightDistanceMeters) * 0.5f
+            ).coerceIn(0.07f, MAX_SOURCE_DISTANCE_METERS)
+        fun coeffFromAzimuth(
+            azimuthDeg: Float,
+            yNorm: Float = 0f,
+            distanceMeters: Float = frontDistanceMeters
+        ): HrtfCoefficients {
+            val radians = Math.toRadians(azimuthDeg.toDouble())
+            return buildCoefficients(
+                xNorm = sin(radians).toFloat().coerceIn(-1f, 1f),
+                yNorm = yNorm.coerceIn(-1f, 1f),
+                zNorm = cos(radians).toFloat().coerceIn(-1f, 1f),
+                config = localConfig,
+                sampleRate = sampleRate,
+                sourceDistanceMeters = distanceMeters.coerceIn(0.07f, MAX_SOURCE_DISTANCE_METERS)
+            )
+        }
+
+        val frontLeftCoeff = if (surroundMode == 0) stereoLeftCoeff else coeffFromAzimuth(-30f)
+        val frontRightCoeff = if (surroundMode == 0) stereoRightCoeff else coeffFromAzimuth(30f)
+        val centerCoeff = if (surroundMode != 0) {
+            coeffFromAzimuth(0f, yNorm = 0.02f, distanceMeters = frontDistanceMeters * 0.98f)
+        } else {
+            null
+        }
+        val lfeCoeff = if (surroundMode != 0) {
+            coeffFromAzimuth(0f, yNorm = -0.12f, distanceMeters = frontDistanceMeters * 1.06f)
+        } else {
+            null
+        }
+        val sideAzimuth = if (surroundMode == 1) 110f else 90f
+        val surroundLeftCoeff = if (surroundMode != 0) {
+            coeffFromAzimuth(-sideAzimuth, distanceMeters = frontDistanceMeters * 1.08f)
+        } else {
+            null
+        }
+        val surroundRightCoeff = if (surroundMode != 0) {
+            coeffFromAzimuth(sideAzimuth, distanceMeters = frontDistanceMeters * 1.08f)
+        } else {
+            null
+        }
+        val rearLeftCoeff = if (surroundMode == 2) {
+            coeffFromAzimuth(-150f, distanceMeters = frontDistanceMeters * 1.14f)
+        } else {
+            null
+        }
+        val rearRightCoeff = if (surroundMode == 2) {
+            coeffFromAzimuth(150f, distanceMeters = frontDistanceMeters * 1.14f)
+        } else {
+            null
+        }
+        runtimeCache = HrtfRuntimeCache(
+            surroundMode = surroundMode,
+            frontLeftCoeff = frontLeftCoeff,
+            frontRightCoeff = frontRightCoeff,
+            centerCoeff = centerCoeff,
+            lfeCoeff = lfeCoeff,
+            surroundLeftCoeff = surroundLeftCoeff,
+            surroundRightCoeff = surroundRightCoeff,
+            rearLeftCoeff = rearLeftCoeff,
+            rearRightCoeff = rearRightCoeff,
+            frontLeftChannelGain = localConfig.frontLeftGain.coerceIn(0f, 2f),
+            frontRightChannelGain = localConfig.frontRightGain.coerceIn(0f, 2f),
+            centerChannelGain = localConfig.centerGain.coerceIn(0f, 2f),
+            lfeChannelGain = localConfig.lfeGain.coerceIn(0f, 2f),
+            surroundLeftChannelGain = localConfig.surroundLeftGain.coerceIn(0f, 2f),
+            surroundRightChannelGain = localConfig.surroundRightGain.coerceIn(0f, 2f),
+            rearLeftChannelGain = localConfig.rearLeftGain.coerceIn(0f, 2f),
+            rearRightChannelGain = localConfig.rearRightGain.coerceIn(0f, 2f),
+            blend = localConfig.blend.coerceIn(0f, 1f),
+            headroom = (1f - 0.26f * localConfig.blend.coerceIn(0f, 1f)).coerceIn(0.68f, 1f),
+            bassManagementCoeff = if (surroundMode != 0) onePoleCoefficient(90f, sampleRate) else 0f,
+            centerHpCoeff = if (surroundMode != 0) onePoleCoefficient(140f, sampleRate) else 0f,
+            centerLpCoeff = if (surroundMode != 0) onePoleCoefficient(6800f, sampleRate) else 0f,
+            surroundHpCoeff = if (surroundMode != 0) onePoleCoefficient(180f, sampleRate) else 0f,
+            surroundLpCoeff = if (surroundMode != 0) onePoleCoefficient(7200f, sampleRate) else 0f,
+            rearHpCoeff = if (surroundMode != 0) onePoleCoefficient(220f, sampleRate) else 0f,
+            rearLpCoeff = if (surroundMode != 0) onePoleCoefficient(5600f, sampleRate) else 0f,
+            sideGain = if (surroundMode == 2) 0.36f else 0.50f,
+            modeCompensation = if (surroundMode == 2) 0.62f else 0.70f
+        )
+        cachedRuntimeVersion = configVersion
+        cachedRuntimeSampleRate = sampleRate
     }
 
     private fun clearInternalState() {

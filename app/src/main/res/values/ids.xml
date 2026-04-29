@@ -2,6 +2,8 @@
 <resources>
     <item name="tag_artwork_request_uri" type="id" />
     <item name="tag_artwork_applied_uri" type="id" />
+    <item name="tag_artwork_decode_max_px" type="id" />
+    <item name="tag_artwork_decode_rgb565" type="id" />
     <item name="tag_lyric_is_current" type="id" />
     <item name="tag_lyric_distance" type="id" />
 </resources>

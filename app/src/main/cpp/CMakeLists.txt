@@ -23,6 +23,7 @@ add_library(
     native_top_bar_visualizer.cpp
     native_usb_backend.cpp
     native_resampler.cpp
+    native_vocal_isolation.cpp
 )
 
 target_include_directories(

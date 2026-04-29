@@ -151,10 +151,9 @@
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="4dp"
-                android:visibility="gone"
                 android:text="@string/effects_eq_hint_compact"
-                android:textAppearance="?attr/textAppearanceBodySmall" />
-
+                android:textAppearance="?attr/textAppearanceBodySmall"
+                android:visibility="gone" />
 
             <LinearLayout
                 android:layout_width="match_parent"
@@ -174,9 +173,9 @@
                         android:id="@+id/input_eq_preset_name"
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
-                        android:paddingStart="10dp"
                         android:ellipsize="end"
                         android:maxLines="1"
+                        android:paddingStart="10dp"
                         android:singleLine="true" />
                 </com.google.android.material.textfield.TextInputLayout>
 
@@ -201,7 +200,7 @@
             <LinearLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_marginTop="4dp"
+                android:layout_marginTop="6dp"
                 android:gravity="center_vertical"
                 android:orientation="horizontal">
 
@@ -220,8 +219,8 @@
                     style="@style/Widget.Material3.Button.OutlinedButton"
                     android:layout_width="40dp"
                     android:layout_height="40dp"
-                    android:insetTop="0dp"
                     android:insetBottom="0dp"
+                    android:insetTop="0dp"
                     android:minWidth="40dp"
                     android:text="+" />
 
@@ -236,28 +235,26 @@
             </LinearLayout>
 
             <com.example.hifx.ui.EqCurveView
-                    android:id="@+id/eq_curve_view"
-                    android:layout_width="match_parent"
-                    android:layout_height="0dp"
-                    android:layout_marginTop="6dp"
-                    android:layout_weight="1"
-                    android:background="@drawable/bg_eq_curve_panel"/>
+                android:id="@+id/eq_curve_view"
+                android:layout_width="match_parent"
+                android:layout_height="0dp"
+                android:layout_marginTop="6dp"
+                android:background="@drawable/bg_eq_curve_panel" />
 
             <LinearLayout
                 android:id="@+id/layout_eq_point_dots"
                 android:layout_width="0dp"
                 android:layout_height="0dp"
-                android:visibility="gone"
-                android:orientation="horizontal" />
+                android:orientation="horizontal"
+                android:visibility="gone" />
 
             <LinearLayout
                 android:id="@+id/card_eq_params"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_marginTop="6dp"
+                android:baselineAligned="false"
                 android:gravity="center"
-                android:orientation="horizontal"
-                android:baselineAligned="false">
+                android:orientation="horizontal">
 
                 <LinearLayout
                     android:layout_width="0dp"
@@ -395,10 +392,24 @@
                             android:orientation="vertical"
                             android:padding="14dp">
 
+                            <TextView
+                                android:layout_width="match_parent"
+                                android:layout_height="wrap_content"
+                                android:text="@string/effects_reverb_title"
+                                android:textAppearance="?attr/textAppearanceLabelLarge" />
+
+                            <TextView
+                                android:layout_width="match_parent"
+                                android:layout_height="wrap_content"
+                                android:layout_marginTop="4dp"
+                                android:text="@string/effects_spatial_mode_hint"
+                                android:textAppearance="?attr/textAppearanceBodySmall" />
+
                             <com.google.android.material.materialswitch.MaterialSwitch
                                 android:id="@+id/switch_spatial_enabled"
                                 android:layout_width="match_parent"
                                 android:layout_height="wrap_content"
+                                android:layout_marginTop="6dp"
                                 android:text="@string/effects_spatial_enabled" />
 
                             <TextView

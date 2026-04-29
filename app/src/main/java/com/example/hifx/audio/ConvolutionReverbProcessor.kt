@@ -74,7 +74,8 @@ internal class ConvolutionReverbProcessor : BaseAudioProcessor() {
         if (!inputBuffer.hasRemaining()) {
             return
         }
-        val outputBuffer = replaceOutputBuffer(inputBuffer.remaining())
+        val inputBytes = inputBuffer.remaining()
+        val outputBuffer = replaceOutputBuffer(inputBytes)
         inputBuffer.order(ByteOrder.LITTLE_ENDIAN)
         outputBuffer.order(ByteOrder.LITTLE_ENDIAN)
 
@@ -92,7 +93,7 @@ internal class ConvolutionReverbProcessor : BaseAudioProcessor() {
             val nativeProcessed = ensureNativeBackend()?.process(inputBuffer, outputBuffer)
             if (nativeProcessed != null) {
                 inputBuffer.position(inputBuffer.limit())
-                outputBuffer.position(outputBuffer.capacity())
+                outputBuffer.position(inputBytes)
                 realtimeMeter = nativeProcessed
                 outputBuffer.flip()
                 return

@@ -53,7 +53,14 @@ class MainActivity : AppCompatActivity() {
         private const val EXTRA_TARGET_NAME = "extra_target_name"
         private const val TARGET_ARTIST = "artist"
         private const val TARGET_ALBUM = "album"
-
+        private const val DETAIL_BACK_STACK_NAME = "library_detail"
+        private const val TAG_PLAYBACK = "nav_playback"
+        private const val TAG_EFFECTS = "nav_effects"
+        private const val TAG_SETTINGS = "nav_settings"
+        private const val TAG_ALBUM_DETAIL_PREFIX = "detail_album:"
+        private const val TAG_ARTIST_DETAIL_PREFIX = "detail_artist:"
+        private const val ARG_ALBUM_NAME = "arg_album_name"
+        private const val ARG_ARTIST_NAME = "arg_artist_name"
         fun createOpenArtistIntent(context: android.content.Context, artistName: String): Intent {
             return Intent(context, MainActivity::class.java)
                 .putExtra(EXTRA_OPEN_TARGET, TARGET_ARTIST)
@@ -87,6 +94,7 @@ class MainActivity : AppCompatActivity() {
     private var miniHorizontalSwitchTriggered = false
     private var bottomNavHiddenForKeyboard = false
     private var streamBannerVisible = false
+    private var streamBannerAffectsLayout = false
     private val standardInterpolator = FastOutSlowInInterpolator()
     private var latestSettingsState: SettingsUiState = SettingsUiState()
     private var currentBannerTextModel: BannerTextModel? = null
@@ -118,7 +126,6 @@ class MainActivity : AppCompatActivity() {
             val oldHeight = oldBottom - oldTop
             if (newHeight > 0 && newHeight != oldHeight && newHeight != lastBannerMeasuredHeight) {
                 lastBannerMeasuredHeight = newHeight
-                updateFragmentBottomInset(animated = true)
             }
         }
         binding.root.post {
@@ -302,9 +309,54 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun renderStreamBanner(state: PlaybackUiState) {
-        val showInfoLayer = latestSettingsState.showStreamInfoEnabled
-        val showVisualizerLayer = latestSettingsState.showVisualizationEnabled && state.hasMedia
         val card = binding.cardStreamBanner
+        val bannerState = buildStreamBannerState(state)
+        val shouldShow = bannerState.shouldShow
+
+        if (shouldShow) {
+            streamBannerAffectsLayout = true
+            applyStreamBannerState(bannerState, animateText = streamBannerVisible && card.visibility == View.VISIBLE)
+            if (streamBannerVisible) {
+                updateFragmentBottomInset(animated = true)
+                return
+            }
+            streamBannerVisible = true
+            card.animate().cancel()
+            card.visibility = View.VISIBLE
+            card.alpha = 0f
+            card.translationY = -dp(4f).toFloat()
+            card.animate()
+                .alpha(1f)
+                .translationY(0f)
+                .setInterpolator(standardInterpolator)
+                .setDuration(180L)
+                .start()
+            card.post { updateFragmentBottomInset(animated = true) }
+            return
+        }
+
+        if (!streamBannerVisible) {
+            card.visibility = View.GONE
+            currentBannerTextModel = null
+            streamBannerAffectsLayout = false
+            updateFragmentBottomInset(animated = true)
+            return
+        }
+
+        animateHideStreamBanner()
+    }
+
+    private data class StreamBannerState(
+        val shouldShow: Boolean,
+        val textModel: BannerTextModel?,
+        val showVisualizerLayer: Boolean,
+        val useDirectDacTheme: Boolean
+    )
+
+    private fun buildStreamBannerState(state: PlaybackUiState): StreamBannerState {
+        val showInfoLayer = latestSettingsState.showStreamInfoEnabled
+        val showVisualizerLayer =
+            latestSettingsState.showVisualizationEnabled && state.hasMedia && state.playWhenReady
         val useDirectDacTheme = state.streamInfoUseIsoDacTheme && latestSettingsState.directDacGoldThemeEnabled
         val accent = if (useDirectDacTheme) {
             0xFF111111.toInt()
@@ -324,56 +376,57 @@ class MainActivity : AppCompatActivity() {
         }
         val effectiveTextModel = if (showInfoLayer) incomingTextModel ?: lastStableBannerTextModel else null
         val shouldShow = (showVisualizerLayer || effectiveTextModel != null) && state.hasMedia
+        return StreamBannerState(
+            shouldShow = shouldShow,
+            textModel = effectiveTextModel,
+            showVisualizerLayer = showVisualizerLayer,
+            useDirectDacTheme = useDirectDacTheme
+        )
+    }
 
-        if (effectiveTextModel != null) {
+    private fun applyStreamBannerState(state: StreamBannerState, animateText: Boolean) {
+        state.textModel?.let { model ->
             updateBannerTextContent(
-                model = effectiveTextModel,
-                animate = streamBannerVisible && card.visibility == View.VISIBLE
+                model = model,
+                animate = animateText
             )
         }
-        binding.layoutStreamBannerText.visibility = if (effectiveTextModel != null) View.VISIBLE else View.GONE
+        binding.layoutStreamBannerText.visibility = if (state.textModel != null) View.VISIBLE else View.GONE
         binding.viewStreamBannerVisualizer.applySettings(
-            enabled = showVisualizerLayer,
-            mode = latestSettingsState.topBarVisualizationMode
+            enabled = state.showVisualizerLayer,
+            mode = latestSettingsState.topBarVisualizationMode,
+            limitFpsTo30 = latestSettingsState.visualizationFpsLimit30Enabled,
+            visualizationDelayMs = latestSettingsState.visualizationDelayMs
         )
-        binding.viewStreamBannerVisualizer.setIsoDacTheme(useDirectDacTheme)
-        applyTopChromeTheme(useDirectDacTheme)
+        binding.viewStreamBannerVisualizer.setIsoDacTheme(state.useDirectDacTheme)
+        applyTopChromeTheme(state.useDirectDacTheme)
+    }
 
-        if (streamBannerVisible == shouldShow) {
-            if (!shouldShow) {
-                card.visibility = View.GONE
-                currentBannerTextModel = null
-            }
-            updateFragmentBottomInset(animated = true)
-            return
-        }
-        streamBannerVisible = shouldShow
+    private fun animateHideStreamBanner() {
+        val card = binding.cardStreamBanner
+        streamBannerVisible = false
+        binding.layoutStreamBannerText.visibility = View.GONE
+        binding.viewStreamBannerVisualizer.applySettings(
+            enabled = false,
+            mode = latestSettingsState.topBarVisualizationMode,
+            limitFpsTo30 = latestSettingsState.visualizationFpsLimit30Enabled,
+            visualizationDelayMs = latestSettingsState.visualizationDelayMs
+        )
         card.animate().cancel()
-        if (shouldShow) {
-            card.visibility = View.VISIBLE
-            card.alpha = 0f
-            card.translationY = -dp(4f).toFloat()
-            card.animate()
-                .alpha(1f)
-                .translationY(0f)
-                .setInterpolator(standardInterpolator)
-                .setDuration(180L)
-                .start()
-            card.post { updateFragmentBottomInset(animated = true) }
-        } else {
-            card.animate()
-                .alpha(0f)
-                .translationY(-dp(4f).toFloat())
-                .setInterpolator(standardInterpolator)
-                .setDuration(140L)
-                .withEndAction {
-                    card.visibility = View.GONE
-                    card.alpha = 1f
-                    card.translationY = 0f
-                    updateFragmentBottomInset(animated = true)
-                }
-                .start()
-        }
+        card.animate()
+            .alpha(0f)
+            .translationY(-dp(4f).toFloat())
+            .setInterpolator(standardInterpolator)
+            .setDuration(140L)
+            .withEndAction {
+                streamBannerAffectsLayout = false
+                card.visibility = View.GONE
+                card.alpha = 1f
+                card.translationY = 0f
+                currentBannerTextModel = null
+                updateFragmentBottomInset(animated = true)
+            }
+            .start()
     }
 
     private fun createBannerTextModel(
@@ -658,13 +711,20 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun resolveVisibleBannerInset(): Int {
+        if (!streamBannerAffectsLayout) {
+            return 0
+        }
         val banner = binding.cardStreamBanner
         if (banner.visibility != View.VISIBLE) {
             return 0
         }
         val lp = banner.layoutParams as? ViewGroup.MarginLayoutParams
         val topMargin = lp?.topMargin ?: 0
-        val height = banner.height.takeIf { it > 0 } ?: banner.measuredHeight.takeIf { it > 0 } ?: 0
+        val height = maxOf(
+            banner.height.takeIf { it > 0 } ?: 0,
+            banner.measuredHeight.takeIf { it > 0 } ?: 0,
+            lastBannerMeasuredHeight
+        )
         return (topMargin + height).coerceAtLeast(0)
     }
 
@@ -1013,17 +1073,17 @@ class MainActivity : AppCompatActivity() {
     private fun navigateByItem(itemId: Int): Boolean {
         return when (itemId) {
             R.id.navigation_playback -> {
-                navigateTo(PlaybackFragment(), R.string.page_playback)
+                navigateTo(PlaybackFragment(), R.string.page_playback, TAG_PLAYBACK)
                 true
             }
 
             R.id.navigation_effects -> {
-                navigateTo(EffectsFragment(), R.string.page_effects)
+                navigateTo(EffectsFragment(), R.string.page_effects, TAG_EFFECTS)
                 true
             }
 
             R.id.navigation_settings -> {
-                navigateTo(SettingsFragment(), R.string.page_settings)
+                navigateTo(SettingsFragment(), R.string.page_settings, TAG_SETTINGS)
                 true
             }
 
@@ -1031,11 +1091,18 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun navigateTo(fragment: Fragment, titleRes: Int) {
+    private fun navigateTo(fragment: Fragment, titleRes: Int, tag: String) {
         setTopBarTitle(getString(titleRes))
+        supportFragmentManager.popBackStack(DETAIL_BACK_STACK_NAME, FragmentManager.POP_BACK_STACK_INCLUSIVE)
+        val currentFragment = supportFragmentManager.findFragmentById(R.id.fragment_container)
+        if (currentFragment?.tag == tag) {
+            setBottomNavHiddenForKeyboard(false)
+            binding.fragmentContainer.post { updateFragmentBottomInset(animated = false) }
+            return
+        }
         supportFragmentManager.beginTransaction()
             .setReorderingAllowed(true)
-            .replace(R.id.fragment_container, fragment)
+            .replace(R.id.fragment_container, fragment, tag)
             .commit()
         setBottomNavHiddenForKeyboard(false)
         binding.fragmentContainer.post { updateFragmentBottomInset(animated = false) }
@@ -1100,12 +1167,12 @@ class MainActivity : AppCompatActivity() {
         }
         return when (target) {
             TARGET_ARTIST -> {
-                openExternalDetailFromPlaybackRoot(ArtistDetailFragment.newInstance(name), name)
+                openArtistDetail(name)
                 true
             }
 
             TARGET_ALBUM -> {
-                openExternalDetailFromPlaybackRoot(AlbumDetailFragment.newInstance(name), name)
+                openAlbumDetail(name)
                 true
             }
 
@@ -1113,13 +1180,38 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun openExternalDetailFromPlaybackRoot(detailFragment: Fragment, title: String) {
+    fun openArtistDetail(artistName: String) {
+        openLibraryDetail(
+            detailFragment = ArtistDetailFragment.newInstance(artistName),
+            title = artistName,
+            detailTag = TAG_ARTIST_DETAIL_PREFIX + artistName
+        )
+    }
+
+    fun openAlbumDetail(albumName: String) {
+        openLibraryDetail(
+            detailFragment = AlbumDetailFragment.newInstance(albumName),
+            title = albumName,
+            detailTag = TAG_ALBUM_DETAIL_PREFIX + albumName
+        )
+    }
+
+    private fun openLibraryDetail(detailFragment: Fragment, title: String, detailTag: String) {
         val fm = supportFragmentManager
-        fm.popBackStack(null, FragmentManager.POP_BACK_STACK_INCLUSIVE)
+        val currentFragment = fm.findFragmentById(R.id.fragment_container)
+        if (isSameDetailFragment(currentFragment, detailTag, title)) {
+            binding.bottomNav.menu.findItem(R.id.navigation_playback).isChecked = true
+            setTopBarTitle(title)
+            setBottomNavHiddenForKeyboard(false)
+            binding.fragmentContainer.post { updateFragmentBottomInset(animated = false) }
+            return
+        }
+
+        fm.popBackStack(DETAIL_BACK_STACK_NAME, FragmentManager.POP_BACK_STACK_INCLUSIVE)
         if (fm.findFragmentById(R.id.fragment_container) !is PlaybackFragment) {
             fm.beginTransaction()
                 .setReorderingAllowed(true)
-                .replace(R.id.fragment_container, PlaybackFragment())
+                .replace(R.id.fragment_container, PlaybackFragment(), TAG_PLAYBACK)
                 .commit()
             fm.executePendingTransactions()
         }
@@ -1127,11 +1219,22 @@ class MainActivity : AppCompatActivity() {
         setTopBarTitle(title)
         fm.beginTransaction()
             .setReorderingAllowed(true)
-            .replace(R.id.fragment_container, detailFragment)
-            .addToBackStack(null)
+            .replace(R.id.fragment_container, detailFragment, detailTag)
+            .addToBackStack(DETAIL_BACK_STACK_NAME)
             .commit()
         setBottomNavHiddenForKeyboard(false)
         binding.fragmentContainer.post { updateFragmentBottomInset(animated = false) }
+    }
+
+    private fun isSameDetailFragment(fragment: Fragment?, detailTag: String, title: String): Boolean {
+        if (fragment?.tag != detailTag) {
+            return false
+        }
+        return when (fragment) {
+            is AlbumDetailFragment -> fragment.arguments?.getString(ARG_ALBUM_NAME) == title
+            is ArtistDetailFragment -> fragment.arguments?.getString(ARG_ARTIST_NAME) == title
+            else -> false
+        }
     }
 
     fun setTopBarTitle(title: CharSequence) {
